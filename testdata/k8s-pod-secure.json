@@ -1,0 +1,53 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "web-app",
+    "namespace": "production",
+    "labels": {
+      "app": "web",
+      "env": "prod"
+    },
+    "createdAt": "2024-06-15T10:30:00Z"
+  },
+  "spec": {
+    "replicas": 3,
+    "containers": [
+      {
+        "name": "web",
+        "image": "gcr.io/my-project/web-app:v1.2.3",
+        "resources": {
+          "limits": {
+            "memory": "256Mi",
+            "cpu": "500m"
+          },
+          "requests": {
+            "memory": "128Mi",
+            "cpu": "250m"
+          }
+        },
+        "securityContext": {
+          "privileged": false,
+          "runAsNonRoot": true
+        }
+      },
+      {
+        "name": "sidecar",
+        "image": "gcr.io/my-project/sidecar:v1.0.0",
+        "resources": {
+          "limits": {
+            "memory": "64Mi",
+            "cpu": "100m"
+          },
+          "requests": {
+            "memory": "32Mi",
+            "cpu": "50m"
+          }
+        },
+        "securityContext": {
+          "privileged": false
+        }
+      }
+    ]
+  }
+}

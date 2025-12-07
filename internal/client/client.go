@@ -1,0 +1,338 @@
+// internal/client/client.go
+// Package client provides the Q Policy Agent HTTP client library.
+package client
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"time"
+)
+
+// Client is the Q Policy Agent HTTP client.
+type Client struct {
+	baseURL    string
+	httpClient *http.Client
+}
+
+// Config holds client configuration.
+type Config struct {
+	Address string
+	Timeout time.Duration
+}
+
+// NewClient creates a new HTTP client.
+func NewClient(cfg Config) (*Client, error) {
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+
+	// Ensure address has scheme
+	baseURL := cfg.Address
+	if baseURL == "" {
+		baseURL = "http://localhost:8080"
+	}
+
+	return &Client{
+		baseURL: baseURL,
+		httpClient: &http.Client{
+			Timeout: timeout,
+		},
+	}, nil
+}
+
+// Close closes the client (no-op for HTTP client).
+func (c *Client) Close() error {
+	return nil
+}
+
+// EvaluateOptions configures evaluation behavior.
+type EvaluateOptions struct {
+	Policies      []string
+	Namespace     string
+	Trace         bool
+	IncludePassed bool
+	Strict        bool
+	RequestID     string // Optional request ID for audit correlation
+}
+
+// EvaluateResult is the evaluation result.
+type EvaluateResult struct {
+	Decision  string       `json:"decision"`
+	RequestID string       `json:"request_id"`
+	Results   []RuleResult `json:"results"`
+	Metrics   Metrics      `json:"metrics"`
+}
+
+// RuleResult is a single rule result.
+type RuleResult struct {
+	PolicyName      string `json:"policy_name"`
+	PolicyNamespace string `json:"policy_namespace"`
+	RuleID          string `json:"rule_id"`
+	Description     string `json:"description"`
+	Severity        string `json:"severity"`
+	Passed          bool   `json:"passed"`
+	Message         string `json:"message,omitempty"`
+}
+
+// Metrics contains evaluation metrics.
+type Metrics struct {
+	EvaluationTimeNs  int64 `json:"evaluation_time_ns"`
+	PoliciesEvaluated int   `json:"policies_evaluated"`
+	RulesEvaluated    int   `json:"rules_evaluated"`
+}
+
+// Evaluate evaluates input against policies.
+func (c *Client) Evaluate(ctx context.Context, input map[string]interface{}, opts EvaluateOptions) (*EvaluateResult, error) {
+	reqBody := map[string]interface{}{
+		"input":          input,
+		"namespace":      opts.Namespace,
+		"policies":       opts.Policies,
+		"trace":          opts.Trace,
+		"include_passed": opts.IncludePassed,
+		"strict":         opts.Strict,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/evaluate", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Set request ID if provided
+	if opts.RequestID != "" {
+		req.Header.Set("X-Request-Id", opts.RequestID)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("making request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("server error (%d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var result EvaluateResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// EvaluateFile evaluates a JSON file against policies.
+func (c *Client) EvaluateFile(ctx context.Context, path string, opts EvaluateOptions) (*EvaluateResult, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading file: %w", err)
+	}
+
+	var input map[string]interface{}
+	if err := json.Unmarshal(data, &input); err != nil {
+		return nil, fmt.Errorf("parsing JSON: %w", err)
+	}
+
+	return c.Evaluate(ctx, input, opts)
+}
+
+// ValidateResult is the validation result.
+type ValidateResult struct {
+	Valid    bool              `json:"valid"`
+	Errors   []ValidationError `json:"errors,omitempty"`
+	Warnings []ValidationError `json:"warnings,omitempty"`
+}
+
+// ValidationError is a validation error.
+type ValidationError struct {
+	Message string `json:"message"`
+	Code    string `json:"code,omitempty"`
+	Line    int    `json:"line,omitempty"`
+	Column  int    `json:"column,omitempty"`
+}
+
+// Validate validates a policy.
+func (c *Client) Validate(ctx context.Context, policy string) (*ValidateResult, error) {
+	reqBody := map[string]interface{}{
+		"policy": policy,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/validate", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("making request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("server error (%d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var result ValidateResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// PolicyInfo contains policy information.
+type PolicyInfo struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	RuleCount int    `json:"rule_count"`
+}
+
+// ListPolicies lists all policies.
+func (c *Client) ListPolicies(ctx context.Context, namespace string) ([]PolicyInfo, error) {
+	url := c.baseURL + "/v1/policies"
+	if namespace != "" {
+		url += "?namespace=" + namespace
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("making request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("server error (%d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var result struct {
+		Policies []PolicyInfo `json:"policies"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return result.Policies, nil
+}
+
+// DeletePolicy deletes a policy.
+func (c *Client) DeletePolicy(ctx context.Context, name, namespace string) (bool, error) {
+	url := fmt.Sprintf("%s/v1/policies?name=%s&namespace=%s", c.baseURL, name, namespace)
+
+	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	if err != nil {
+		return false, fmt.Errorf("creating request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("making request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return false, fmt.Errorf("server error (%d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var result struct {
+		Deleted bool `json:"deleted"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return result.Deleted, nil
+}
+
+// HealthResult is the health check result.
+type HealthResult struct {
+	Healthy bool   `json:"healthy"`
+	Version string `json:"version"`
+	Uptime  string `json:"uptime"`
+}
+
+// Health checks the server health.
+func (c *Client) Health(ctx context.Context) (*HealthResult, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/health", nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("making request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("server error (%d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var result HealthResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// ReloadResult is the policy reload result.
+type ReloadResult struct {
+	Success        bool   `json:"success"`
+	PoliciesLoaded int    `json:"policies_loaded"`
+	ReloadTimeMs   int64  `json:"reload_time_ms"`
+	PolicyDir      string `json:"policy_dir"`
+	Error          string `json:"error,omitempty"`
+}
+
+// ReloadPolicies reloads policies from the configured directory.
+func (c *Client) ReloadPolicies(ctx context.Context) (*ReloadResult, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/policies/reload", nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("making request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result ReloadResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK && result.Error == "" {
+		result.Success = false
+		result.Error = fmt.Sprintf("server returned status %d", resp.StatusCode)
+	}
+
+	return &result, nil
+}

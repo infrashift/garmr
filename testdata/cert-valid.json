@@ -1,0 +1,9 @@
+{
+  "kind": "certificate",
+  "name": "my-certificate",
+  "expiresAt": "2026-06-15T10:30:00Z",
+  "metadata": {
+    "name": "my-certificate",
+    "createdAt": "2024-06-15T10:30:00Z"
+  }
+}

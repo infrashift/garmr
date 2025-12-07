@@ -1,0 +1,31 @@
+{{ .FrontMatter }}# {{ .Policy.Name }}
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+{{ if .Policy.Description }}
+{{ .Policy.Description }}
+{{ end }}
+
+## Overview
+
+| Property | Value |
+|----------|-------|
+| Namespace | `{{ .Policy.Namespace }}` |
+| Version | {{ .Policy.Version }} |
+| Environment | {{ .Policy.Target.Environment }} |
+
+## Rules
+
+{{ range .Policy.Rules }}
+### {{ .ID }}
+
+:::{{ if eq .Severity "critical" }}danger{{ else if eq .Severity "high" }}warning{{ else }}info{{ end }}[{{ .Severity | title }}]
+{{ if .Description }}{{ .Description }}{{ end }}
+:::
+
+{{ if .Remediation }}
+**Remediation:** {{ .Remediation }}
+{{ end }}
+
+{{ end }}

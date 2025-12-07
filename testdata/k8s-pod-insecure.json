@@ -1,0 +1,31 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "insecure-app",
+    "namespace": "production",
+    "labels": {},
+    "createdAt": "2023-06-15T10:30:00Z"
+  },
+  "spec": {
+    "replicas": 1,
+    "containers": [
+      {
+        "name": "web",
+        "image": "docker.io/randomuser/app:latest",
+        "securityContext": {
+          "privileged": true
+        }
+      },
+      {
+        "name": "sidecar",
+        "image": "unauthorized-registry.com/image:v1.0.0",
+        "resources": {
+          "limits": {
+            "memory": "64Mi"
+          }
+        }
+      }
+    ]
+  }
+}

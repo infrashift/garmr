@@ -1,0 +1,32 @@
+{{ .FrontMatter }}import RuleBadge from '../../components/RuleBadge.astro';
+import PolicyMeta from '../../components/PolicyMeta.astro';
+
+# {{ .Policy.Name }}
+
+<PolicyMeta 
+  namespace="{{ .Policy.Namespace }}"
+  version="{{ .Policy.Version }}"
+  environment="{{ .Policy.Target.Environment }}"
+  ruleCount={{ len .Policy.Rules }}
+/>
+
+{{ if .Policy.Description }}
+## Description
+
+{{ .Policy.Description }}
+{{ end }}
+
+## Rules
+
+{{ range .Policy.Rules }}
+<RuleBadge id="{{ .ID }}" severity="{{ .Severity }}" />
+
+{{ if .Description }}{{ .Description }}{{ end }}
+
+{{ if .Remediation }}
+:::tip[Remediation]
+{{ .Remediation }}
+:::
+{{ end }}
+
+{{ end }}

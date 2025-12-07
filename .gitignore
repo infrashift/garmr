@@ -1,0 +1,4 @@
+bin/
+out/
+q-audit/
+q-server.config.yaml

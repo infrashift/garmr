@@ -1,0 +1,12 @@
+{
+  "kind": "autoscaler",
+  "name": "my-autoscaler",
+  "spec": {
+    "minReplicas": 2,
+    "maxReplicas": 10,
+    "resources": {
+      "requests": {"memory": 128},
+      "limits": {"memory": 256}
+    }
+  }
+}

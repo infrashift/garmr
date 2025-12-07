@@ -1,0 +1,363 @@
+syntax = "proto3";
+
+package q.policy.v1;
+
+option go_package = "github.com/yourorg/q-policy-agent/api/proto;policypb";
+
+import "google/api/annotations.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// PolicyService is the primary API for policy evaluation
+service PolicyService {
+  // Evaluate checks input against loaded policies
+  rpc Evaluate(EvaluateRequest) returns (EvaluateResponse) {
+    option (google.api.http) = {
+      post: "/v1/evaluate"
+      body: "*"
+    };
+  }
+
+  // EvaluateStream allows streaming multiple inputs
+  rpc EvaluateStream(stream EvaluateRequest) returns (stream EvaluateResponse);
+
+  // Validate checks if a policy is syntactically and semantically correct
+  rpc Validate(ValidateRequest) returns (ValidateResponse) {
+    option (google.api.http) = {
+      post: "/v1/validate"
+      body: "*"
+    };
+  }
+
+  // Compile pre-compiles policies for faster evaluation
+  rpc Compile(CompileRequest) returns (CompileResponse) {
+    option (google.api.http) = {
+      post: "/v1/compile"
+      body: "*"
+    };
+  }
+}
+
+// PolicyManagementService handles policy lifecycle
+service PolicyManagementService {
+  // ListPolicies returns all loaded policies
+  rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse) {
+    option (google.api.http) = {
+      get: "/v1/policies"
+    };
+  }
+
+  // GetPolicy returns a specific policy by name
+  rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse) {
+    option (google.api.http) = {
+      get: "/v1/policies/{namespace}/{name}"
+    };
+  }
+
+  // PutPolicy creates or updates a policy
+  rpc PutPolicy(PutPolicyRequest) returns (PutPolicyResponse) {
+    option (google.api.http) = {
+      put: "/v1/policies/{namespace}/{name}"
+      body: "*"
+    };
+  }
+
+  // DeletePolicy removes a policy
+  rpc DeletePolicy(DeletePolicyRequest) returns (DeletePolicyResponse) {
+    option (google.api.http) = {
+      delete: "/v1/policies/{namespace}/{name}"
+    };
+  }
+
+  // ReloadPolicies forces a reload from configured sources
+  rpc ReloadPolicies(ReloadPoliciesRequest) returns (ReloadPoliciesResponse) {
+    option (google.api.http) = {
+      post: "/v1/policies:reload"
+    };
+  }
+}
+
+// DataService manages external data sources
+service DataService {
+  // PutData upserts data at a path
+  rpc PutData(PutDataRequest) returns (PutDataResponse) {
+    option (google.api.http) = {
+      put: "/v1/data/{path=**}"
+      body: "data"
+    };
+  }
+
+  // GetData retrieves data at a path
+  rpc GetData(GetDataRequest) returns (GetDataResponse) {
+    option (google.api.http) = {
+      get: "/v1/data/{path=**}"
+    };
+  }
+
+  // DeleteData removes data at a path
+  rpc DeleteData(DeleteDataRequest) returns (DeleteDataResponse) {
+    option (google.api.http) = {
+      delete: "/v1/data/{path=**}"
+    };
+  }
+}
+
+// HealthService for operational readiness
+service HealthService {
+  rpc Health(HealthRequest) returns (HealthResponse) {
+    option (google.api.http) = {
+      get: "/health"
+    };
+  }
+
+  rpc Ready(ReadyRequest) returns (ReadyResponse) {
+    option (google.api.http) = {
+      get: "/ready"
+    };
+  }
+}
+
+// === Request/Response Messages ===
+
+message EvaluateRequest {
+  // Input is the data to evaluate against policies
+  google.protobuf.Struct input = 1;
+  
+  // Policies to evaluate (empty = all applicable)
+  repeated string policy_names = 2;
+  
+  // Namespace scope
+  string namespace = 3;
+  
+  // Options for evaluation
+  EvaluateOptions options = 4;
+}
+
+message EvaluateOptions {
+  // Return full trace for debugging
+  bool trace = 1;
+  
+  // Return all results including passes
+  bool include_passed = 2;
+  
+  // Strict mode fails on any warning
+  bool strict = 3;
+  
+  // Instrument for performance metrics
+  bool instrument = 4;
+  
+  // Override dry_run setting
+  optional bool dry_run = 5;
+}
+
+message EvaluateResponse {
+  // Overall decision
+  Decision decision = 1;
+  
+  // Individual rule results
+  repeated RuleResult results = 2;
+  
+  // Metrics if instrumentation enabled
+  Metrics metrics = 3;
+  
+  // Trace if requested
+  repeated TraceEvent trace = 4;
+}
+
+enum Decision {
+  DECISION_UNSPECIFIED = 0;
+  DECISION_ALLOW = 1;
+  DECISION_DENY = 2;
+  DECISION_WARN = 3;
+}
+
+message RuleResult {
+  string policy_name = 1;
+  string policy_namespace = 2;
+  string rule_id = 3;
+  string rule_description = 4;
+  Severity severity = 5;
+  bool passed = 6;
+  string message = 7;
+  repeated Binding bindings = 8;  // Variable bindings from match
+}
+
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  SEVERITY_INFO = 1;
+  SEVERITY_LOW = 2;
+  SEVERITY_MEDIUM = 3;
+  SEVERITY_HIGH = 4;
+  SEVERITY_CRITICAL = 5;
+}
+
+message Binding {
+  string name = 1;
+  google.protobuf.Value value = 2;
+}
+
+message Metrics {
+  int64 evaluation_time_ns = 1;
+  int32 policies_evaluated = 2;
+  int32 rules_evaluated = 3;
+  int64 compile_time_ns = 4;
+}
+
+message TraceEvent {
+  google.protobuf.Timestamp timestamp = 1;
+  string operation = 2;
+  string location = 3;
+  string message = 4;
+  google.protobuf.Struct locals = 5;
+}
+
+message ValidateRequest {
+  // Policy content in CUE format
+  string policy = 1;
+  
+  // Filename for error reporting
+  string filename = 2;
+}
+
+message ValidateResponse {
+  bool valid = 1;
+  repeated ValidationError errors = 2;
+  repeated ValidationError warnings = 3;
+}
+
+message ValidationError {
+  string message = 1;
+  Position position = 2;
+  string code = 3;
+}
+
+message Position {
+  string filename = 1;
+  int32 line = 2;
+  int32 column = 3;
+}
+
+message CompileRequest {
+  repeated PolicySource policies = 1;
+}
+
+message PolicySource {
+  string name = 1;
+  string namespace = 2;
+  string content = 3;  // CUE source
+}
+
+message CompileResponse {
+  bool success = 1;
+  repeated ValidationError errors = 2;
+  bytes bundle = 3;  // Compiled bundle for caching
+  string bundle_hash = 4;
+}
+
+// Policy Management Messages
+
+message ListPoliciesRequest {
+  string namespace = 1;  // Empty = all namespaces
+  map<string, string> labels = 2;
+}
+
+message ListPoliciesResponse {
+  repeated PolicyInfo policies = 1;
+}
+
+message PolicyInfo {
+  string name = 1;
+  string namespace = 2;
+  map<string, string> labels = 3;
+  int32 rule_count = 4;
+  google.protobuf.Timestamp loaded_at = 5;
+  string hash = 6;
+}
+
+message GetPolicyRequest {
+  string name = 1;
+  string namespace = 2;
+}
+
+message GetPolicyResponse {
+  string name = 1;
+  string namespace = 2;
+  string content = 3;  // CUE source
+  PolicyInfo info = 4;
+}
+
+message PutPolicyRequest {
+  string name = 1;
+  string namespace = 2;
+  string content = 3;
+  bool validate_only = 4;
+}
+
+message PutPolicyResponse {
+  bool success = 1;
+  repeated ValidationError errors = 2;
+  PolicyInfo info = 3;
+}
+
+message DeletePolicyRequest {
+  string name = 1;
+  string namespace = 2;
+}
+
+message DeletePolicyResponse {
+  bool deleted = 1;
+}
+
+message ReloadPoliciesRequest {
+  bool force = 1;
+}
+
+message ReloadPoliciesResponse {
+  int32 loaded = 1;
+  int32 failed = 2;
+  repeated string errors = 3;
+}
+
+// Data Messages
+
+message PutDataRequest {
+  string path = 1;
+  google.protobuf.Struct data = 2;
+}
+
+message PutDataResponse {
+  bool success = 1;
+}
+
+message GetDataRequest {
+  string path = 1;
+}
+
+message GetDataResponse {
+  google.protobuf.Struct data = 1;
+}
+
+message DeleteDataRequest {
+  string path = 1;
+}
+
+message DeleteDataResponse {
+  bool deleted = 1;
+}
+
+// Health Messages
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool healthy = 1;
+  string version = 2;
+  google.protobuf.Timestamp uptime = 3;
+}
+
+message ReadyRequest {}
+
+message ReadyResponse {
+  bool ready = 1;
+  map<string, bool> checks = 2;  // Individual readiness checks
+}

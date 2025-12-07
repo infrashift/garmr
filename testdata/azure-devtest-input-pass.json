@@ -1,0 +1,44 @@
+{
+  "lab": {
+    "name": "dev-lab-01",
+    "environment": "development",
+    "subscription": "sub-12345"
+  },
+  "vm": {
+    "name": "dev-vm-01",
+    "size": "Standard_D2s_v3",
+    "os": "Ubuntu-20.04",
+    "disk": {
+      "type": "Premium_SSD",
+      "sizeGB": 128
+    }
+  },
+  "user": {
+    "email": "developer@example.com",
+    "role": "DevTest Labs User",
+    "department": "Engineering"
+  },
+  "schedule": {
+    "autoShutdown": {
+      "enabled": true,
+      "time": "19:00",
+      "timezone": "America/New_York"
+    },
+    "autoStart": {
+      "enabled": true,
+      "time": "08:00",
+      "timezone": "America/New_York"
+    }
+  },
+  "cost": {
+    "dailyBudget": 50,
+    "monthlyBudget": 1000,
+    "currentSpend": 450
+  },
+  "tags": {
+    "Environment": "Development",
+    "CostCenter": "CC-12345",
+    "Owner": "developer@example.com",
+    "Project": "ProjectX"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "kind": "release",
+  "name": "my-service",
+  "version": "2.1.5",
+  "apiVersion": "2.3.0",
+  "metadata": {
+    "name": "my-service-release",
+    "createdAt": "2024-03-15T10:30:00Z",
+    "labels": {"app": "my-service"}
+  }
+}

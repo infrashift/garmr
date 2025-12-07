@@ -1,0 +1,100 @@
+{
+  "pipeline": {
+    "name": "my-app-pipeline",
+    "stage": "staging",
+    "previousStage": "test",
+    "targetStage": "production"
+  },
+  "artifact": {
+    "name": "my-app",
+    "version": "2.1.0",
+    "buildNumber": "build-456",
+    "commitSha": "abc123def456789",
+    "branch": "main",
+    "image": "registry.example.com/my-app:2.1.0",
+    "digest": "sha256:abc123..."
+  },
+  "quality": {
+    "tests": {
+      "unit": {
+        "passed": true,
+        "total": 250,
+        "failures": 0,
+        "coverage": 88
+      },
+      "integration": {
+        "passed": true,
+        "total": 50,
+        "failures": 0
+      },
+      "e2e": {
+        "passed": true,
+        "total": 30,
+        "failures": 0
+      }
+    },
+    "security": {
+      "sast": {
+        "completed": true,
+        "critical": 0,
+        "high": 1,
+        "medium": 5
+      },
+      "dast": {
+        "completed": true,
+        "critical": 0,
+        "high": 0
+      },
+      "dependencies": {
+        "scanned": true,
+        "vulnerabilities": {
+          "critical": 0,
+          "high": 2
+        }
+      }
+    },
+    "performance": {
+      "loadTest": {
+        "completed": true,
+        "p99Latency": 150,
+        "errorRate": 0.01
+      }
+    }
+  },
+  "promotion": {
+    "from": "staging",
+    "to": "production",
+    "requestedBy": "deployer@example.com",
+    "approvals": [
+      {
+        "approver": "lead@example.com",
+        "role": "tech-lead",
+        "timestamp": "2024-01-15T14:00:00Z"
+      },
+      {
+        "approver": "manager@example.com", 
+        "role": "release-manager",
+        "timestamp": "2024-01-15T14:30:00Z"
+      }
+    ],
+    "changeTicket": "CHG-12345"
+  },
+  "environment": {
+    "target": "production",
+    "region": "us-east-1",
+    "cluster": "prod-cluster-01"
+  },
+  "deployment": {
+    "strategy": "rolling",
+    "replicas": 3,
+    "rollback": {
+      "enabled": true,
+      "previousVersion": "2.0.5"
+    }
+  },
+  "metadata": {
+    "team": "platform",
+    "product": "core-services",
+    "tier": "critical"
+  }
+}

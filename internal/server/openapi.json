@@ -3,7 +3,7 @@
   "info": {
     "title": "Garmr API",
     "description": "CUE-based policy evaluation engine for enforcing governance, security, and compliance policies.",
-    "version": "1.0.0",
+    "version": "0.1.0",
     "contact": {
       "name": "Garmr",
       "url": "https://github.com/infrashift/garmr"
@@ -309,6 +309,44 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": ["policies"],
+        "summary": "Delete a policy",
+        "description": "Deletes a loaded policy by name and namespace",
+        "operationId": "deletePolicy",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "description": "Policy name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "query",
+            "description": "Policy namespace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Policy deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletePolicyResponse"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/v1/policies/reload": {
@@ -557,10 +595,6 @@
             "items": {
               "$ref": "#/components/schemas/PolicySummary"
             }
-          },
-          "total": {
-            "type": "integer",
-            "description": "Total number of policies"
           }
         }
       },
@@ -579,7 +613,7 @@
             "type": "string",
             "description": "Policy description"
           },
-          "rules_count": {
+          "rule_count": {
             "type": "integer",
             "description": "Number of rules in the policy"
           },
@@ -616,11 +650,21 @@
             "type": "integer",
             "description": "Reload time in milliseconds"
           },
-          "policy_dir": {
+          "storage_type": {
             "type": "string",
-            "description": "Policy directory path"
+            "description": "Active storage backend type (e.g., filesystem, s3)"
           }
         }
+      },
+      "DeletePolicyResponse": {
+        "type": "object",
+        "properties": {
+          "deleted": {
+            "type": "boolean",
+            "description": "Whether the policy was found and deleted"
+          }
+        },
+        "required": ["deleted"]
       },
       "ErrorResponse": {
         "type": "object",

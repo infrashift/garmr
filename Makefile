@@ -6,7 +6,8 @@ BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)"
 
-.PHONY: all build build-server build-cli test lint proto clean docker help
+.PHONY: all build build-server build-cli test lint proto clean docker help \
+	test-storage test-minio-start test-minio-stop test-s3-integration
 
 all: build
 
@@ -63,6 +64,21 @@ test-cover: ## Run tests with coverage report
 test-integration: build ## Run integration tests
 	./scripts/integration-test.sh
 
+test-storage: ## Run storage backend unit tests
+	go test -v -race ./internal/experimental/storage/...
+
+test-minio-start: ## Start MinIO for integration testing (podman)
+	podman play kube test/integration/minio-pod.yaml
+	@echo "Waiting for MinIO..."
+	@for i in $$(seq 1 30); do curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1 && echo "MinIO is ready" && break; sleep 1; done
+
+test-minio-stop: ## Stop MinIO pod
+	podman play kube --down test/integration/minio-pod.yaml
+
+test-s3-integration: test-minio-start build ## Run S3 integration tests
+	go test -v -tags integration -timeout 120s ./test/integration/...
+	$(MAKE) test-minio-stop
+
 bench: ## Run benchmarks
 	go test -bench=. -benchmem ./internal/engine/...
 
@@ -71,17 +87,17 @@ bench: ## Run benchmarks
 build-plugins: ## Build all plugins (requires CGO)
 	@echo "Building plugins..."
 	@mkdir -p bin/plugins
-	go build -buildmode=plugin -o bin/plugins/consul.so ./plugins/consul
-	go build -buildmode=plugin -o bin/plugins/s3.so ./plugins/s3
-	go build -buildmode=plugin -o bin/plugins/kafka.so ./plugins/kafka
-	go build -buildmode=plugin -o bin/plugins/otel.so ./plugins/otel
-	go build -buildmode=plugin -o bin/plugins/prometheus.so ./plugins/prometheus
-	go build -buildmode=plugin -o bin/plugins/markdown.so ./plugins/markdown
-	go build -buildmode=plugin -o bin/plugins/duckdb.so ./plugins/duckdb
-	go build -buildmode=plugin -o bin/plugins/logging.so ./plugins/logging
-	go build -buildmode=plugin -o bin/plugins/audit-file.so ./plugins/audit-file
-	go build -buildmode=plugin -o bin/plugins/consul-authz.so ./plugins/consul-authz
-	go build -buildmode=plugin -o bin/plugins/vault-authz.so ./plugins/vault-authz
+	go build -buildmode=plugin -o bin/plugins/consul.so ./internal/experimental/plugins/consul
+	go build -buildmode=plugin -o bin/plugins/s3.so ./internal/experimental/plugins/s3
+	go build -buildmode=plugin -o bin/plugins/kafka.so ./internal/experimental/plugins/kafka
+	go build -buildmode=plugin -o bin/plugins/otel.so ./internal/experimental/plugins/otel
+	go build -buildmode=plugin -o bin/plugins/prometheus.so ./internal/experimental/plugins/prometheus
+	go build -buildmode=plugin -o bin/plugins/markdown.so ./internal/experimental/plugins/markdown
+	go build -buildmode=plugin -o bin/plugins/duckdb.so ./internal/experimental/plugins/duckdb
+	go build -buildmode=plugin -o bin/plugins/logging.so ./internal/experimental/plugins/logging
+	go build -buildmode=plugin -o bin/plugins/audit-file.so ./internal/experimental/plugins/audit-file
+	go build -buildmode=plugin -o bin/plugins/consul-authz.so ./internal/experimental/plugins/consul-authz
+	go build -buildmode=plugin -o bin/plugins/vault-authz.so ./internal/experimental/plugins/vault-authz
 
 ## Lint and format
 

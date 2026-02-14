@@ -70,41 +70,15 @@ func init() {
 }
 
 func runDataPut(cmd *cobra.Command, args []string) error {
-	path := args[0]
-
-	var data []byte
-	var err error
-
-	if inline, _ := cmd.Flags().GetString("data"); inline != "" {
-		data = []byte(inline)
-	} else if file, _ := cmd.Flags().GetString("file"); file != "" {
-		data, err = os.ReadFile(file)
-		if err != nil {
-			return fmt.Errorf("reading file: %w", err)
-		}
-	} else {
-		return fmt.Errorf("either --data or --file is required")
-	}
-
-	var jsonData any
-	if err := json.Unmarshal(data, &jsonData); err != nil {
-		return fmt.Errorf("parsing JSON: %w", err)
-	}
-
-	fmt.Printf("✓ Data stored at '%s'\n", path)
-	return nil
+	return fmt.Errorf("data put requires a data storage API endpoint (not yet available in server)")
 }
 
 func runDataGet(cmd *cobra.Command, args []string) error {
-	path := args[0]
-	fmt.Printf("Getting data at: %s\n", path)
-	return nil
+	return fmt.Errorf("data get requires a data storage API endpoint (not yet available in server)")
 }
 
 func runDataDelete(cmd *cobra.Command, args []string) error {
-	path := args[0]
-	fmt.Printf("✓ Data at '%s' deleted\n", path)
-	return nil
+	return fmt.Errorf("data delete requires a data storage API endpoint (not yet available in server)")
 }
 
 // healthCmd checks server health

@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-package q.policy.v1;
+package garmr.policy.v1;
 
-option go_package = "github.com/yourorg/garmr/api/proto;policypb";
+option go_package = "github.com/infrashift/garmr/api/proto;policypb";
 
 import "google/api/annotations.proto";
 import "google/protobuf/struct.proto";

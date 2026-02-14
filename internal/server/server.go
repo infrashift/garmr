@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -19,8 +20,13 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"google.golang.org/grpc"
+	"gopkg.in/natefinch/lumberjack.v2"
+
 	"github.com/infrashift/garmr/internal/engine"
+	"github.com/infrashift/garmr/internal/experimental/plugin"
 	"github.com/infrashift/garmr/internal/experimental/ratelimit"
+	"github.com/infrashift/garmr/internal/experimental/storage"
 	"github.com/infrashift/garmr/internal/health"
 	"github.com/infrashift/garmr/internal/input"
 	"github.com/infrashift/garmr/internal/observability"
@@ -39,8 +45,11 @@ type Config struct {
 	EnableTLS   bool
 	MaxRecvSize int
 	// Audit logging
-	AuditEnabled bool
-	AuditPath    string
+	AuditEnabled    bool
+	AuditPath       string
+	AuditMaxSizeMB  int // Max size in MB before rotation (default 100)
+	AuditMaxBackups int // Max number of old log files (default 10)
+	AuditMaxAgeDays int // Max age in days for old log files (default 30)
 	// Authentication
 	APIKey          string   // Required API key (empty = no auth)
 	APIKeyHeader    string   // Header name for API key (default: X-API-Key)
@@ -51,20 +60,28 @@ type Config struct {
 	RateLimitEnabled   bool
 	RateLimitPerSecond float64
 	RateLimitBurst     int
+	// Storage backend
+	StorageType    string                 // "filesystem" (default), "s3", "minio"
+	StorageRoot    string                 // Root path/prefix for storage backend
+	StorageOptions map[string]interface{} // Backend-specific options (S3 endpoint, bucket, etc.)
+	PluginDir      string                 // External plugin directory
 }
 
 // Server is the Garmr server.
 type Server struct {
-	config        Config
-	engine        *engine.Engine
-	logger        *zap.Logger
-	httpServer    *http.Server
-	startTime     time.Time
-	auditLogger   *slog.Logger
-	auditFile     *os.File
-	rateLimiter   *ratelimit.Limiter
-	healthHandler *health.Handler
-	obs           *observability.Provider
+	config         Config
+	engine         *engine.Engine
+	logger         *zap.Logger
+	httpServer     *http.Server
+	grpcServer     *grpc.Server
+	startTime      time.Time
+	auditLogger    *slog.Logger
+	auditFile      io.Closer
+	rateLimiter    *ratelimit.Limiter
+	healthHandler  *health.Handler
+	obs            *observability.Provider
+	pluginManager  *plugin.Manager
+	storageBackend storage.Backend
 
 	mu     sync.RWMutex
 	ready  bool
@@ -128,10 +145,32 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 		}
 	})
 
+	// Register storage health checker
+	s.healthHandler.Register("storage", func(ctx context.Context) *health.Check {
+		if s.storageBackend == nil {
+			return &health.Check{
+				Status:  health.StatusHealthy,
+				Message: "no storage backend configured",
+			}
+		}
+		// Try listing files as a basic health check
+		_, err := s.storageBackend.List(ctx, "**/*.cue")
+		if err != nil {
+			return &health.Check{
+				Status:  health.StatusUnhealthy,
+				Message: fmt.Sprintf("storage backend error: %v", err),
+			}
+		}
+		return &health.Check{
+			Status:  health.StatusHealthy,
+			Message: fmt.Sprintf("storage backend %s operational", s.storageBackend.Type()),
+		}
+	})
+
 	return s, nil
 }
 
-// initAuditLogger initializes the audit log file.
+// initAuditLogger initializes the audit log with rotation via lumberjack.
 func (s *Server) initAuditLogger() error {
 	auditPath := s.config.AuditPath
 	if auditPath == "" {
@@ -143,31 +182,100 @@ func (s *Server) initAuditLogger() error {
 		return fmt.Errorf("creating audit log directory: %w", err)
 	}
 
-	// Open file for append
-	f, err := os.OpenFile(auditPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("opening audit log: %w", err)
+	maxSize := s.config.AuditMaxSizeMB
+	if maxSize <= 0 {
+		maxSize = 100
+	}
+	maxBackups := s.config.AuditMaxBackups
+	if maxBackups <= 0 {
+		maxBackups = 10
+	}
+	maxAge := s.config.AuditMaxAgeDays
+	if maxAge <= 0 {
+		maxAge = 30
 	}
 
-	s.auditFile = f
-	s.auditLogger = slog.New(slog.NewJSONHandler(f, &slog.HandlerOptions{
+	lj := &lumberjack.Logger{
+		Filename:   auditPath,
+		MaxSize:    maxSize,
+		MaxBackups: maxBackups,
+		MaxAge:     maxAge,
+		Compress:   true,
+	}
+
+	s.auditFile = lj
+	s.auditLogger = slog.New(slog.NewJSONHandler(lj, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 
-	s.logger.Info("audit logging enabled", zap.String("path", auditPath))
+	s.logger.Info("audit logging enabled",
+		zap.String("path", auditPath),
+		zap.Int("max_size_mb", maxSize),
+		zap.Int("max_backups", maxBackups),
+		zap.Int("max_age_days", maxAge),
+	)
+	return nil
+}
+
+// initStorageBackend initializes the storage backend based on configuration.
+// If StorageType is empty and PolicyDir is set, creates a FilesystemBackend.
+// If StorageType is set, uses the storage registry to create the appropriate backend.
+func (s *Server) initStorageBackend() error {
+	if s.config.StorageType == "" && s.config.PolicyDir == "" {
+		return nil // No storage configured
+	}
+
+	if s.config.StorageType == "" {
+		// Backward compat: --policy-dir maps to filesystem backend
+		cfg := storage.Config{
+			Type: "filesystem",
+			Root: s.config.PolicyDir,
+		}
+		backend, err := storage.New(cfg)
+		if err != nil {
+			return fmt.Errorf("creating filesystem backend: %w", err)
+		}
+		s.storageBackend = backend
+		s.logger.Info("storage backend initialized",
+			zap.String("type", "filesystem"),
+			zap.String("root", s.config.PolicyDir),
+		)
+		return nil
+	}
+
+	// Build storage config from StorageType + StorageOptions
+	cfg := storage.Config{
+		Type:    s.config.StorageType,
+		Root:    s.config.StorageRoot,
+		Options: s.config.StorageOptions,
+	}
+
+	backend, err := storage.New(cfg)
+	if err != nil {
+		return fmt.Errorf("creating %s backend: %w", s.config.StorageType, err)
+	}
+	s.storageBackend = backend
+	s.logger.Info("storage backend initialized",
+		zap.String("type", s.config.StorageType),
+		zap.String("root", s.config.StorageRoot),
+	)
 	return nil
 }
 
 // Start starts the HTTP server.
 func (s *Server) Start(ctx context.Context) error {
-	// Load initial policies
-	if s.config.PolicyDir != "" {
-		if err := s.engine.LoadPoliciesFromDir(ctx, s.config.PolicyDir); err != nil {
-			s.logger.Warn("failed to load policies from directory", zap.Error(err))
+	// Initialize storage backend and load policies
+	if err := s.initStorageBackend(); err != nil {
+		s.logger.Warn("failed to initialize storage backend", zap.Error(err))
+	}
+
+	if s.storageBackend != nil {
+		if err := s.engine.LoadPoliciesFromBackend(ctx, s.storageBackend); err != nil {
+			s.logger.Warn("failed to load policies from storage backend", zap.Error(err))
 		}
 	}
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 
 	// Start HTTP server
 	go func() {
@@ -176,15 +284,28 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
+	// Start gRPC server if configured
+	if s.config.GRPCAddr != "" {
+		go func() {
+			if err := s.startGRPC(); err != nil {
+				errCh <- fmt.Errorf("gRPC server error: %w", err)
+			}
+		}()
+	}
+
 	// Mark as ready
 	s.mu.Lock()
 	s.ready = true
 	s.checks["policies"] = true
 	s.checks["http"] = true
+	if s.config.GRPCAddr != "" {
+		s.checks["grpc"] = true
+	}
 	s.mu.Unlock()
 
 	s.logger.Info("server started",
 		zap.String("http", s.config.HTTPAddr),
+		zap.String("grpc", s.config.GRPCAddr),
 	)
 
 	select {
@@ -198,6 +319,23 @@ func (s *Server) Start(ctx context.Context) error {
 // Stop gracefully shuts down the server.
 func (s *Server) Stop() error {
 	s.logger.Info("shutting down server")
+
+	// Stop gRPC server first
+	s.stopGRPC()
+
+	// Close storage backend
+	if s.storageBackend != nil {
+		if err := s.storageBackend.Close(); err != nil {
+			s.logger.Warn("error closing storage backend", zap.Error(err))
+		}
+	}
+
+	// Close plugin manager
+	if s.pluginManager != nil {
+		if err := s.pluginManager.CloseAll(); err != nil {
+			s.logger.Warn("error closing plugins", zap.Error(err))
+		}
+	}
 
 	// Close audit log file
 	if s.auditFile != nil {
@@ -269,6 +407,18 @@ func (s *Server) startHTTP() error {
 	return s.httpServer.ListenAndServe()
 }
 
+// writeError writes a generic error message to the client and logs the full error server-side.
+func (s *Server) writeError(w http.ResponseWriter, status int, userMsg string, err error) {
+	if err != nil {
+		s.logger.Error(userMsg, zap.Error(err))
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{
+		"error": userMsg,
+	})
+}
+
 // HTTP Handlers
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -327,7 +477,7 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to read request body: %v", err), http.StatusBadRequest)
+		s.writeError(w, http.StatusBadRequest, "Failed to read request body", err)
 		return
 	}
 
@@ -349,7 +499,7 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	// Parse based on detected format
 	parsed, err := parser.Parse(body, format)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
+		s.writeError(w, http.StatusBadRequest, "Invalid request body", err)
 		return
 	}
 
@@ -395,8 +545,7 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.engine.Evaluate(r.Context(), engineReq)
 	if err != nil {
-		s.logger.Error("evaluation failed", zap.Error(err))
-		http.Error(w, fmt.Sprintf("Evaluation failed: %v", err), http.StatusInternalServerError)
+		s.writeError(w, http.StatusInternalServerError, "Evaluation failed", err)
 		return
 	}
 
@@ -498,6 +647,11 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	requestID := r.Header.Get("X-Request-Id")
+	if requestID == "" {
+		requestID = uuid.New().String()
+	}
+
 	// Apply request body size limit
 	maxSize := int64(s.config.MaxRecvSize)
 	if maxSize <= 0 {
@@ -511,14 +665,28 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+		s.writeError(w, http.StatusBadRequest, "Invalid JSON in request body", err)
 		return
 	}
 
 	errors, warnings := s.engine.Validate(req.Policy)
 
+	valid := len(errors) == 0
+
+	// Audit log
+	if s.auditLogger != nil {
+		s.auditLogger.Info("validate",
+			"request_id", requestID,
+			"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
+			"valid", valid,
+			"error_count", len(errors),
+			"warning_count", len(warnings),
+			"source_ip", r.RemoteAddr,
+		)
+	}
+
 	resp := map[string]interface{}{
-		"valid":    len(errors) == 0,
+		"valid":    valid,
 		"errors":   errors,
 		"warnings": warnings,
 	}
@@ -554,7 +722,24 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("name")
 		namespace := r.URL.Query().Get("namespace")
 
+		requestID := r.Header.Get("X-Request-Id")
+		if requestID == "" {
+			requestID = uuid.New().String()
+		}
+
 		deleted := s.engine.DeletePolicy(namespace, name)
+
+		// Audit log
+		if s.auditLogger != nil {
+			s.auditLogger.Info("policy_delete",
+				"request_id", requestID,
+				"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
+				"policy_name", name,
+				"policy_namespace", namespace,
+				"deleted", deleted,
+				"source_ip", r.RemoteAddr,
+			)
+		}
 
 		resp := map[string]interface{}{
 			"deleted": deleted,
@@ -573,24 +758,44 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.config.PolicyDir == "" {
-		http.Error(w, "No policy directory configured", http.StatusBadRequest)
+	requestID := r.Header.Get("X-Request-Id")
+	if requestID == "" {
+		requestID = uuid.New().String()
+	}
+
+	if s.storageBackend == nil && s.config.PolicyDir == "" {
+		http.Error(w, "No policy source configured", http.StatusBadRequest)
 		return
 	}
 
 	startTime := time.Now()
 
-	// Use atomic reload - safe during concurrent evaluations
-	count, err := s.engine.ReloadPoliciesFromDir(r.Context(), s.config.PolicyDir)
+	var count int
+	var err error
+
+	// Use storage backend if available, fallback to PolicyDir
+	if s.storageBackend != nil {
+		count, err = s.engine.ReloadPoliciesFromBackend(r.Context(), s.storageBackend)
+	} else if s.config.PolicyDir != "" {
+		count, err = s.engine.ReloadPoliciesFromDir(r.Context(), s.config.PolicyDir)
+	}
+
 	if err != nil {
 		s.logger.Error("policy reload failed", zap.Error(err))
-		resp := map[string]interface{}{
-			"success": false,
-			"error":   err.Error(),
+
+		// Audit log failure
+		if s.auditLogger != nil {
+			s.auditLogger.Info("policy_reload",
+				"request_id", requestID,
+				"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
+				"success", false,
+				"error", err.Error(),
+				"reload_time_ms", time.Since(startTime).Milliseconds(),
+				"source_ip", r.RemoteAddr,
+			)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(resp)
+
+		s.writeError(w, http.StatusInternalServerError, "Policy reload failed", err)
 		return
 	}
 
@@ -599,11 +804,23 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 		zap.Duration("duration", time.Since(startTime)),
 	)
 
+	// Audit log success
+	if s.auditLogger != nil {
+		s.auditLogger.Info("policy_reload",
+			"request_id", requestID,
+			"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
+			"success", true,
+			"policies_loaded", count,
+			"reload_time_ms", time.Since(startTime).Milliseconds(),
+			"source_ip", r.RemoteAddr,
+		)
+	}
+
 	resp := map[string]interface{}{
 		"success":         true,
 		"policies_loaded": count,
 		"reload_time_ms":  time.Since(startTime).Milliseconds(),
-		"policy_dir":      s.config.PolicyDir,
+		"storage_type":    s.storageType(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -614,6 +831,17 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// Will be populated when metrics plugin is loaded
 	w.Header().Set("Content-Type", "text/plain")
 	w.Write([]byte("# Garmr metrics endpoint\n# Load prometheus plugin for full metrics\n"))
+}
+
+// storageType returns the active storage type for API responses.
+func (s *Server) storageType() string {
+	if s.storageBackend != nil {
+		return s.storageBackend.Type()
+	}
+	if s.config.PolicyDir != "" {
+		return "filesystem"
+	}
+	return "none"
 }
 
 // Helper functions
@@ -761,7 +989,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		if providedKey != s.config.APIKey {
+		if subtle.ConstantTimeCompare([]byte(providedKey), []byte(s.config.APIKey)) == 0 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			json.NewEncoder(w).Encode(map[string]string{

@@ -636,18 +636,62 @@ func runPolicyList(cmd *cobra.Command, args []string) error {
 }
 
 func runPolicyGet(cmd *cobra.Command, args []string) error {
-	// Implementation would fetch and display policy details
-	fmt.Printf("Getting policy: %s\n", args[0])
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	serverAddr := viper.GetString("server")
+	if !strings.HasPrefix(serverAddr, "http://") && !strings.HasPrefix(serverAddr, "https://") {
+		serverAddr = "http://" + serverAddr
+	}
+	serverAddr = strings.Replace(serverAddr, ":9090", ":8080", 1)
+
+	cfg := client.Config{
+		Address: serverAddr,
+	}
+
+	c, err := client.NewClient(cfg)
+	if err != nil {
+		return fmt.Errorf("connecting to server: %w", err)
+	}
+	defer c.Close()
+
+	name := args[0]
+	namespace, _ := cmd.Flags().GetString("namespace")
+
+	policies, err := c.ListPolicies(ctx, namespace)
+	if err != nil {
+		return fmt.Errorf("fetching policies: %w", err)
+	}
+
+	// Find the matching policy
+	var found *client.PolicyInfo
+	for i, p := range policies {
+		if p.Name == name {
+			found = &policies[i]
+			break
+		}
+	}
+
+	if found == nil {
+		return fmt.Errorf("policy %q not found in namespace %q", name, namespace)
+	}
+
+	format := viper.GetString("output")
+	switch format {
+	case "json":
+		data, _ := json.MarshalIndent(found, "", "  ")
+		fmt.Println(string(data))
+	default:
+		fmt.Printf("Name:       %s\n", found.Name)
+		fmt.Printf("Namespace:  %s\n", found.Namespace)
+		fmt.Printf("Rules:      %d\n", found.RuleCount)
+	}
+
 	return nil
 }
 
 func runPolicyPush(cmd *cobra.Command, args []string) error {
-	// Policy push not yet implemented via HTTP API
-	// Policies are loaded from the --policy-dir on server startup
-	fmt.Println("Policy push is not yet implemented.")
-	fmt.Println("To add policies, place them in the policy directory and restart the server,")
-	fmt.Println("or use 'garmr policy reload' if the server supports hot reloading.")
-	return nil
+	return fmt.Errorf("policy push requires a policy upload API endpoint (not yet available in server)")
 }
 
 func runPolicyDelete(cmd *cobra.Command, args []string) error {

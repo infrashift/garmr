@@ -409,12 +409,28 @@ func matchS3Pattern(pattern, filePath string) bool {
 	// Handle ** (match any depth)
 	if strings.Contains(pattern, "**") {
 		parts := strings.Split(pattern, "**")
+
+		// Handle patterns like **/testdata/** (directory-in-path match)
+		if len(parts) == 3 && parts[0] == "" && parts[2] == "" {
+			mid := strings.Trim(parts[1], "/")
+			return strings.Contains(filePath, mid+"/") || strings.HasPrefix(filePath, mid+"/")
+		}
+
 		if len(parts) == 2 {
 			prefix := strings.TrimSuffix(parts[0], "/")
 			suffix := strings.TrimPrefix(parts[1], "/")
 
-			hasPrefix := prefix == "" || strings.HasPrefix(filePath, prefix)
-			hasSuffix := suffix == "" || strings.HasSuffix(filePath, suffix)
+			hasPrefix := prefix == "" || strings.HasPrefix(filePath, prefix+"/") || filePath == prefix
+
+			var hasSuffix bool
+			if suffix == "" {
+				hasSuffix = true
+			} else if !strings.Contains(suffix, "/") {
+				// Simple glob suffix like *.cue — match against filename
+				hasSuffix, _ = path.Match(suffix, path.Base(filePath))
+			} else {
+				hasSuffix = strings.HasSuffix(filePath, suffix)
+			}
 
 			return hasPrefix && hasSuffix
 		}

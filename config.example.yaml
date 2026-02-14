@@ -28,5 +28,29 @@ audit:
   enabled: true
   path: "/var/log/garmr/audit.log"
 
+# Storage backend configuration
+# By default, --policy-dir is used (filesystem backend).
+# For S3/MinIO, set storage.type and the s3 options below.
+#
+# storage:
+#   type: "filesystem"   # "filesystem", "s3", or "minio"
+#   root: "/etc/garmr/policies"
+#
+# S3/MinIO example:
+# storage:
+#   type: "s3"
+#   root: "policies/"    # S3 key prefix
+#   s3:
+#     endpoint: "minio.example.com:9000"  # omit for AWS S3
+#     bucket: "garmr-policies"
+#     region: "us-east-1"
+#     access_key: ""
+#     secret_key: ""
+#     use_ssl: true
+#     poll_interval: "10s"
+
+# Plugin directory (optional)
+# plugin_dir: "/etc/garmr/plugins"
+
 # Development mode (optional)
 # dev: true  # Enables colored console output

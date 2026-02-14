@@ -68,6 +68,11 @@ func NewFilesystemBackend(cfg Config) (Backend, error) {
 	}, nil
 }
 
+// Root returns the root directory path.
+func (b *FilesystemBackend) Root() string {
+	return b.root
+}
+
 func (b *FilesystemBackend) Type() string {
 	return "filesystem"
 }
@@ -312,12 +317,28 @@ func matchGlobPattern(pattern, path string) bool {
 	// Handle ** (match any depth)
 	if strings.Contains(pattern, "**") {
 		parts := strings.Split(pattern, "**")
+
+		// Handle patterns like **/testdata/** (directory-in-path match)
+		if len(parts) == 3 && parts[0] == "" && parts[2] == "" {
+			mid := strings.Trim(parts[1], "/")
+			return strings.Contains(path, mid+"/") || strings.HasPrefix(path, mid+"/")
+		}
+
 		if len(parts) == 2 {
 			prefix := strings.TrimSuffix(parts[0], "/")
 			suffix := strings.TrimPrefix(parts[1], "/")
 
-			hasPrefix := prefix == "" || strings.HasPrefix(path, prefix)
-			hasSuffix := suffix == "" || strings.HasSuffix(path, suffix)
+			hasPrefix := prefix == "" || strings.HasPrefix(path, prefix+"/") || path == prefix
+
+			var hasSuffix bool
+			if suffix == "" {
+				hasSuffix = true
+			} else if !strings.Contains(suffix, "/") {
+				// Simple glob suffix like *.cue — match against filename
+				hasSuffix, _ = filepath.Match(suffix, filepath.Base(path))
+			} else {
+				hasSuffix = strings.HasSuffix(path, suffix)
+			}
 
 			return hasPrefix && hasSuffix
 		}

@@ -1,5 +1,5 @@
 // plugins/consul/main.go
-// Package main provides the Consul KV storage plugin for Q Policy Agent.
+// Package main provides the Consul KV storage plugin for Garmr.
 //
 // Build with:
 //   go build -buildmode=plugin -o consul.so ./plugins/consul
@@ -18,8 +18,8 @@ import (
 
 	"github.com/hashicorp/consul/api"
 	
-	"github.com/infrashift/q-policy-agent/internal/plugin"
-	"github.com/infrashift/q-policy-agent/internal/storage"
+	"github.com/infrashift/garmr/internal/experimental/plugin"
+	"github.com/infrashift/garmr/internal/experimental/storage"
 )
 
 // ConsulPlugin implements storage using Consul KV.
@@ -45,7 +45,7 @@ func (p *ConsulPlugin) Metadata() plugin.Metadata {
 		Type:        plugin.TypeStorage,
 		Version:     "1.0.0",
 		Description: "Consul KV storage backend. Supports native watching via blocking queries.",
-		Author:      "Q Policy Agent",
+		Author:      "Garmr",
 		License:     "Apache-2.0",
 		MinQVersion: "1.0.0",
 		Capabilities: []string{

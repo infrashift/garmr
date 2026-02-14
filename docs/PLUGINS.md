@@ -2,11 +2,11 @@
 
 ## Overview
 
-Q Policy Agent uses a plugin architecture to keep the core binary lean while allowing extensibility. Only the filesystem storage backend is built-in; all other backends are loaded as plugins.
+Garmr uses a plugin architecture to keep the core binary lean while allowing extensibility. Only the filesystem storage backend is built-in; all other backends are loaded as plugins.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                           Q Policy Agent                                 │
+│                           Garmr                                 │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
@@ -46,16 +46,16 @@ Q Policy Agent uses a plugin architecture to keep the core binary lean while all
 
 ### Cryptographic Signing with Ed25519
 
-Q uses Ed25519 signatures to verify plugin authenticity and integrity:
+Garmr uses Ed25519 signatures to verify plugin authenticity and integrity:
 
 1. **Plugin author signs** plugin with their Ed25519 private key
-2. **Q administrator adds** author's public key to trusted keys
-3. **At load time**, Q verifies both checksum and signature
+2. **Garmr administrator adds** author's public key to trusted keys
+3. **At load time**, Garmr verifies both checksum and signature
 4. **Plugin only loads** if signature is valid AND key is trusted
 
 ```
 ┌─────────────────┐          ┌─────────────────┐
-│  Plugin Author  │          │  Q Installation │
+│  Plugin Author  │          │ Garmr Install.  │
 ├─────────────────┤          ├─────────────────┤
 │                 │          │                 │
 │  1. Build       │          │  4. Add pubkey  │
@@ -93,7 +93,7 @@ plugin.so.sum    # SHA256 checksum (human-readable)
 
 **Signature file format:**
 ```
------BEGIN Q PLUGIN SIGNATURE-----
+-----BEGIN GARMR PLUGIN SIGNATURE-----
 Version: 1
 KeyID: a1b2c3d4e5f6g7h8
 Algorithm: ed25519
@@ -102,14 +102,14 @@ Timestamp: 2024-12-06T15:30:00Z
 Comment: S3 Plugin v1.2.0
 
 <base64-encoded-signature>
------END Q PLUGIN SIGNATURE-----
+-----END GARMR PLUGIN SIGNATURE-----
 ```
 
 ### Key Management
 
 **Generate a signing key:**
 ```bash
-q plugin key generate production-signing-key
+garmr plugin key generate production-signing-key
 
 # Output:
 #   production-signing-key.key  (PRIVATE - keep secret!)
@@ -118,7 +118,7 @@ q plugin key generate production-signing-key
 
 **Sign a plugin:**
 ```bash
-q plugin sign s3.so --key production-signing-key.key
+garmr plugin sign s3.so --key production-signing-key.key
 
 # Creates:
 #   s3.so.sig  (signature)
@@ -127,14 +127,14 @@ q plugin sign s3.so --key production-signing-key.key
 
 **Verify a plugin:**
 ```bash
-q plugin verify s3.so --trusted-keys /etc/q/trusted-keys
+garmr plugin verify s3.so --trusted-keys /etc/garmr/trusted-keys
 ```
 
 ### Trusted Keys File
 
 ```bash
-# /etc/q/trusted-keys
-# Q Plugin Trusted Keys
+# /etc/garmr/trusted-keys
+# Garmr Plugin Trusted Keys
 # Format: <base64-public-key> <comment>
 
 MCowBQYDK2VwAyEAxxxxxxxx Production Signing Key
@@ -151,7 +151,7 @@ plugins: {
             required: true
             
             // Load trusted public keys from file
-            trustedKeysFile: "/etc/q/trusted-keys"
+            trustedKeysFile: "/etc/garmr/trusted-keys"
             
             // Or embed keys directly in config
             trustedKeys: [{
@@ -182,7 +182,7 @@ plugins: {
 - name: Sign plugin
   run: |
     echo "${{ secrets.PLUGIN_SIGNING_KEY }}" > signing.key
-    q plugin sign s3.so --key signing.key --comment "v${{ github.ref_name }}"
+    garmr plugin sign s3.so --key signing.key --comment "v${{ github.ref_name }}"
     rm signing.key
 
 - name: Upload artifacts
@@ -199,11 +199,11 @@ plugins: {
 ```bash
 # Download artifacts
 # Verify signatures before deployment
-q plugin verify *.so --trusted-keys /etc/q/trusted-keys --strict
+garmr plugin verify *.so --trusted-keys /etc/garmr/trusted-keys --strict
 
 # Only deploy if verification passes
 if [ $? -eq 0 ]; then
-    cp *.so /opt/q/plugins/
+    cp *.so /opt/garmr/plugins/
 fi
 ```
 
@@ -243,7 +243,7 @@ plugins: {
             type: "storage"
             config: {
                 endpoint: "minio.storage.svc:9000"
-                bucket: "q-policies"
+                bucket: "garmr-policies"
                 region: "us-east-1"
                 useSsl: false
                 pollInterval: "5s"
@@ -268,7 +268,7 @@ plugins: {
             type: "storage"
             config: {
                 address: "consul.service.consul:8500"
-                prefix: "q/policies/production"
+                prefix: "garmr/policies/production"
                 watch: true  // Uses blocking queries
             }
         }
@@ -290,7 +290,7 @@ plugins: {
             enabled: true
             type: "storage"
             config: {
-                database: "/var/lib/q/policies.duckdb"
+                database: "/var/lib/garmr/policies.duckdb"
                 tableName: "policies"
                 readOnly: true
             }
@@ -348,8 +348,8 @@ package main
 
 import (
     "context"
-    "github.com/yourorg/q-policy-agent/internal/plugin"
-    "github.com/yourorg/q-policy-agent/internal/storage"
+    "github.com/yourorg/garmr/internal/plugin"
+    "github.com/yourorg/garmr/internal/storage"
 )
 
 type MyPlugin struct {
@@ -383,7 +383,7 @@ func (p *MyPlugin) Backend() storage.Backend {
 }
 
 // REQUIRED: Export this symbol
-var QPlugin plugin.Plugin = &MyPlugin{}
+var GarmrPlugin plugin.Plugin = &MyPlugin{}
 ```
 
 ### Building
@@ -402,8 +402,8 @@ CGO_ENABLED=1 go build -buildmode=plugin -o myplugin.so ./plugins/myplugin
 # Generate checksum for plugin
 sha256sum s3.so | awk '{print $1}'
 
-# Or using Q CLI
-q plugin checksum s3.so
+# Or using Garmr CLI
+garmr plugin checksum s3.so
 ```
 
 ## Deployment Patterns
@@ -412,7 +412,7 @@ q plugin checksum s3.so
 
 ```dockerfile
 FROM gcr.io/distroless/static:nonroot
-COPY q /usr/local/bin/q
+COPY garmr /usr/local/bin/garmr
 # No plugins directory - uses built-in filesystem only
 ```
 
@@ -434,13 +434,13 @@ plugins: {
 
 ```dockerfile
 FROM gcr.io/distroless/static:nonroot
-COPY q /usr/local/bin/q
-COPY plugins/s3.so /opt/q/plugins/s3.so
+COPY garmr /usr/local/bin/garmr
+COPY plugins/s3.so /opt/garmr/plugins/s3.so
 ```
 
 ```cue
 plugins: {
-    pluginDir: "/opt/q/plugins"
+    pluginDir: "/opt/garmr/plugins"
     security: {
         restrictToAllowed: true
         allowed: ["filesystem", "s3"]
@@ -474,7 +474,7 @@ plugins: {
             enabled: true
             config: {
                 address: "localhost:8500"  // Consul agent sidecar
-                prefix: "q/policies"
+                prefix: "garmr/policies"
                 watch: true
             }
         }
@@ -500,22 +500,22 @@ Priority order:
 
 ```bash
 # Key management
-q plugin key generate my-signing-key     # Generate Ed25519 key pair
-q plugin key show my-signing-key.pub     # Display key info
+garmr plugin key generate my-signing-key     # Generate Ed25519 key pair
+garmr plugin key show my-signing-key.pub     # Display key info
 
 # Signing
-q plugin sign s3.so --key signing.key    # Sign a plugin
-q plugin sign s3.so --key signing.key --comment "v1.2.0"
+garmr plugin sign s3.so --key signing.key    # Sign a plugin
+garmr plugin sign s3.so --key signing.key --comment "v1.2.0"
 
 # Verification
-q plugin verify s3.so --trusted-keys /etc/q/trusted-keys
-q plugin verify s3.so --public-key "MCowBQYDK2Vw..."
-q plugin verify *.so --trusted-keys /etc/q/trusted-keys --strict
+garmr plugin verify s3.so --trusted-keys /etc/garmr/trusted-keys
+garmr plugin verify s3.so --public-key "MCowBQYDK2Vw..."
+garmr plugin verify *.so --trusted-keys /etc/garmr/trusted-keys --strict
 
-# Runtime info (requires running Q)
-q plugin list                            # List loaded plugins
-q plugin info s3                         # Show plugin details
-q plugin health                          # Health check all plugins
+# Runtime info (requires running Garmr)
+garmr plugin list                            # List loaded plugins
+garmr plugin info s3                         # Show plugin details
+garmr plugin health                          # Health check all plugins
 ```
 
 ## Comparison with Feature Flags

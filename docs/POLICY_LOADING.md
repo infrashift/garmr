@@ -2,7 +2,7 @@
 
 ## Overview
 
-Q Policy Agent is designed to be deployed in containerized environments where policies are mounted as read-only volumes. This document explains the policy loading architecture and configuration options.
+Garmr is designed to be deployed in containerized environments where policies are mounted as read-only volumes. This document explains the policy loading architecture and configuration options.
 
 ## Directory Structure
 
@@ -27,12 +27,12 @@ Q Policy Agent is designed to be deployed in containerized environments where po
 
 ## Configuration (CUE)
 
-Q uses CUE for its own configuration, ensuring type safety:
+Garmr uses CUE for its own configuration, ensuring type safety:
 
 ```cue
-// /etc/q/config.cue
+// /etc/garmr/config.cue
 {
-    apiVersion: "config.q.io/v1"
+    apiVersion: "config.garmr.io/v1"
     
     server: {
         grpc: address: ":9090"
@@ -157,7 +157,7 @@ reload: strategy: {
 
 **Flow:**
 1. Request arrives for policy `release-gate`
-2. Q reads `release-gate.cue.lock`
+2. Garmr reads `release-gate.cue.lock`
 3. Compares lock checksum with cached policy checksum
 4. If match → use cached policy
 5. If mismatch → reload policy, update cache
@@ -235,7 +235,7 @@ For complex policies spanning multiple files:
 
 ```cue
 {
-    apiVersion: "policy.q.io/v1"
+    apiVersion: "policy.garmr.io/v1"
     kind: "PolicySet"
     metadata: {
         name: "release-pipeline"
@@ -289,15 +289,15 @@ For complex policies spanning multiple files:
 ```dockerfile
 FROM gcr.io/distroless/static:nonroot
 
-COPY q /usr/local/bin/q
-COPY config.cue /etc/q/config.cue
+COPY garmr /usr/local/bin/garmr
+COPY config.cue /etc/garmr/config.cue
 
 # Policies are mounted at runtime
 VOLUME /policies
 
 EXPOSE 9090 8080
 
-ENTRYPOINT ["/usr/local/bin/q", "serve", "--config", "/etc/q/config.cue"]
+ENTRYPOINT ["/usr/local/bin/garmr", "serve", "--config", "/etc/garmr/config.cue"]
 ```
 
 ### Podman/Docker Run
@@ -305,12 +305,12 @@ ENTRYPOINT ["/usr/local/bin/q", "serve", "--config", "/etc/q/config.cue"]
 ```bash
 # Create read-only policy volume
 podman run -d \
-    --name q-policy-agent \
+    --name garmr \
     -v ./policies:/policies:ro \
-    -v ./config.cue:/etc/q/config.cue:ro \
+    -v ./config.cue:/etc/garmr/config.cue:ro \
     -p 9090:9090 \
     -p 8080:8080 \
-    q-policy-agent:latest
+    garmr:latest
 ```
 
 ### Kubernetes Deployment
@@ -319,14 +319,14 @@ podman run -d \
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: q-policy-agent
+  name: garmr
 spec:
   replicas: 3
   template:
     spec:
       containers:
-        - name: q
-          image: q-policy-agent:latest
+        - name: garmr
+          image: garmr:latest
           ports:
             - containerPort: 9090
               name: grpc
@@ -337,7 +337,7 @@ spec:
               mountPath: /policies
               readOnly: true
             - name: config
-              mountPath: /etc/q
+              mountPath: /etc/garmr
               readOnly: true
           livenessProbe:
             httpGet:
@@ -350,10 +350,10 @@ spec:
       volumes:
         - name: policies
           configMap:
-            name: q-policies
+            name: garmr-policies
         - name: config
           configMap:
-            name: q-config
+            name: garmr-config
 ```
 
 ## Performance Considerations
@@ -382,7 +382,7 @@ spec:
 vim policies/release/prod-release.cue
 
 # 2. Generate lock file
-q policy lock policies/release/prod-release.cue
+garmr policy lock policies/release/prod-release.cue
 
 # 3. Commit both
 git add policies/release/prod-release.cue
@@ -390,7 +390,7 @@ git add policies/release/prod-release.cue.lock
 git commit -m "Update production release policy"
 
 # 4. Deploy (CI/CD copies to mounted volume)
-# Q detects lock file change and reloads policy
+# Garmr detects lock file change and reloads policy
 ```
 
 ## Conclusion

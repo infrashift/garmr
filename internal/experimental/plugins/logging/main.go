@@ -1,5 +1,5 @@
 // plugins/logging/main.go
-// Package main provides the structured logging plugin for Q Policy Agent.
+// Package main provides the structured logging plugin for Garmr.
 // Uses Go's slog for structured, leveled logging.
 //
 // Build with:
@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/infrashift/q-policy-agent/internal/plugin"
+	"github.com/infrashift/garmr/internal/experimental/plugin"
 )
 
 // LoggingPlugin provides structured logging using slog.
@@ -77,7 +77,7 @@ func (p *LoggingPlugin) Metadata() plugin.Metadata {
 		Type:        plugin.TypeNotifier,
 		Version:     "1.0.0",
 		Description: "Structured logging with slog for policy evaluation events",
-		Author:      "Q Policy Agent",
+		Author:      "Garmr",
 		License:     "Apache-2.0",
 		Capabilities: []string{
 			"logging.structured",

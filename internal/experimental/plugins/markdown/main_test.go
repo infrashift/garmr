@@ -13,7 +13,7 @@ import (
 // Sample CUE policy for testing
 const samplePolicy = `
 {
-	apiVersion: "policy.q.io/v1"
+	apiVersion: "policy.garmr.io/v1"
 	kind: "Policy"
 	
 	metadata: {
@@ -26,7 +26,7 @@ const samplePolicy = `
 			tier: "critical"
 		}
 		annotations: {
-			"policy.q.io/owner": "devops@example.com"
+			"policy.garmr.io/owner": "devops@example.com"
 		}
 	}
 	
@@ -94,7 +94,7 @@ const samplePolicy = `
 // Minimal policy for edge case testing
 const minimalPolicy = `
 {
-	apiVersion: "policy.q.io/v1"
+	apiVersion: "policy.garmr.io/v1"
 	kind: "Policy"
 	metadata: {
 		name: "minimal"
@@ -781,7 +781,7 @@ func TestEdgeCases(t *testing.T) {
 
 	t.Run("handles policy without namespace", func(t *testing.T) {
 		policy := `{
-			apiVersion: "policy.q.io/v1"
+			apiVersion: "policy.garmr.io/v1"
 			metadata: { name: "no-namespace" }
 			spec: { rules: [] }
 		}`
@@ -798,7 +798,7 @@ func TestEdgeCases(t *testing.T) {
 
 	t.Run("handles policy without version", func(t *testing.T) {
 		policy := `{
-			apiVersion: "policy.q.io/v1"
+			apiVersion: "policy.garmr.io/v1"
 			metadata: { name: "no-version" }
 			spec: { rules: [] }
 		}`
@@ -816,7 +816,7 @@ func TestEdgeCases(t *testing.T) {
 
 	t.Run("handles rules without optional fields", func(t *testing.T) {
 		policy := `{
-			apiVersion: "policy.q.io/v1"
+			apiVersion: "policy.garmr.io/v1"
 			metadata: { name: "minimal-rules" }
 			spec: {
 				rules: [{
@@ -849,7 +849,7 @@ func TestEdgeCases(t *testing.T) {
 
 	t.Run("handles special characters in policy name", func(t *testing.T) {
 		policy := `{
-			apiVersion: "policy.q.io/v1"
+			apiVersion: "policy.garmr.io/v1"
 			metadata: { name: "Policy With Spaces & Special!" }
 			spec: { rules: [] }
 		}`

@@ -2,11 +2,11 @@
 
 ## Overview
 
-Q Policy Agent uses a pluggable storage backend architecture. The engine and loader are completely decoupled from storage implementation details—they only interact with the `storage.Backend` interface.
+Garmr uses a pluggable storage backend architecture. The engine and loader are completely decoupled from storage implementation details—they only interact with the `storage.Backend` interface.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         Q Policy Agent                          │
+│                         Garmr                          │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐    │
@@ -92,7 +92,7 @@ storage: {
     root: "policies/"  // Prefix in bucket
     options: {
         endpoint:        "minio.storage.svc.cluster.local:9000"
-        bucket:          "q-policies"
+        bucket:          "garmr-policies"
         accessKeyId:     "${MINIO_ACCESS_KEY}"
         secretAccessKey: "${MINIO_SECRET_KEY}"
         useSsl:          false
@@ -167,13 +167,13 @@ func init() {
 ```yaml
 # docker-compose.yml
 services:
-  q-policy-agent:
-    image: q-policy-agent:latest
+  garmr:
+    image: garmr:latest
     volumes:
       - ./policies:/policies:ro
     environment:
-      Q_STORAGE_TYPE: filesystem
-      Q_STORAGE_ROOT: /policies
+      GARMR_STORAGE_TYPE: filesystem
+      GARMR_STORAGE_ROOT: /policies
 ```
 
 ### Pattern 2: Kubernetes with ConfigMap
@@ -182,7 +182,7 @@ services:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: q-policies
+  name: garmr-policies
 data:
   release-gate-prod.cue: |
     // Policy content...
@@ -194,7 +194,7 @@ spec:
   template:
     spec:
       containers:
-        - name: q
+        - name: garmr
           volumeMounts:
             - name: policies
               mountPath: /policies
@@ -202,7 +202,7 @@ spec:
       volumes:
         - name: policies
           configMap:
-            name: q-policies
+            name: garmr-policies
 ```
 
 ### Pattern 3: MinIO Shared Storage
@@ -213,7 +213,7 @@ spec:
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
-│  │ Q Pod (1)    │    │ Q Pod (2)    │    │ Q Pod (3)    │      │
+│  │ Garmr Pod (1)    │    │ Garmr Pod (2)    │    │ Garmr Pod (3)    │      │
 │  │              │    │              │    │              │      │
 │  └──────┬───────┘    └──────┬───────┘    └──────┬───────┘      │
 │         │                   │                   │               │
@@ -225,14 +225,14 @@ spec:
 │                      └──────┬───────┘                           │
 │                             │                                   │
 │                      ┌──────▼───────┐                           │
-│                      │ q-policies   │                           │
+│                      │garmr-policies│                           │
 │                      │   bucket     │                           │
 │                      └──────────────┘                           │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 
 Benefits:
-- Single source of truth for all Q replicas
+- Single source of truth for all Garmr replicas
 - No volume mounts needed per pod
 - Easy to update policies (upload to bucket)
 - Scales horizontally
@@ -242,7 +242,7 @@ Benefits:
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Git Repo  │────▶│   CI/CD     │────▶│   S3/MinIO  │◀────│ Q Agent    │
+│   Git Repo  │────▶│   CI/CD     │────▶│   S3/MinIO  │◀────│Garmr Agent │
 │  (policies) │     │  (sync)     │     │  (storage)  │     │ (consumer)  │
 └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
       │                    │                   │                   │
@@ -258,10 +258,10 @@ Benefits:
 # sync-policies.sh
 
 # Validate lock files
-q policy validate-lock policies/**/*.cue
+garmr policy validate-lock policies/**/*.cue
 
 # Sync to MinIO
-mc mirror --overwrite policies/ myminio/q-policies/
+mc mirror --overwrite policies/ myminio/garmr-policies/
 
 echo "Policies synced to MinIO"
 ```
@@ -318,7 +318,7 @@ storage: {
 ### Read-Only Access
 
 - All backends treat storage as read-only
-- Q never writes to storage (except lock files in special modes)
+- Garmr never writes to storage (except lock files in special modes)
 - Use bucket policies / IAM to enforce read-only access
 
 ## Performance Considerations
@@ -371,14 +371,14 @@ storage: {
     root: "policies/"
     options: {
         endpoint: "minio:9000"
-        bucket:   "q-policies"
+        bucket:   "garmr-policies"
     }
 }
 ```
 
 2. **Sync existing policies:**
 ```bash
-mc cp --recursive /policies/ myminio/q-policies/
+mc cp --recursive /policies/ myminio/garmr-policies/
 ```
 
 3. **Deploy with new config** - no code changes needed

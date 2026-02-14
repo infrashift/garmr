@@ -5,7 +5,7 @@ package plugin
 import (
 	"context"
 
-	"github.com/infrashift/q-policy-agent/internal/storage"
+	"github.com/infrashift/garmr/internal/experimental/storage"
 )
 
 // StoragePlugin extends Plugin for storage backends.
@@ -21,7 +21,7 @@ type StoragePlugin interface {
 // ============================================
 
 // FilesystemPlugin is the built-in filesystem storage plugin.
-// This is always compiled into Q and cannot be disabled.
+// This is always compiled into Garmr and cannot be disabled.
 type FilesystemPlugin struct {
 	backend storage.Backend
 	config  FilesystemConfig
@@ -46,7 +46,7 @@ func (p *FilesystemPlugin) Metadata() Metadata {
 		Type:        TypeStorage,
 		Version:     "1.0.0",
 		Description: "Local filesystem storage backend. Supports watching for changes via inotify.",
-		Author:      "Q Policy Agent",
+		Author:      "Garmr",
 		License:     "Apache-2.0",
 		Builtin:     true,
 		Capabilities: []string{

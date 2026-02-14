@@ -1,6 +1,6 @@
 // internal/observability/provider.go
 // Package observability provides interfaces for optional metrics and tracing.
-// Q functions fully without metrics or tracing - they are opt-in features.
+// Garmr functions fully without metrics or tracing - they are opt-in features.
 package observability
 
 import (
@@ -14,7 +14,7 @@ import (
 )
 
 // MetricsRecorder is the interface for recording metrics.
-// If no metrics plugin is loaded, Q uses NoopMetrics.
+// If no metrics plugin is loaded, Garmr uses NoopMetrics.
 type MetricsRecorder interface {
 	// Evaluation metrics
 	RecordEvaluation(policy, namespace, decision, environment string, duration time.Duration)
@@ -43,7 +43,7 @@ type MetricsRecorder interface {
 }
 
 // Tracer is the interface for distributed tracing.
-// If no tracing plugin is loaded, Q uses NoopTracer.
+// If no tracing plugin is loaded, Garmr uses NoopTracer.
 type Tracer interface {
 	// StartEvaluationSpan starts a span for policy evaluation
 	StartEvaluationSpan(ctx context.Context, policy, namespace string) (context.Context, trace.Span)
@@ -123,7 +123,7 @@ type AuditViolation struct {
 // ============================================
 
 // NoopMetrics is a no-op metrics recorder.
-// Used when no metrics plugin is loaded - Q functions normally.
+// Used when no metrics plugin is loaded - Garmr functions normally.
 type NoopMetrics struct{}
 
 func (NoopMetrics) RecordEvaluation(policy, namespace, decision, environment string, duration time.Duration) {
@@ -140,7 +140,7 @@ func (NoopMetrics) RecordInputValidationError(policy, field string)             
 func (NoopMetrics) SetPluginHealth(pluginName, pluginType string, healthy bool) {}
 
 // NoopTracer is a no-op tracer.
-// Used when no tracing plugin is loaded - Q functions normally.
+// Used when no tracing plugin is loaded - Garmr functions normally.
 type NoopTracer struct {
 	tracer trace.Tracer
 }

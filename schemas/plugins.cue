@@ -1,6 +1,6 @@
 // schemas/plugins.cue
 // Plugin Configuration Schema
-// Defines how plugins are configured and loaded in Q Policy Agent
+// Defines how plugins are configured and loaded in Garmr
 package config
 
 // PluginConfig defines plugin management settings.
@@ -196,7 +196,7 @@ _productionMinIOConfig: #PluginConfig & {
 			required: true
 			
 			// Load trusted keys from file
-			trustedKeysFile: "/etc/q/trusted-keys"
+			trustedKeysFile: "/etc/garmr/trusted-keys"
 			
 			// Or inline (CI/CD generated)
 			trustedKeys: [{
@@ -301,7 +301,7 @@ _duckdbConfig: #PluginConfig & {
 			enabled: true
 			type:    "storage"
 			config: #DuckDBPluginConfig & {
-				database:  "/var/lib/q/policies.duckdb"
+				database:  "/var/lib/garmr/policies.duckdb"
 				tableName: "policies"
 				readOnly:  true
 			}

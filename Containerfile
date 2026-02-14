@@ -22,27 +22,27 @@ FROM alpine:3.19
 RUN apk add --no-cache ca-certificates tzdata
 
 # Create non-root user
-RUN addgroup -g 1000 q && \
-    adduser -u 1000 -G q -s /bin/sh -D q
+RUN addgroup -g 1000 garmr && \
+    adduser -u 1000 -G garmr -s /bin/sh -D garmr
 
 # Create directories
-RUN mkdir -p /etc/q/policies /etc/q/data /var/lib/q && \
-    chown -R q:q /etc/q /var/lib/q
+RUN mkdir -p /etc/garmr/policies /etc/garmr/data /var/lib/garmr && \
+    chown -R garmr:garmr /etc/garmr /var/lib/garmr
 
 # Copy binaries
-COPY --from=builder /src/bin/q-server-linux /usr/local/bin/q-server
-COPY --from=builder /src/bin/q-linux /usr/local/bin/q
+COPY --from=builder /src/bin/garmr-server-linux /usr/local/bin/garmr-server
+COPY --from=builder /src/bin/garmr-linux /usr/local/bin/garmr
 
 # Copy default config
-COPY config.example.yaml /etc/q/config.yaml
+COPY config.example.yaml /etc/garmr/config.yaml
 
-USER q
+USER garmr
 
 EXPOSE 8080 9090
 
-ENTRYPOINT ["/usr/local/bin/q-server"]
-CMD ["--config", "/etc/q/config.yaml"]
+ENTRYPOINT ["/usr/local/bin/garmr-server"]
+CMD ["--config", "/etc/garmr/config.yaml"]
 
-# Health check
+# Health check (port 8080 = HTTP API, the active listener)
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
-    CMD /usr/local/bin/q health --server localhost:9090 --insecure || exit 1
+    CMD /usr/local/bin/garmr health --server localhost:8080 || exit 1

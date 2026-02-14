@@ -1,7 +1,0 @@
-{
-  "kind": "release",
-  "tests": {"passed": false, "failures": 3},
-  "coverage": 65,
-  "security": {"criticalFindings": 2},
-  "artifact": {"signed": false}
-}

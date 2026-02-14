@@ -1,4 +1,4 @@
-# Q Policy Agent - Concurrency Analysis
+# Garmr - Concurrency Analysis
 
 ## Current Implementation Analysis
 
@@ -62,7 +62,9 @@ This is **far below** what the hardware can handle.
 
 ---
 
-## Optimized Implementation
+## Future Optimization Considerations
+
+Currently, these optimizations should be considered purely hypothetical. We will implement atomic experimental optimizations in the near future to determine the actual improvements and weight the complexity against the performance gains.
 
 ### 1. CUE Context Pool
 

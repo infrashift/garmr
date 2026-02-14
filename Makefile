@@ -1,4 +1,4 @@
-# Q Policy Agent Makefile
+# Garmr Makefile
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -14,17 +14,17 @@ all: build
 
 build: build-server build-cli ## Build all binaries
 
-build-server: ## Build the Q server
-	@echo "Building q-server..."
-	go build $(LDFLAGS) -o bin/q-server ./cmd/q-server
+build-server: ## Build the Garmr server
+	@echo "Building garmr-server..."
+	go build $(LDFLAGS) -o bin/garmr-server ./cmd/garmr-server
 
-build-cli: ## Build the Q CLI
-	@echo "Building q..."
-	go build $(LDFLAGS) -o bin/q ./cmd/q
+build-cli: ## Build the Garmr CLI
+	@echo "Building garmr..."
+	go build $(LDFLAGS) -o bin/garmr ./cmd/garmr
 
 build-linux: ## Build for Linux (for containers)
-	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o bin/q-server-linux ./cmd/q-server
-	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o bin/q-linux ./cmd/q
+	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o bin/garmr-server-linux ./cmd/garmr-server
+	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o bin/garmr-linux ./cmd/garmr
 
 ## Proto generation
 
@@ -96,32 +96,32 @@ fmt: ## Format code
 ## Development
 
 run: build ## Run server with config.yaml
-	@mkdir -p /tmp/q-audit
-	./bin/q-server --config q-server.config.yaml
+	@mkdir -p /tmp/garmr-audit
+	./bin/garmr-server --config garmr-server.config.yaml
 
 dev: build ## Run server in development mode (no config file)
-	@mkdir -p /tmp/q-audit
-	./bin/q-server --dev --policy-dir ./examples --audit-path /tmp/q-audit/audit.log --log-format console
+	@mkdir -p /tmp/garmr-audit
+	./bin/garmr-server --dev --policy-dir ./examples --audit-path /tmp/garmr-audit/audit.log --log-format console
 
 run-server: build-server ## Run the server with example config
-	./bin/q-server --config config.example.yaml
+	./bin/garmr-server --config config.example.yaml
 
 ## Docker
 
 docker-build: ## Build Docker image
-	docker build -t q-policy-agent:$(VERSION) .
+	docker build -t garmr:$(VERSION) .
 
 docker-push: docker-build ## Push Docker image
-	docker push q-policy-agent:$(VERSION)
+	docker push garmr:$(VERSION)
 
 ## Install
 
 install: build ## Install binaries to GOPATH/bin
-	cp bin/q $(GOPATH)/bin/
-	cp bin/q-server $(GOPATH)/bin/
+	cp bin/garmr $(GOPATH)/bin/
+	cp bin/garmr-server $(GOPATH)/bin/
 
 install-cli: build-cli ## Install CLI only
-	cp bin/q $(GOPATH)/bin/
+	cp bin/garmr $(GOPATH)/bin/
 
 ## Clean
 
@@ -134,15 +134,15 @@ clean: ## Clean build artifacts
 
 release: clean test lint build-linux ## Prepare release artifacts
 	mkdir -p dist
-	tar -czf dist/q-policy-agent-$(VERSION)-linux-amd64.tar.gz \
-		-C bin q-server-linux q-linux \
+	tar -czf dist/garmr-$(VERSION)-linux-amd64.tar.gz \
+		-C bin garmr-server-linux garmr-linux \
 		-C .. config.example.yaml README.md
 	sha256sum dist/*.tar.gz > dist/checksums.txt
 
 ## Help
 
 help: ## Show this help
-	@echo "Q Policy Agent - CUE-based Policy Evaluation"
+	@echo "Garmr Policy Agent - CUE-based Policy Evaluation"
 	@echo ""
 	@echo "Usage: make [target]"
 	@echo ""

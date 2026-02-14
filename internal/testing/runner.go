@@ -1,5 +1,5 @@
 // internal/testing/runner.go
-// Package testing provides policy testing capabilities for Q.
+// Package testing provides policy testing capabilities for Garmr.
 package testing
 
 import (

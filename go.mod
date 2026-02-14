@@ -1,4 +1,4 @@
-module github.com/infrashift/q-policy-agent
+module github.com/infrashift/garmr
 
 go 1.25.3
 

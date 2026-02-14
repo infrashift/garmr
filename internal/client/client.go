@@ -1,5 +1,5 @@
 // internal/client/client.go
-// Package client provides the Q Policy Agent HTTP client library.
+// Package client provides the Garmr HTTP client library.
 package client
 
 import (
@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// Client is the Q Policy Agent HTTP client.
+// Client is the Garmr HTTP client.
 type Client struct {
 	baseURL    string
 	httpClient *http.Client

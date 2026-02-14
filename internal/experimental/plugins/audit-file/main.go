@@ -1,5 +1,5 @@
 // plugins/audit-file/main.go
-// Package main provides a file-based audit log plugin for Q Policy Agent.
+// Package main provides a file-based audit log plugin for Garmr.
 // Simple decision logging to files - ideal for small deployments, debugging,
 // and environments without Kafka infrastructure.
 //
@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/infrashift/q-policy-agent/internal/plugin"
+	"github.com/infrashift/garmr/internal/experimental/plugin"
 )
 
 // FileAuditPlugin logs policy decisions to files.
@@ -151,7 +151,7 @@ func (p *FileAuditPlugin) Metadata() plugin.Metadata {
 		Type:        plugin.TypeNotifier,
 		Version:     "1.0.0",
 		Description: "File-based audit logging for policy decisions. Simple, no external dependencies.",
-		Author:      "Q Policy Agent",
+		Author:      "Garmr",
 		License:     "Apache-2.0",
 		Builtin:     true,
 		Capabilities: []string{
@@ -165,7 +165,7 @@ func (p *FileAuditPlugin) Init(ctx context.Context, config map[string]interface{
 	// Parse config with defaults
 	p.config = FileAuditConfig{
 		Enabled:    true,
-		Path:       "/var/log/q/audit.log",
+		Path:       "/var/log/garmr/audit.log",
 		Format:     "jsonl",
 		BufferSize: 4096,
 		Rotation: FileRotationConfig{

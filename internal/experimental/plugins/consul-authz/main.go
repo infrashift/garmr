@@ -1,8 +1,8 @@
 // plugins/consul-authz/main.go
-// Package main provides Consul authorization integration for Q Policy Agent.
+// Package main provides Consul authorization integration for Garmr.
 // Implements external authorization for Consul service mesh and KV operations.
 //
-// This plugin enables Q to serve as an external Policy Decision Point (PDP)
+// This plugin enables Garmr to serve as an external Policy Decision Point (PDP)
 // for HashiCorp Consul, providing policy-based control over:
 // - Service registration and deregistration
 // - Service-to-service intentions (connect)
@@ -26,10 +26,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/infrashift/q-policy-agent/internal/plugin"
+	"github.com/infrashift/garmr/internal/experimental/plugin"
 )
 
-// ConsulAuthzPlugin provides Consul authorization via Q policy evaluation.
+// ConsulAuthzPlugin provides Consul authorization via Garmr policy evaluation.
 type ConsulAuthzPlugin struct {
 	config     ConsulAuthzConfig
 	httpClient *http.Client
@@ -48,7 +48,7 @@ type ConsulAuthzConfig struct {
 	// ListenAddr for the authorization webhook endpoint
 	ListenAddr string `json:"listenAddr"`
 
-	// PolicyNamespace is the Q namespace for Consul policies
+	// PolicyNamespace is the Garmr namespace for Consul policies
 	PolicyNamespace string `json:"policyNamespace"`
 
 	// Policies for different Consul operations
@@ -64,7 +64,7 @@ type ConsulAuthzConfig struct {
 	ACLToken string `json:"aclToken"`
 }
 
-// ConsulPolicies maps Consul operations to Q policies.
+// ConsulPolicies maps Consul operations to Garmr policies.
 type ConsulPolicies struct {
 	// ServiceRegister policy for service registration
 	ServiceRegister string `json:"serviceRegister"`
@@ -233,8 +233,8 @@ func (p *ConsulAuthzPlugin) Metadata() plugin.Metadata {
 		Name:        "consul-authz",
 		Type:        plugin.TypeAuth,
 		Version:     "1.0.0",
-		Description: "Consul external authorization via Q policy evaluation. Service mesh and KV policy control.",
-		Author:      "Q Policy Agent",
+		Description: "Consul external authorization via Garmr policy evaluation. Service mesh and KV policy control.",
+		Author:      "Garmr",
 		License:     "Apache-2.0",
 		Capabilities: []string{
 			"consul.authorization",
@@ -372,7 +372,7 @@ func (p *ConsulAuthzPlugin) Close() error {
 	return nil
 }
 
-// Authorize evaluates a Consul authorization request against Q policies.
+// Authorize evaluates a Consul authorization request against Garmr policies.
 func (p *ConsulAuthzPlugin) Authorize(ctx context.Context, req *ConsulAuthzRequest) (*ConsulAuthzResponse, error) {
 	if !p.config.Enabled {
 		return &ConsulAuthzResponse{Allowed: true, Reason: "authorization disabled"}, nil
@@ -384,7 +384,7 @@ func (p *ConsulAuthzPlugin) Authorize(ctx context.Context, req *ConsulAuthzReque
 	// Build Q evaluation input
 	p.buildInput(req)
 
-	// Evaluate policy (this would call the Q engine)
+	// Evaluate policy (this would call the Garmr engine)
 	// For now, return a placeholder response
 	response := &ConsulAuthzResponse{
 		Allowed: true,
@@ -416,7 +416,7 @@ func (p *ConsulAuthzPlugin) AuthorizeIntention(ctx context.Context, req *Intenti
 	}
 
 	// Evaluate intention policy
-	_ = input // Would pass to Q engine
+	_ = input // Would pass to Garmr engine
 
 	response := &ConsulAuthzResponse{
 		Allowed: true,

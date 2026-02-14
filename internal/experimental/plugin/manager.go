@@ -1,5 +1,5 @@
 // internal/plugin/manager.go
-// Package plugin provides the plugin system for Q Policy Agent.
+// Package plugin provides the plugin system for Garmr.
 // Plugins extend Q's capabilities without bloating the core binary.
 //
 // Plugin Types:
@@ -9,7 +9,7 @@
 //   - function: Custom CUE functions for policy evaluation
 //
 // Plugin Loading:
-//   - Built-in: Compiled into Q (filesystem storage always included)
+//   - Built-in: Compiled into Garmr (filesystem storage always included)
 //   - Shared library: .so/.dylib files loaded at runtime
 //   - (Future) WASM: Sandboxed WebAssembly plugins
 package plugin

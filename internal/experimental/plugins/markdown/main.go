@@ -1,5 +1,5 @@
 // plugins/markdown/main.go
-// Package main provides the markdown documentation generator plugin for Q Policy Agent.
+// Package main provides the markdown documentation generator plugin for Garmr.
 // This plugin generates human-readable documentation from CUE policies.
 //
 // Supported output formats:
@@ -30,7 +30,7 @@ import (
 	"cuelang.org/go/cue/cuecontext"
 	"gopkg.in/yaml.v3"
 
-	"github.com/infrashift/q-policy-agent/internal/plugin"
+	"github.com/infrashift/garmr/internal/experimental/plugin"
 )
 
 //go:embed templates/*.tmpl
@@ -91,7 +91,7 @@ func (p *MarkdownPlugin) Metadata() plugin.Metadata {
 		Type:        plugin.TypeFunction, // Extends Q with doc generation
 		Version:     "1.0.0",
 		Description: "Generate human-readable markdown documentation from CUE policies. Supports GitHub, Hugo, Astro, and Docusaurus formats.",
-		Author:      "Q Policy Agent",
+		Author:      "Garmr",
 		License:     "Apache-2.0",
 		Capabilities: []string{
 			"docs.generate",
@@ -640,7 +640,7 @@ func (p *MarkdownPlugin) generateIndex(docs []*GeneratedDoc) (*GeneratedDoc, err
 		GeneratedAt time.Time
 	}{
 		Title:       "Policy Documentation",
-		Description: "Auto-generated documentation for Q policies",
+		Description: "Auto-generated documentation for Garmr policies",
 		Docs:        docs,
 		ByNamespace: byNamespace,
 		Config:      p.config,

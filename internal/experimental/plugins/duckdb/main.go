@@ -1,5 +1,5 @@
 // plugins/duckdb/main.go
-// Package main provides the DuckDB storage plugin for Q Policy Agent.
+// Package main provides the DuckDB storage plugin for Garmr.
 // DuckDB is useful for:
 //   - Caching policies with SQL queryability
 //   - Analytics on policy usage
@@ -22,8 +22,8 @@ import (
 
 	_ "github.com/marcboeker/go-duckdb"
 
-	"github.com/infrashift/q-policy-agent/internal/plugin"
-	"github.com/infrashift/q-policy-agent/internal/storage"
+	"github.com/infrashift/garmr/internal/experimental/plugin"
+	"github.com/infrashift/garmr/internal/experimental/storage"
 )
 
 // DuckDBPlugin implements storage using embedded DuckDB.
@@ -47,7 +47,7 @@ func (p *DuckDBPlugin) Metadata() plugin.Metadata {
 		Type:        plugin.TypeStorage,
 		Version:     "1.0.0",
 		Description: "Embedded DuckDB storage backend. Useful for caching, analytics, and SQL-queryable policy storage.",
-		Author:      "Q Policy Agent",
+		Author:      "Garmr",
 		License:     "Apache-2.0",
 		MinQVersion: "1.0.0",
 		Capabilities: []string{

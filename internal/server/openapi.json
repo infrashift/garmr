@@ -1,0 +1,646 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Garmr API",
+    "description": "CUE-based policy evaluation engine for enforcing governance, security, and compliance policies.",
+    "version": "1.0.0",
+    "contact": {
+      "name": "Garmr",
+      "url": "https://github.com/infrashift/garmr"
+    },
+    "license": {
+      "name": "Apache 2.0",
+      "url": "https://www.apache.org/licenses/LICENSE-2.0"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080",
+      "description": "Local development server"
+    }
+  ],
+  "tags": [
+    {
+      "name": "health",
+      "description": "Health and readiness endpoints"
+    },
+    {
+      "name": "evaluation",
+      "description": "Policy evaluation endpoints"
+    },
+    {
+      "name": "policies",
+      "description": "Policy management endpoints"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["health"],
+        "summary": "Health check",
+        "description": "Returns the health status of the server",
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "Server is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Server is unhealthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "tags": ["health"],
+        "summary": "Readiness check",
+        "description": "Returns the readiness status of the server (Kubernetes-style probe)",
+        "operationId": "getReady",
+        "responses": {
+          "200": {
+            "description": "Server is ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Server is not ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/evaluate": {
+      "post": {
+        "tags": ["evaluation"],
+        "summary": "Evaluate input against policies",
+        "description": "Evaluates the provided input against loaded policies and returns the decision with any violations",
+        "operationId": "evaluate",
+        "parameters": [
+          {
+            "name": "X-Request-Id",
+            "in": "header",
+            "description": "Request ID for audit correlation (generated if not provided)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "example": "pipeline-12345"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvaluateRequest"
+              },
+              "examples": {
+                "kubernetes-pod": {
+                  "summary": "Kubernetes Pod evaluation",
+                  "value": {
+                    "input": {
+                      "kind": "Pod",
+                      "metadata": {
+                        "name": "web-app",
+                        "namespace": "production"
+                      },
+                      "spec": {
+                        "containers": [
+                          {
+                            "name": "app",
+                            "image": "gcr.io/my-project/app:v1.0.0"
+                          }
+                        ]
+                      }
+                    },
+                    "namespace": "security"
+                  }
+                },
+                "release-artifact": {
+                  "summary": "Release artifact evaluation",
+                  "value": {
+                    "input": {
+                      "kind": "release",
+                      "version": "2.1.0",
+                      "tests": {
+                        "passed": true,
+                        "coverage": 85
+                      }
+                    },
+                    "namespace": "release"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Evaluation completed successfully",
+            "headers": {
+              "X-Request-Id": {
+                "description": "Request ID (echoed or generated)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluateResponse"
+                },
+                "examples": {
+                  "allow": {
+                    "summary": "Policy passed",
+                    "value": {
+                      "decision": "allow",
+                      "request_id": "abc-123",
+                      "results": [],
+                      "metrics": {
+                        "evaluation_time_ns": 1234567,
+                        "policies_evaluated": 2,
+                        "rules_evaluated": 8
+                      }
+                    }
+                  },
+                  "deny": {
+                    "summary": "Policy failed",
+                    "value": {
+                      "decision": "deny",
+                      "request_id": "abc-123",
+                      "results": [
+                        {
+                          "policy_name": "container-security",
+                          "policy_namespace": "security",
+                          "rule_id": "SEC-001",
+                          "description": "Containers must not run as root",
+                          "severity": "high",
+                          "passed": false,
+                          "message": "Container is running as root"
+                        }
+                      ],
+                      "metrics": {
+                        "evaluation_time_ns": 5234567,
+                        "policies_evaluated": 2,
+                        "rules_evaluated": 8
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/validate": {
+      "post": {
+        "tags": ["policies"],
+        "summary": "Validate policy syntax",
+        "description": "Validates a CUE policy without loading it",
+        "operationId": "validatePolicy",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Validation completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/policies": {
+      "get": {
+        "tags": ["policies"],
+        "summary": "List loaded policies",
+        "description": "Returns a list of all policies currently loaded in the server",
+        "operationId": "listPolicies",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "query",
+            "description": "Filter by policy namespace",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "example": "security"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListPoliciesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/policies/reload": {
+      "post": {
+        "tags": ["policies"],
+        "summary": "Reload policies",
+        "description": "Atomically reloads all policies from disk (hot reload)",
+        "operationId": "reloadPolicies",
+        "responses": {
+          "200": {
+            "description": "Policies reloaded successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReloadResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Reload failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "healthy": {
+            "type": "boolean",
+            "description": "Whether the server is healthy"
+          },
+          "version": {
+            "type": "string",
+            "description": "Server version",
+            "example": "1.0.0"
+          },
+          "uptime": {
+            "type": "string",
+            "description": "Server uptime duration",
+            "example": "5m30s"
+          }
+        },
+        "required": ["healthy", "version", "uptime"]
+      },
+      "ReadyResponse": {
+        "type": "object",
+        "properties": {
+          "ready": {
+            "type": "boolean",
+            "description": "Whether the server is ready to accept requests"
+          },
+          "checks": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "description": "Status of individual readiness checks"
+          }
+        },
+        "required": ["ready"]
+      },
+      "EvaluateRequest": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "object",
+            "description": "The resource to evaluate",
+            "additionalProperties": true
+          },
+          "namespace": {
+            "type": "string",
+            "description": "Policy namespace filter",
+            "example": "security"
+          },
+          "policies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Specific policies to evaluate (namespace/name format)",
+            "example": ["security/container-security"]
+          },
+          "trace": {
+            "type": "boolean",
+            "description": "Include evaluation trace",
+            "default": false
+          },
+          "include_passed": {
+            "type": "boolean",
+            "description": "Include passed rules in results",
+            "default": false
+          },
+          "strict": {
+            "type": "boolean",
+            "description": "Treat warnings as failures",
+            "default": false
+          }
+        },
+        "required": ["input"]
+      },
+      "EvaluateResponse": {
+        "type": "object",
+        "properties": {
+          "decision": {
+            "type": "string",
+            "enum": ["allow", "deny", "warn"],
+            "description": "Overall policy decision"
+          },
+          "request_id": {
+            "type": "string",
+            "description": "Request ID for audit correlation"
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RuleResult"
+            },
+            "description": "Individual rule evaluation results"
+          },
+          "metrics": {
+            "$ref": "#/components/schemas/EvaluationMetrics"
+          }
+        },
+        "required": ["decision", "request_id", "results", "metrics"]
+      },
+      "RuleResult": {
+        "type": "object",
+        "properties": {
+          "policy_name": {
+            "type": "string",
+            "description": "Name of the policy"
+          },
+          "policy_namespace": {
+            "type": "string",
+            "description": "Namespace of the policy"
+          },
+          "rule_id": {
+            "type": "string",
+            "description": "Unique rule identifier"
+          },
+          "description": {
+            "type": "string",
+            "description": "Rule description"
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"],
+            "description": "Rule severity"
+          },
+          "passed": {
+            "type": "boolean",
+            "description": "Whether the rule passed"
+          },
+          "message": {
+            "type": "string",
+            "description": "Failure message (if rule failed)"
+          }
+        },
+        "required": ["policy_name", "policy_namespace", "rule_id", "severity", "passed"]
+      },
+      "EvaluationMetrics": {
+        "type": "object",
+        "properties": {
+          "evaluation_time_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Evaluation time in nanoseconds"
+          },
+          "policies_evaluated": {
+            "type": "integer",
+            "description": "Number of policies evaluated"
+          },
+          "rules_evaluated": {
+            "type": "integer",
+            "description": "Number of rules evaluated"
+          }
+        }
+      },
+      "ValidateRequest": {
+        "type": "object",
+        "properties": {
+          "policy": {
+            "type": "string",
+            "description": "CUE policy content to validate"
+          }
+        },
+        "required": ["policy"]
+      },
+      "ValidateResponse": {
+        "type": "object",
+        "properties": {
+          "valid": {
+            "type": "boolean",
+            "description": "Whether the policy is valid"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "description": "Validation errors (if any)"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "description": "Validation warnings (if any)"
+          }
+        },
+        "required": ["valid"]
+      },
+      "ValidationError": {
+        "type": "object",
+        "properties": {
+          "line": {
+            "type": "integer",
+            "description": "Line number of the error"
+          },
+          "column": {
+            "type": "integer",
+            "description": "Column number of the error"
+          },
+          "message": {
+            "type": "string",
+            "description": "Error message"
+          }
+        }
+      },
+      "ListPoliciesResponse": {
+        "type": "object",
+        "properties": {
+          "policies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PolicySummary"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "description": "Total number of policies"
+          }
+        }
+      },
+      "PolicySummary": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Policy name"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "Policy namespace"
+          },
+          "description": {
+            "type": "string",
+            "description": "Policy description"
+          },
+          "rules_count": {
+            "type": "integer",
+            "description": "Number of rules in the policy"
+          },
+          "enforcement": {
+            "type": "string",
+            "enum": ["deny", "warn", "audit"],
+            "description": "Enforcement action"
+          },
+          "target": {
+            "type": "object",
+            "properties": {
+              "resources": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "ReloadResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "description": "Whether reload was successful"
+          },
+          "policies_loaded": {
+            "type": "integer",
+            "description": "Number of policies loaded"
+          },
+          "reload_time_ms": {
+            "type": "integer",
+            "description": "Reload time in milliseconds"
+          },
+          "policy_dir": {
+            "type": "string",
+            "description": "Policy directory path"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Error message"
+          },
+          "code": {
+            "type": "string",
+            "description": "Error code"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Additional error details"
+          }
+        },
+        "required": ["error"]
+      }
+    }
+  }
+}

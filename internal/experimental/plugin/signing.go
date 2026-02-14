@@ -89,7 +89,7 @@ type SigningKey struct {
 	// Private key bytes (nil for verification-only keys)
 	Private ed25519.PrivateKey
 	
-	// Comment describing the key (e.g., "Q Plugin Signing Key - Production")
+	// Comment describing the key (e.g., "Garmr Plugin Signing Key - Production")
 	Comment string
 	
 	// Created timestamp

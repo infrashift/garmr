@@ -1,2 +1,2 @@
-module: "github.com/infrashift/q-policy-agent"
+module: "github.com/infrashift/garmr"
 language: version: "v0.9.0"

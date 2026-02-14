@@ -1,5 +1,5 @@
 // plugins/s3/main.go
-// Package main provides the S3/MinIO storage plugin for Q Policy Agent.
+// Package main provides the S3/MinIO storage plugin for Garmr.
 // This is built as a shared library (.so/.dylib) and loaded at runtime.
 //
 // Build with:
@@ -10,8 +10,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/infrashift/q-policy-agent/internal/plugin"
-	"github.com/infrashift/q-policy-agent/internal/storage"
+	"github.com/infrashift/garmr/internal/experimental/plugin"
+	"github.com/infrashift/garmr/internal/experimental/storage"
 )
 
 // S3Plugin implements the S3/MinIO storage backend.
@@ -40,9 +40,9 @@ func (p *S3Plugin) Metadata() plugin.Metadata {
 		Type:        plugin.TypeStorage,
 		Version:     "1.0.0",
 		Description: "S3-compatible storage backend. Works with AWS S3, MinIO, and other S3-compatible services.",
-		Author:      "Q Policy Agent",
+		Author:      "Garmr",
 		License:     "Apache-2.0",
-		Homepage:    "https://github.com/infrashift/q-policy-agent",
+		Homepage:    "https://github.com/infrashift/garmr",
 		MinQVersion: "1.0.0",
 		Capabilities: []string{
 			"storage.read",

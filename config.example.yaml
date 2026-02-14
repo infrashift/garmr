@@ -1,4 +1,4 @@
-# Q Policy Agent Server Configuration
+# Garmr Server Configuration
 # Copy to config.yaml and customize
 
 # Server addresses
@@ -6,16 +6,16 @@ grpc_addr: ":9090"
 http_addr: ":8080"
 
 # Policy configuration
-policy_dir: "/etc/q/policies"
-# data_dir: "/etc/q/data"  # Optional: external data files
+policy_dir: "/etc/garmr/policies"
+# data_dir: "/etc/garmr/data"  # Optional: external data files
 
 # TLS configuration (optional)
 tls:
   enabled: false
-  cert: "/etc/q/tls/server.crt"
-  key: "/etc/q/tls/server.key"
+  cert: "/etc/garmr/tls/server.crt"
+  key: "/etc/garmr/tls/server.key"
   # For mTLS (optional)
-  # ca: "/etc/q/tls/ca.crt"
+  # ca: "/etc/garmr/tls/ca.crt"
   # client_auth: "require"  # none, request, require
 
 # Logging configuration
@@ -26,7 +26,7 @@ log:
 # Audit logging
 audit:
   enabled: true
-  path: "/var/log/q/audit.log"
+  path: "/var/log/garmr/audit.log"
 
 # Development mode (optional)
 # dev: true  # Enables colored console output

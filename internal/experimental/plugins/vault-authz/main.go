@@ -1,8 +1,8 @@
 // plugins/vault-authz/main.go
-// Package main provides Vault authorization integration for Q Policy Agent.
+// Package main provides Vault authorization integration for Garmr.
 // Implements a Vault auth method plugin that delegates policy decisions to Q.
 //
-// This plugin enables Q to serve as an external Policy Decision Point (PDP)
+// This plugin enables Garmr to serve as an external Policy Decision Point (PDP)
 // for HashiCorp Vault, providing an open-source alternative to Sentinel.
 //
 // Build with:
@@ -21,10 +21,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/infrashift/q-policy-agent/internal/plugin"
+	"github.com/infrashift/garmr/internal/experimental/plugin"
 )
 
-// VaultAuthzPlugin provides Vault authorization via Q policy evaluation.
+// VaultAuthzPlugin provides Vault authorization via Garmr policy evaluation.
 type VaultAuthzPlugin struct {
 	config     VaultAuthzConfig
 	httpClient *http.Client
@@ -41,13 +41,13 @@ type VaultAuthzConfig struct {
 	// ListenAddr for the authorization webhook endpoint
 	ListenAddr string `json:"listenAddr"`
 
-	// PolicyNamespace is the Q namespace for Vault policies
+	// PolicyNamespace is the Garmr namespace for Vault policies
 	PolicyNamespace string `json:"policyNamespace"`
 
 	// DefaultPolicy is evaluated when no specific policy matches
 	DefaultPolicy string `json:"defaultPolicy"`
 
-	// PolicyMapping maps Vault paths to Q policies
+	// PolicyMapping maps Vault paths to Garmr policies
 	PolicyMapping map[string]string `json:"policyMapping"`
 
 	// TLS configuration
@@ -165,8 +165,8 @@ func (p *VaultAuthzPlugin) Metadata() plugin.Metadata {
 		Name:        "vault-authz",
 		Type:        plugin.TypeAuth,
 		Version:     "1.0.0",
-		Description: "Vault external authorization via Q policy evaluation. Open-source Sentinel alternative.",
-		Author:      "Q Policy Agent",
+		Description: "Vault external authorization via Garmr policy evaluation. Open-source Sentinel alternative.",
+		Author:      "Garmr",
 		License:     "Apache-2.0",
 		Capabilities: []string{
 			"vault.authorization",
@@ -287,7 +287,7 @@ func (p *VaultAuthzPlugin) Close() error {
 	return nil
 }
 
-// Authorize evaluates a Vault authorization request against Q policies.
+// Authorize evaluates a Vault authorization request against Garmr policies.
 func (p *VaultAuthzPlugin) Authorize(ctx context.Context, req *VaultAuthzRequest) (*VaultAuthzResponse, error) {
 	if !p.config.Enabled {
 		return &VaultAuthzResponse{Allowed: true, Reason: "authorization disabled"}, nil
@@ -296,7 +296,7 @@ func (p *VaultAuthzPlugin) Authorize(ctx context.Context, req *VaultAuthzRequest
 	// Determine which policy to evaluate
 	policyName := p.selectPolicy(req.Path)
 
-	// Evaluate policy (this would call the Q engine)
+	// Evaluate policy (this would call the Garmr engine)
 	// For now, return a placeholder response
 	response := &VaultAuthzResponse{
 		Allowed:  true,

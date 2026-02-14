@@ -131,7 +131,7 @@ func (h *Handler) Check(ctx context.Context) *Response {
 }
 
 // LivenessHandler returns the liveness probe handler.
-// This is a simple check that Q is running.
+// This is a simple check that Garmr is running.
 func (h *Handler) LivenessHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		h.mu.RLock()
@@ -156,7 +156,7 @@ func (h *Handler) LivenessHandler() http.HandlerFunc {
 }
 
 // ReadinessHandler returns the readiness probe handler.
-// This checks if Q is ready to accept traffic.
+// This checks if Garmr is ready to accept traffic.
 func (h *Handler) ReadinessHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)

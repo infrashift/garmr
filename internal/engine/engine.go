@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,8 @@ import (
 	"cuelang.org/go/cue/cuecontext"
 	"cuelang.org/go/cue/load"
 	"go.uber.org/zap"
+
+	"github.com/infrashift/garmr/internal/observability"
 )
 
 // Common errors
@@ -30,6 +33,23 @@ var (
 	ErrEvaluationFailed  = errors.New("evaluation failed")
 	ErrCompilationFailed = errors.New("compilation failed")
 )
+
+// cueCtxKey is a context key for passing pooled CUE contexts through the evaluation chain.
+type cueCtxKey struct{}
+
+// withCueContext stores a pooled CUE context in a Go context for use during evaluation.
+func withCueContext(ctx context.Context, cueCtx *cue.Context) context.Context {
+	return context.WithValue(ctx, cueCtxKey{}, cueCtx)
+}
+
+// getCueContext retrieves the pooled CUE context from a Go context.
+// Falls back to the engine's shared context if not set (for backwards compatibility).
+func (e *Engine) getCueContext(ctx context.Context) *cue.Context {
+	if cc, ok := ctx.Value(cueCtxKey{}).(*cue.Context); ok {
+		return cc
+	}
+	return e.ctx
+}
 
 // Decision represents the overall evaluation decision.
 type Decision string
@@ -70,7 +90,8 @@ func (s Severity) Weight() int {
 // Engine is the core policy evaluation engine.
 type Engine struct {
 	mu       sync.RWMutex
-	ctx      *cue.Context
+	ctx      *cue.Context // used only for schema/init operations under write lock
+	ctxPool  *cueContextPool
 	policies map[string]*CompiledPolicy
 	data     cue.Value
 	schema   cue.Value
@@ -78,6 +99,40 @@ type Engine struct {
 
 	// Builtins for function evaluation
 	builtins map[string]BuiltinFunc
+
+	// regexCache caches compiled regular expressions for pattern matching
+	regexCache sync.Map // map[string]*regexp.Regexp
+
+	// obs provides optional metrics, tracing, and audit logging
+	obs *observability.Provider
+}
+
+// cueContextPool provides a pool of CUE contexts for concurrent use.
+// cue.Context is not documented as thread-safe, so each concurrent evaluation
+// borrows its own context from the pool and returns it when done.
+type cueContextPool struct {
+	pool sync.Pool
+}
+
+// newCueContextPool creates a new CUE context pool.
+func newCueContextPool() *cueContextPool {
+	return &cueContextPool{
+		pool: sync.Pool{
+			New: func() any {
+				return cuecontext.New()
+			},
+		},
+	}
+}
+
+// get borrows a CUE context from the pool. Callers must call put() when done.
+func (p *cueContextPool) get() *cue.Context {
+	return p.pool.Get().(*cue.Context)
+}
+
+// put returns a CUE context to the pool for reuse.
+func (p *cueContextPool) put(ctx *cue.Context) {
+	p.pool.Put(ctx)
 }
 
 // CompiledPolicy represents a pre-compiled policy for fast evaluation.
@@ -226,6 +281,8 @@ type EvaluationMode struct {
 	RulesEvaluated int
 	// Rules skipped due to short-circuit
 	RulesSkipped int
+	// Whether dry run mode was active
+	DryRun bool
 }
 
 // ResultSummary provides aggregate counts.
@@ -311,9 +368,11 @@ func NewEngine(logger *zap.Logger) (*Engine, error) {
 
 	e := &Engine{
 		ctx:      ctx,
+		ctxPool:  newCueContextPool(),
 		policies: make(map[string]*CompiledPolicy),
 		logger:   logger,
 		builtins: make(map[string]BuiltinFunc),
+		obs:      observability.NewProvider(),
 	}
 
 	// Register built-in functions
@@ -327,6 +386,11 @@ func NewEngine(logger *zap.Logger) (*Engine, error) {
 	return e, nil
 }
 
+// SetObservability sets the observability provider for the engine.
+func (e *Engine) SetObservability(obs *observability.Provider) {
+	e.obs = obs
+}
+
 // loadSchema loads the embedded policy schema.
 func (e *Engine) loadSchema() error {
 	// Schema is embedded or loaded from filesystem
@@ -334,7 +398,7 @@ func (e *Engine) loadSchema() error {
 package policy
 
 #Policy: {
-	apiVersion: "policy.q.io/v1"
+	apiVersion: "policy.garmr.io/v1"
 	kind: "Policy"
 	metadata: #Metadata
 	spec: #PolicySpec
@@ -353,6 +417,19 @@ package policy
 	target: #Target
 	rules: [#Rule, ...#Rule]
 	enforcement: #Enforcement
+	requires?: [..._]
+	evaluation?: #EvaluationConfig
+}
+
+#EvaluationConfig: {
+	order?: string | *"priority"
+	failFast?: bool | *false
+	includeCategories?: [...string]
+	excludeCategories?: [...string]
+	includeTags?: [...string]
+	excludeTags?: [...string]
+	maxRules?: int | *0
+	timeout?: string
 }
 
 #Target: {
@@ -365,6 +442,7 @@ package policy
 	kind: string | *"*"
 	names?: [...string]
 	labels?: [string]: string
+	annotations?: [string]: string
 	namespaces?: [...string]
 }
 
@@ -372,14 +450,21 @@ package policy
 	id: string
 	description: string
 	severity: "critical" | "high" | "medium" | "low" | "info"
+	priority?: int
 	expr: _
 	message?: string
+	url?: string
+	remediation?: string
+	category?: string
+	tags?: [...string]
+	continueOnFail?: bool | *true
 }
 
 #Enforcement: {
 	action: "deny" | "warn" | "audit"
 	dryRun: bool | *false
 	exceptions?: [...#Exception]
+	webhook?: _
 }
 
 #Exception: {
@@ -387,6 +472,8 @@ package policy
 	reason: string
 	match: #ResourceSelector
 	expiry?: string
+	approvedBy?: [...string]
+	ticket?: string
 }
 `
 	e.schema = e.ctx.CompileString(schemaSource)
@@ -408,6 +495,9 @@ func (e *Engine) registerBuiltins() {
 	e.builtins["endsWith"] = builtinEndsWith
 	e.builtins["matches"] = builtinMatches
 	e.builtins["now"] = builtinNow
+
+	// Register extended builtins (aggregates, CIDR, K8s units, etc.)
+	e.registerExtendedBuiltins()
 }
 
 // LoadPolicy loads and compiles a policy from CUE source.
@@ -420,18 +510,21 @@ func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string)
 	// Compile the source
 	val := e.ctx.CompileString(source)
 	if val.Err() != nil {
+		e.obs.Metrics().RecordPolicyLoadError(name, namespace, "compilation")
 		return fmt.Errorf("%w: %v", ErrInvalidPolicy, val.Err())
 	}
 
 	// Unify with schema to validate
 	unified := val.Unify(e.schema.LookupPath(cue.ParsePath("#Policy")))
 	if unified.Err() != nil {
+		e.obs.Metrics().RecordPolicyLoadError(name, namespace, "compilation")
 		return fmt.Errorf("%w: schema validation failed: %v", ErrInvalidPolicy, unified.Err())
 	}
 
 	// Extract compiled policy
 	compiled, err := e.compilePolicy(unified, name, namespace)
 	if err != nil {
+		e.obs.Metrics().RecordPolicyLoadError(name, namespace, "compilation")
 		return fmt.Errorf("compiling policy: %w", err)
 	}
 
@@ -450,6 +543,15 @@ func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string)
 		zap.Int("rules", len(compiled.Rules)),
 		zap.Duration("compile_time", time.Since(start)),
 	)
+
+	// Record successful policy load count for this namespace
+	count := 0
+	for _, p := range e.policies {
+		if p.Namespace == namespace {
+			count++
+		}
+	}
+	e.obs.Metrics().SetPoliciesLoaded(namespace, count)
 
 	return nil
 }
@@ -624,14 +726,9 @@ func sortRules(rules []CompiledRule, order EvaluationOrder) []CompiledRule {
 // sortByPriorityThenDefinition sorts rules by priority (lower first),
 // then by definition order for rules without priority or with same priority.
 func sortByPriorityThenDefinition(rules []CompiledRule) {
-	// Stable sort to maintain definition order for equal priorities
-	for i := 0; i < len(rules)-1; i++ {
-		for j := i + 1; j < len(rules); j++ {
-			if shouldSwapPriority(rules[i], rules[j]) {
-				rules[i], rules[j] = rules[j], rules[i]
-			}
-		}
-	}
+	sort.SliceStable(rules, func(i, j int) bool {
+		return shouldSwapPriority(rules[j], rules[i])
+	})
 }
 
 // shouldSwapPriority returns true if rule b should come before rule a.
@@ -656,13 +753,9 @@ func shouldSwapPriority(a, b CompiledRule) bool {
 // sortBySeverityThenDefinition sorts rules by severity (critical first),
 // then by definition order for same severity.
 func sortBySeverityThenDefinition(rules []CompiledRule) {
-	for i := 0; i < len(rules)-1; i++ {
-		for j := i + 1; j < len(rules); j++ {
-			if shouldSwapSeverity(rules[i], rules[j]) {
-				rules[i], rules[j] = rules[j], rules[i]
-			}
-		}
-	}
+	sort.SliceStable(rules, func(i, j int) bool {
+		return shouldSwapSeverity(rules[j], rules[i])
+	})
 }
 
 // shouldSwapSeverity returns true if rule b should come before rule a.
@@ -677,13 +770,9 @@ func shouldSwapSeverity(a, b CompiledRule) bool {
 
 // sortByPriorityThenSeverity sorts by priority first, then severity within same priority.
 func sortByPriorityThenSeverity(rules []CompiledRule) {
-	for i := 0; i < len(rules)-1; i++ {
-		for j := i + 1; j < len(rules); j++ {
-			if shouldSwapPriorityThenSeverity(rules[i], rules[j]) {
-				rules[i], rules[j] = rules[j], rules[i]
-			}
-		}
-	}
+	sort.SliceStable(rules, func(i, j int) bool {
+		return shouldSwapPriorityThenSeverity(rules[j], rules[i])
+	})
 }
 
 // shouldSwapPriorityThenSeverity returns true if rule b should come before rule a.
@@ -849,6 +938,38 @@ func (e *Engine) extractEnforcement(val cue.Value) (EnforcementSpec, error) {
 		enf.DryRun, _ = v.Bool()
 	}
 
+	// Extract exceptions
+	if exceptionsVal := val.LookupPath(cue.ParsePath("exceptions")); exceptionsVal.Exists() {
+		iter, _ := exceptionsVal.List()
+		for iter.Next() {
+			excVal := iter.Value()
+			var exc ExceptionSpec
+			// extract name, reason, match fields, expiry
+			if v := excVal.LookupPath(cue.ParsePath("name")); v.Exists() {
+				exc.Name, _ = v.String()
+			}
+			if v := excVal.LookupPath(cue.ParsePath("reason")); v.Exists() {
+				exc.Reason, _ = v.String()
+			}
+			// extract match (ResourceSelector)
+			if matchVal := excVal.LookupPath(cue.ParsePath("match")); matchVal.Exists() {
+				rs, err := e.extractResourceSelector(matchVal)
+				if err == nil {
+					exc.Match = rs
+				}
+			}
+			// extract expiry
+			if v := excVal.LookupPath(cue.ParsePath("expiry")); v.Exists() {
+				if expiryStr, err := v.String(); err == nil {
+					if t, err := time.Parse(time.RFC3339, expiryStr); err == nil {
+						exc.Expiry = &t
+					}
+				}
+			}
+			enf.Exceptions = append(enf.Exceptions, exc)
+		}
+	}
+
 	return enf, nil
 }
 
@@ -856,6 +977,20 @@ func (e *Engine) extractEnforcement(val cue.Value) (EnforcementSpec, error) {
 func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateResponse, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
+
+	// Track active evaluations for metrics
+	e.obs.Metrics().IncActiveEvaluations()
+	defer e.obs.Metrics().DecActiveEvaluations()
+
+	// Borrow a CUE context from the pool for this evaluation.
+	// This ensures each concurrent evaluation has its own context,
+	// avoiding thread-safety issues with shared cue.Context usage.
+	cueCtx := e.ctxPool.get()
+	defer e.ctxPool.put(cueCtx)
+
+	// Store the pooled CUE context in the Go context so all downstream
+	// evaluation methods can access it without signature changes.
+	ctx = withCueContext(ctx, cueCtx)
 
 	start := time.Now()
 	resp := &EvaluateResponse{
@@ -867,8 +1002,8 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 		resp.Trace = []TraceEvent{}
 	}
 
-	// Convert input to CUE value
-	inputVal := e.ctx.Encode(req.Input)
+	// Convert input to CUE value using pooled context
+	inputVal := cueCtx.Encode(req.Input)
 	if inputVal.Err() != nil {
 		return nil, fmt.Errorf("%w: encoding input: %v", ErrInvalidInput, inputVal.Err())
 	}
@@ -877,9 +1012,31 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 	policies := e.findApplicablePolicies(req)
 	resp.Metrics.PoliciesEvaluated = len(policies)
 
+	// Timeout enforcement: find the minimum timeout across all policies
+	minTimeout := time.Duration(0)
+	for _, p := range policies {
+		if p.Evaluation.Timeout > 0 {
+			if minTimeout == 0 || p.Evaluation.Timeout < minTimeout {
+				minTimeout = p.Evaluation.Timeout
+			}
+		}
+	}
+	if minTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, minTimeout)
+		defer cancel()
+	}
+
+	// Count total rules in scope for fail-fast metadata
+	totalRulesInScope := 0
+	for _, p := range policies {
+		totalRulesInScope += len(p.Rules)
+	}
+	rulesEvaluated := 0
+
 	// Evaluate each policy
 	for _, policy := range policies {
-		results, err := e.evaluatePolicy(ctx, policy, inputVal, req.Options)
+		results, failFastTriggered, err := e.evaluatePolicy(ctx, policy, inputVal, req)
 		if err != nil {
 			e.logger.Error("policy evaluation failed",
 				zap.String("policy", policy.Name),
@@ -888,10 +1045,22 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 			continue
 		}
 
+		rulesEvaluated += len(results)
 		resp.Metrics.RulesEvaluated += len(results)
+
+		// Determine dry run mode
+		isDryRun := false
+		if req.Options.DryRunOverride != nil {
+			isDryRun = *req.Options.DryRunOverride
+		} else {
+			isDryRun = policy.Enforcement.DryRun
+		}
 
 		for _, result := range results {
 			if !result.Passed {
+				// Record violation metric
+				e.obs.Metrics().RecordViolation(policy.Name, policy.Namespace, result.RuleID, string(result.Severity))
+
 				// Update decision based on severity and enforcement
 				switch policy.Enforcement.Action {
 				case "deny":
@@ -901,6 +1070,14 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 						resp.Decision = DecisionWarn
 					}
 				}
+
+				// Dry run: downgrade deny to warn and annotate the message
+				if isDryRun {
+					if resp.Decision == DecisionDeny {
+						resp.Decision = DecisionWarn
+					}
+					result.Message = "[DRY RUN] " + result.Message
+				}
 			}
 
 			// Include result based on options
@@ -908,9 +1085,46 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 				resp.Results = append(resp.Results, result)
 			}
 		}
+
+		// Set dry run mode info
+		if isDryRun {
+			resp.EvaluationMode.DryRun = true
+		}
+
+		// Handle fail-fast termination
+		if failFastTriggered {
+			// Find the last failed result
+			var lastFailed *RuleResult
+			for i := len(results) - 1; i >= 0; i-- {
+				if !results[i].Passed {
+					r := results[i]
+					r.CausedTermination = true
+					lastFailed = &r
+					break
+				}
+			}
+
+			resp.TerminatedEarly = true
+			resp.TerminationRule = lastFailed
+			resp.EvaluationMode.FailFast = true
+			resp.EvaluationMode.ShortCircuited = true
+			resp.EvaluationMode.TotalRulesInScope = totalRulesInScope
+			resp.EvaluationMode.RulesEvaluated = rulesEvaluated
+			resp.EvaluationMode.RulesSkipped = totalRulesInScope - rulesEvaluated
+			break
+		}
 	}
 
 	resp.Metrics.EvaluationTimeNs = time.Since(start).Nanoseconds()
+
+	// Record evaluation metric
+	e.obs.Metrics().RecordEvaluation(
+		"",                       // policy name (we evaluate multiple)
+		req.Namespace,            // namespace
+		string(resp.Decision),    // decision
+		"",                       // environment
+		time.Since(start),        // duration
+	)
 
 	return resp, nil
 }
@@ -976,14 +1190,14 @@ func (e *Engine) policyMatchesInput(policy *CompiledPolicy, input map[string]any
 func (e *Engine) selectorMatchesInput(selector ResourceSelector, kind, apiGroup, name, namespace string, labels map[string]string) bool {
 	// Check Kind (supports wildcards)
 	if selector.Kind != "" && selector.Kind != "*" {
-		if !matchesPattern(selector.Kind, kind) {
+		if !e.matchesPatternCached(selector.Kind, kind) {
 			return false
 		}
 	}
 
 	// Check APIGroup
 	if selector.APIGroup != "" && selector.APIGroup != "*" {
-		if !matchesPattern(selector.APIGroup, apiGroup) {
+		if !e.matchesPatternCached(selector.APIGroup, apiGroup) {
 			return false
 		}
 	}
@@ -992,7 +1206,7 @@ func (e *Engine) selectorMatchesInput(selector ResourceSelector, kind, apiGroup,
 	if len(selector.Names) > 0 {
 		found := false
 		for _, n := range selector.Names {
-			if matchesPattern(n, name) {
+			if e.matchesPatternCached(n, name) {
 				found = true
 				break
 			}
@@ -1006,7 +1220,7 @@ func (e *Engine) selectorMatchesInput(selector ResourceSelector, kind, apiGroup,
 	if len(selector.Namespaces) > 0 {
 		found := false
 		for _, ns := range selector.Namespaces {
-			if matchesPattern(ns, namespace) {
+			if e.matchesPatternCached(ns, namespace) {
 				found = true
 				break
 			}
@@ -1019,7 +1233,7 @@ func (e *Engine) selectorMatchesInput(selector ResourceSelector, kind, apiGroup,
 	// Check Labels (all specified labels must match)
 	if len(selector.Labels) > 0 {
 		for k, v := range selector.Labels {
-			if labelVal, ok := labels[k]; !ok || !matchesPattern(v, labelVal) {
+			if labelVal, ok := labels[k]; !ok || !e.matchesPatternCached(v, labelVal) {
 				return false
 			}
 		}
@@ -1028,7 +1242,22 @@ func (e *Engine) selectorMatchesInput(selector ResourceSelector, kind, apiGroup,
 	return true
 }
 
+// getCompiledRegex returns a compiled regex from the cache, compiling and caching it if needed.
+func (e *Engine) getCompiledRegex(pattern string) (*regexp.Regexp, error) {
+	if cached, ok := e.regexCache.Load(pattern); ok {
+		return cached.(*regexp.Regexp), nil
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	e.regexCache.Store(pattern, re)
+	return re, nil
+}
+
 // matchesPattern checks if a value matches a pattern (supports * wildcard).
+// This is a package-level function that does not use the regex cache.
+// Prefer (e *Engine).matchesPatternCached when an engine instance is available.
 func matchesPattern(pattern, value string) bool {
 	// Case-insensitive comparison
 	pattern = strings.ToLower(pattern)
@@ -1044,6 +1273,31 @@ func matchesPattern(pattern, value string) bool {
 		// Convert glob pattern to regex
 		regexPattern := "^" + strings.ReplaceAll(regexp.QuoteMeta(pattern), "\\*", ".*") + "$"
 		re, err := regexp.Compile(regexPattern)
+		if err != nil {
+			return false
+		}
+		return re.MatchString(value)
+	}
+
+	return false
+}
+
+// matchesPatternCached checks if a value matches a pattern using the engine's regex cache.
+func (e *Engine) matchesPatternCached(pattern, value string) bool {
+	// Case-insensitive comparison
+	pattern = strings.ToLower(pattern)
+	value = strings.ToLower(value)
+
+	// Exact match
+	if pattern == value {
+		return true
+	}
+
+	// Wildcard matching
+	if strings.Contains(pattern, "*") {
+		// Convert glob pattern to regex
+		regexPattern := "^" + strings.ReplaceAll(regexp.QuoteMeta(pattern), "\\*", ".*") + "$"
+		re, err := e.getCompiledRegex(regexPattern)
 		if err != nil {
 			return false
 		}
@@ -1114,15 +1368,50 @@ func getMapField(m map[string]any, keys ...string) map[string]string {
 }
 
 // evaluatePolicy evaluates a single policy against input.
-func (e *Engine) evaluatePolicy(ctx context.Context, policy *CompiledPolicy, input cue.Value, opts EvaluateOptions) ([]RuleResult, error) {
+// Returns results, whether fail-fast was triggered, and any error.
+func (e *Engine) evaluatePolicy(ctx context.Context, policy *CompiledPolicy, input cue.Value, req *EvaluateRequest) ([]RuleResult, bool, error) {
 	var results []RuleResult
+	opts := req.Options
 
-	for _, rule := range policy.Rules {
-		result := e.evaluateRule(ctx, policy, rule, input, opts)
-		results = append(results, result)
+	// Check if any exception matches the input, skip evaluation if so
+	if len(policy.Enforcement.Exceptions) > 0 {
+		if e.matchesException(policy.Enforcement.Exceptions, req.Input) {
+			return results, false, nil
+		}
 	}
 
-	return results, nil
+	for _, rule := range policy.Rules {
+		// Category/tag filtering: skip rules that don't match filters
+		if !e.shouldEvaluateRule(rule, policy.Evaluation, opts) {
+			continue
+		}
+
+		// Timeout check: if the context has been cancelled/timed out, stop evaluating
+		if ctx.Err() != nil {
+			result := RuleResult{
+				PolicyName:      policy.Name,
+				PolicyNamespace: policy.Namespace,
+				RuleID:          rule.ID,
+				RuleDescription: rule.Description,
+				Severity:        rule.Severity,
+				Passed:          true, // don't penalize on timeout
+				Message:         "evaluation timed out",
+				Bindings:        make(map[string]any),
+			}
+			results = append(results, result)
+			break
+		}
+
+		result := e.evaluateRule(ctx, policy, rule, input, opts)
+		results = append(results, result)
+
+		// Fail-fast: stop at first failure if configured
+		if policy.Evaluation.FailFast && !result.Passed {
+			return results, true, nil
+		}
+	}
+
+	return results, false, nil
 }
 
 // evaluateRule evaluates a single rule against input.
@@ -1135,6 +1424,13 @@ func (e *Engine) evaluateRule(ctx context.Context, policy *CompiledPolicy, rule 
 		Severity:        rule.Severity,
 		Passed:          true,
 		Bindings:        make(map[string]any),
+	}
+
+	// Timeout check at rule level
+	if ctx.Err() != nil {
+		result.Passed = true // don't penalize on timeout
+		result.Message = "evaluation timed out"
+		return result
 	}
 
 	// Evaluate the expression by unifying with input
@@ -1153,6 +1449,156 @@ func (e *Engine) evaluateRule(ctx context.Context, policy *CompiledPolicy, rule 
 	}
 
 	return result
+}
+
+// shouldEvaluateRule returns false if the rule should be skipped based on category/tag filters.
+// Both policy-level and request-level filters are applied (both must pass).
+func (e *Engine) shouldEvaluateRule(rule CompiledRule, policyConfig EvaluationConfig, opts EvaluateOptions) bool {
+	// Check policy-level category filters
+	if len(policyConfig.IncludeCategories) > 0 {
+		if !stringInSlice(rule.Category, policyConfig.IncludeCategories) {
+			return false
+		}
+	}
+	if len(policyConfig.ExcludeCategories) > 0 {
+		if stringInSlice(rule.Category, policyConfig.ExcludeCategories) {
+			return false
+		}
+	}
+
+	// Check policy-level tag filters
+	if len(policyConfig.IncludeTags) > 0 {
+		if !anyTagMatches(rule.Tags, policyConfig.IncludeTags) {
+			return false
+		}
+	}
+	if len(policyConfig.ExcludeTags) > 0 {
+		if anyTagMatches(rule.Tags, policyConfig.ExcludeTags) {
+			return false
+		}
+	}
+
+	// Check request-level category filters
+	if len(opts.IncludeCategories) > 0 {
+		if !stringInSlice(rule.Category, opts.IncludeCategories) {
+			return false
+		}
+	}
+	if len(opts.ExcludeCategories) > 0 {
+		if stringInSlice(rule.Category, opts.ExcludeCategories) {
+			return false
+		}
+	}
+
+	// Check request-level tag filters
+	if len(opts.IncludeTags) > 0 {
+		if !anyTagMatches(rule.Tags, opts.IncludeTags) {
+			return false
+		}
+	}
+	if len(opts.ExcludeTags) > 0 {
+		if anyTagMatches(rule.Tags, opts.ExcludeTags) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// stringInSlice checks if a string is in a slice.
+func stringInSlice(s string, list []string) bool {
+	for _, item := range list {
+		if strings.EqualFold(s, item) {
+			return true
+		}
+	}
+	return false
+}
+
+// anyTagMatches checks if any of the rule's tags match any of the filter tags.
+func anyTagMatches(ruleTags, filterTags []string) bool {
+	for _, rt := range ruleTags {
+		for _, ft := range filterTags {
+			if strings.EqualFold(rt, ft) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// matchesException checks if any non-expired exception matches the input.
+func (e *Engine) matchesException(exceptions []ExceptionSpec, input map[string]any) bool {
+	inputKind := getStringField(input, "kind")
+	inputAPIGroup := getStringField(input, "apiVersion")
+	inputName := getStringField(input, "metadata", "name")
+	inputNamespace := getStringField(input, "metadata", "namespace")
+	inputLabels := getMapField(input, "metadata", "labels")
+
+	for _, exc := range exceptions {
+		// Check if exception has expired
+		if exc.Expiry != nil && time.Now().After(*exc.Expiry) {
+			continue
+		}
+
+		// Check if the exception's match selector applies to this input
+		if e.selectorMatchesInput(exc.Match, inputKind, inputAPIGroup, inputName, inputNamespace, inputLabels) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// valuesEqual performs type-aware comparison of two values, handling numeric type coercion.
+func valuesEqual(a, b any) bool {
+	// Try numeric comparison first
+	aFloat, aIsNum := toFloatOk(a)
+	bFloat, bIsNum := toFloatOk(b)
+	if aIsNum && bIsNum {
+		return aFloat == bFloat
+	}
+
+	// Fall back to string comparison
+	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
+}
+
+// toFloatOk attempts to convert a value to float64, returning whether the conversion succeeded.
+func toFloatOk(v any) (float64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return val, true
+	case float32:
+		return float64(val), true
+	case int:
+		return float64(val), true
+	case int64:
+		return float64(val), true
+	case int32:
+		return float64(val), true
+	case int16:
+		return float64(val), true
+	case int8:
+		return float64(val), true
+	case uint:
+		return float64(val), true
+	case uint64:
+		return float64(val), true
+	case uint32:
+		return float64(val), true
+	case uint16:
+		return float64(val), true
+	case uint8:
+		return float64(val), true
+	case string:
+		f, err := strconv.ParseFloat(val, 64)
+		if err != nil {
+			return 0, false
+		}
+		return f, true
+	default:
+		return 0, false
+	}
 }
 
 // evaluateExpression evaluates a CUE expression against input.
@@ -1227,6 +1673,11 @@ func (e *Engine) evaluateExpression(ctx context.Context, expr cue.Value, input c
 		return true, bindings, ""
 	}
 
+	// Check for 'contains' (collection contains check)
+	if containsVal := expr.LookupPath(cue.ParsePath("contains")); containsVal.Exists() {
+		return e.evaluateContainsExpr(containsVal, input)
+	}
+
 	// Check for 'match'
 	if matchVal := expr.LookupPath(cue.ParsePath("match")); matchVal.Exists() {
 		return e.evaluateMatch(matchVal, input)
@@ -1237,10 +1688,114 @@ func (e *Engine) evaluateExpression(ctx context.Context, expr cue.Value, input c
 		return e.evaluateCompare(compareVal, input)
 	}
 
+	// Check for 'func' (builtin function call)
+	if funcVal := expr.LookupPath(cue.ParsePath("func")); funcVal.Exists() {
+		return e.evaluateFunc(ctx, funcVal, input)
+	}
+
+	// Check for 'ref' (reference to another policy's result)
+	if refVal := expr.LookupPath(cue.ParsePath("ref")); refVal.Exists() {
+		// ref is a forward-looking feature; currently passes (no-op)
+		// Future: look up referenced policy/rule result
+		return true, bindings, ""
+	}
+
 	// Default: try to unify and check for errors
 	unified := input.Unify(expr)
 	if unified.Err() != nil {
 		return false, bindings, unified.Err().Error()
+	}
+
+	return true, bindings, ""
+}
+
+// evaluateFunc evaluates a builtin function call expression.
+func (e *Engine) evaluateFunc(ctx context.Context, expr cue.Value, input cue.Value) (bool, map[string]any, string) {
+	bindings := make(map[string]any)
+
+	// Get function name
+	nameVal := expr.LookupPath(cue.ParsePath("name"))
+	if !nameVal.Exists() {
+		return false, bindings, "func requires 'name'"
+	}
+	name, _ := nameVal.String()
+
+	// Look up the builtin
+	fn, ok := e.builtins[name]
+	if !ok {
+		return false, bindings, fmt.Sprintf("unknown builtin function: %s", name)
+	}
+
+	// Resolve arguments
+	argsVal := expr.LookupPath(cue.ParsePath("args"))
+	var args []any
+	if argsVal.Exists() {
+		iter, _ := argsVal.List()
+		for iter.Next() {
+			arg := iter.Value()
+			// If it's a string that looks like an input path reference (starts with "input.")
+			if s, err := arg.String(); err == nil && strings.HasPrefix(s, "input.") {
+				// Resolve from input
+				path := strings.TrimPrefix(s, "input.")
+				resolved := input.LookupPath(cue.ParsePath(path))
+				if resolved.Exists() {
+					var v any
+					if err := resolved.Decode(&v); err == nil {
+						args = append(args, v)
+						continue
+					}
+				}
+				// If resolution fails, use the string literal
+				args = append(args, s)
+			} else {
+				// Decode the literal value
+				var v any
+				if err := arg.Decode(&v); err == nil {
+					args = append(args, v)
+				} else {
+					args = append(args, nil)
+				}
+			}
+		}
+	}
+
+	// Call the builtin
+	result, err := fn(ctx, args...)
+	if err != nil {
+		return false, bindings, fmt.Sprintf("builtin %s failed: %v", name, err)
+	}
+
+	// Bind result if requested
+	bindVal := expr.LookupPath(cue.ParsePath("bind"))
+	if bindVal.Exists() {
+		bindName, _ := bindVal.String()
+		if bindName != "" {
+			bindings[bindName] = result
+		}
+	}
+
+	// Check expectation if present
+	expectVal := expr.LookupPath(cue.ParsePath("expect"))
+	if expectVal.Exists() {
+		var expected any
+		expectVal.Decode(&expected)
+
+		// Compare result with expected value
+		if valuesEqual(result, expected) {
+			return true, bindings, ""
+		}
+		return false, bindings, fmt.Sprintf("builtin %s returned %v, expected %v", name, result, expected)
+	}
+
+	// If no expectation, treat truthy result as pass
+	// boolean true, non-zero number, non-empty string = pass
+	switch v := result.(type) {
+	case bool:
+		if !v {
+			return false, bindings, fmt.Sprintf("builtin %s returned false", name)
+		}
+	case nil:
+		return false, bindings, fmt.Sprintf("builtin %s returned nil", name)
 	}
 
 	return true, bindings, ""
@@ -1305,7 +1860,7 @@ func (e *Engine) evaluateMatch(expr cue.Value, input cue.Value) (bool, map[strin
 		equalsVal.Decode(&expected)
 		fieldVal.Decode(&actual)
 
-		if fmt.Sprintf("%v", actual) != fmt.Sprintf("%v", expected) {
+		if !valuesEqual(actual, expected) {
 			return false, bindings, fmt.Sprintf("'%s' expected '%v', got '%v'", path, expected, actual)
 		}
 		return true, bindings, ""
@@ -1383,7 +1938,6 @@ func (e *Engine) evaluateMatch(expr cue.Value, input cue.Value) (bool, map[strin
 
 		var actual interface{}
 		fieldVal.Decode(&actual)
-		actualStr := fmt.Sprintf("%v", actual)
 
 		iter, err := inVal.List()
 		if err != nil {
@@ -1395,9 +1949,8 @@ func (e *Engine) evaluateMatch(expr cue.Value, input cue.Value) (bool, map[strin
 		for iter.Next() {
 			var v interface{}
 			iter.Value().Decode(&v)
-			vStr := fmt.Sprintf("%v", v)
-			allowedValues = append(allowedValues, vStr)
-			if actualStr == vStr {
+			allowedValues = append(allowedValues, fmt.Sprintf("%v", v))
+			if valuesEqual(actual, v) {
 				found = true
 				break
 			}
@@ -1417,7 +1970,6 @@ func (e *Engine) evaluateMatch(expr cue.Value, input cue.Value) (bool, map[strin
 
 		var actual interface{}
 		fieldVal.Decode(&actual)
-		actualStr := fmt.Sprintf("%v", actual)
 
 		iter, err := notInVal.List()
 		if err != nil {
@@ -1427,7 +1979,7 @@ func (e *Engine) evaluateMatch(expr cue.Value, input cue.Value) (bool, map[strin
 		for iter.Next() {
 			var v interface{}
 			iter.Value().Decode(&v)
-			if actualStr == fmt.Sprintf("%v", v) {
+			if valuesEqual(actual, v) {
 				return false, bindings, fmt.Sprintf("'%s' value '%v' is in forbidden list", path, actual)
 			}
 		}
@@ -1560,6 +2112,42 @@ func (e *Engine) resolveValue(val cue.Value, input cue.Value) any {
 		return nil
 	}
 
+	// Check for func call
+	if funcVal := val.LookupPath(cue.ParsePath("func")); funcVal.Exists() {
+		nameVal := funcVal.LookupPath(cue.ParsePath("name"))
+		if !nameVal.Exists() {
+			return nil
+		}
+		name, _ := nameVal.String()
+		fn, ok := e.builtins[name]
+		if !ok {
+			return nil
+		}
+
+		// Resolve arguments
+		argsVal := funcVal.LookupPath(cue.ParsePath("args"))
+		var args []any
+		if argsVal.Exists() {
+			iter, _ := argsVal.List()
+			for iter.Next() {
+				resolved := e.resolveValue(iter.Value(), input)
+				args = append(args, resolved)
+			}
+		}
+
+		result, err := fn(context.Background(), args...)
+		if err != nil {
+			return nil
+		}
+		return result
+	}
+
+	// Check for env variable
+	if envVal := val.LookupPath(cue.ParsePath("env")); envVal.Exists() {
+		envName, _ := envVal.String()
+		return os.Getenv(envName)
+	}
+
 	return nil
 }
 
@@ -1570,9 +2158,9 @@ func (e *Engine) compare(left any, op string, right any) bool {
 
 	switch op {
 	case "==", "eq":
-		return leftStr == rightStr
+		return valuesEqual(left, right)
 	case "!=", "ne", "neq":
-		return leftStr != rightStr
+		return !valuesEqual(left, right)
 	case ">", "gt":
 		return toFloat(left) > toFloat(right)
 	case ">=", "gte":
@@ -1584,7 +2172,7 @@ func (e *Engine) compare(left any, op string, right any) bool {
 	case "in":
 		if arr, ok := right.([]any); ok {
 			for _, v := range arr {
-				if leftStr == fmt.Sprintf("%v", v) {
+				if valuesEqual(left, v) {
 					return true
 				}
 			}
@@ -1593,7 +2181,7 @@ func (e *Engine) compare(left any, op string, right any) bool {
 	case "not_in", "notIn":
 		if arr, ok := right.([]any); ok {
 			for _, v := range arr {
-				if leftStr == fmt.Sprintf("%v", v) {
+				if valuesEqual(left, v) {
 					return false
 				}
 			}
@@ -1708,7 +2296,7 @@ func (e *Engine) evaluateForEach(ctx context.Context, expr cue.Value, input cue.
 
 		// Create a new input context with the current item aliased
 		// We need to merge the item into the input under the alias
-		itemInput := e.createItemContext(input, itemVal, alias, index)
+		itemInput := e.createItemContext(ctx, input, itemVal, alias, index)
 
 		passed, b, msg := e.evaluateExpression(ctx, conditionVal, itemInput)
 		for k, v := range b {
@@ -1752,8 +2340,9 @@ func (e *Engine) evaluateForEach(ctx context.Context, expr cue.Value, input cue.
 	return false, bindings, fmt.Sprintf("no items in '%s' matched the condition", path)
 }
 
-// createItemContext creates a new CUE value context with the item aliased
-func (e *Engine) createItemContext(input cue.Value, item cue.Value, alias string, index int) cue.Value {
+// createItemContext creates a new CUE value context with the item aliased.
+// Uses the pooled CUE context from the Go context for thread safety.
+func (e *Engine) createItemContext(ctx context.Context, input cue.Value, item cue.Value, alias string, index int) cue.Value {
 	// Decode original input
 	var inputMap map[string]any
 	input.Decode(&inputMap)
@@ -1769,8 +2358,94 @@ func (e *Engine) createItemContext(input cue.Value, item cue.Value, alias string
 	inputMap[alias] = itemData
 	inputMap["_index"] = index
 
-	// Rebuild CUE value
-	return e.ctx.Encode(inputMap)
+	// Rebuild CUE value using pooled context
+	return e.getCueContext(ctx).Encode(inputMap)
+}
+
+// evaluateContainsExpr evaluates a standalone contains expression.
+// Checks if a collection at the given path contains specific values.
+//
+//	contains: { path: "spec.tags", value: "production" }             // single value
+//	contains: { path: "spec.tags", all: ["production", "reviewed"] } // all must be present
+//	contains: { path: "spec.tags", any: ["staging", "production"] }  // at least one
+func (e *Engine) evaluateContainsExpr(expr cue.Value, input cue.Value) (bool, map[string]any, string) {
+	bindings := make(map[string]any)
+
+	pathVal := expr.LookupPath(cue.ParsePath("path"))
+	if !pathVal.Exists() {
+		return false, bindings, "contains requires 'path'"
+	}
+	path, _ := pathVal.String()
+
+	fieldVal := input.LookupPath(cue.ParsePath(path))
+	if !fieldVal.Exists() {
+		return false, bindings, fmt.Sprintf("path '%s' not found", path)
+	}
+
+	// Decode the collection
+	var collection []any
+	if err := fieldVal.Decode(&collection); err != nil {
+		// Try as string contains
+		if s, sErr := fieldVal.String(); sErr == nil {
+			// Single value check on string
+			if checkVal := expr.LookupPath(cue.ParsePath("value")); checkVal.Exists() {
+				var needle string
+				checkVal.Decode(&needle)
+				if strings.Contains(s, needle) {
+					return true, bindings, ""
+				}
+				return false, bindings, fmt.Sprintf("'%s' does not contain '%s'", path, needle)
+			}
+		}
+		return false, bindings, fmt.Sprintf("path '%s' is not a collection", path)
+	}
+
+	// Single value check
+	if checkVal := expr.LookupPath(cue.ParsePath("value")); checkVal.Exists() {
+		var needle any
+		checkVal.Decode(&needle)
+		for _, item := range collection {
+			if valuesEqual(item, needle) {
+				return true, bindings, ""
+			}
+		}
+		return false, bindings, fmt.Sprintf("'%s' does not contain %v", path, needle)
+	}
+
+	// All values must be present
+	if allVal := expr.LookupPath(cue.ParsePath("all")); allVal.Exists() {
+		var required []any
+		allVal.Decode(&required)
+		for _, needle := range required {
+			found := false
+			for _, item := range collection {
+				if valuesEqual(item, needle) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false, bindings, fmt.Sprintf("'%s' missing required value %v", path, needle)
+			}
+		}
+		return true, bindings, ""
+	}
+
+	// Any value must be present
+	if anyVal := expr.LookupPath(cue.ParsePath("any")); anyVal.Exists() {
+		var candidates []any
+		anyVal.Decode(&candidates)
+		for _, needle := range candidates {
+			for _, item := range collection {
+				if valuesEqual(item, needle) {
+					return true, bindings, ""
+				}
+			}
+		}
+		return false, bindings, fmt.Sprintf("'%s' contains none of the expected values", path)
+	}
+
+	return false, bindings, "contains requires 'value', 'all', or 'any'"
 }
 
 // evaluateLength evaluates length conditions on arrays or strings
@@ -2410,6 +3085,11 @@ func (e *Engine) loadPoliciesIntoMap(ctx context.Context, dir string, policies m
 
 // loadSingleDirIntoMap loads policies from a single directory into the map.
 func (e *Engine) loadSingleDirIntoMap(ctx context.Context, dir string, policies map[string]*CompiledPolicy) error {
+	// Use pooled context since this may be called without the engine lock
+	// (e.g., from ReloadPoliciesFromDir).
+	cueCtx := e.ctxPool.get()
+	defer e.ctxPool.put(cueCtx)
+
 	cfg := &load.Config{
 		Dir: dir,
 	}
@@ -2422,7 +3102,7 @@ func (e *Engine) loadSingleDirIntoMap(ctx context.Context, dir string, policies 
 			return fmt.Errorf("loading instance: %w", inst.Err)
 		}
 
-		val := e.ctx.BuildInstance(inst)
+		val := cueCtx.BuildInstance(inst)
 		if val.Err() != nil {
 			return fmt.Errorf("building instance: %w", val.Err())
 		}
@@ -2480,7 +3160,11 @@ func (e *Engine) loadSingleDirIntoMap(ctx context.Context, dir string, policies 
 
 // Validate validates a policy without loading it.
 func (e *Engine) Validate(source string) ([]ValidationError, []ValidationError) {
-	val := e.ctx.CompileString(source)
+	// Use pooled context for thread-safe concurrent validation
+	cueCtx := e.ctxPool.get()
+	defer e.ctxPool.put(cueCtx)
+
+	val := cueCtx.CompileString(source)
 	if val.Err() != nil {
 		return []ValidationError{{
 			Message: val.Err().Error(),
@@ -2740,6 +3424,10 @@ func (e *Engine) hasCueFiles(dir string) (bool, error) {
 
 // loadPoliciesFromSingleDir loads policies from a single directory (non-recursive)
 func (e *Engine) loadPoliciesFromSingleDir(ctx context.Context, dir string) error {
+	// Use pooled context for thread safety during reload operations
+	cueCtx := e.ctxPool.get()
+	defer e.ctxPool.put(cueCtx)
+
 	cfg := &load.Config{
 		Dir: dir,
 	}
@@ -2747,13 +3435,18 @@ func (e *Engine) loadPoliciesFromSingleDir(ctx context.Context, dir string) erro
 	instances := load.Instances([]string{"."}, cfg)
 	loadedAny := false
 
+	// Track namespaces that got policies loaded for metrics
+	namespaceCounts := make(map[string]int)
+
 	for _, inst := range instances {
 		if inst.Err != nil {
+			e.obs.Metrics().RecordPolicyLoadError("", dir, "compilation")
 			return fmt.Errorf("loading instance: %w", inst.Err)
 		}
 
-		val := e.ctx.BuildInstance(inst)
+		val := cueCtx.BuildInstance(inst)
 		if val.Err() != nil {
+			e.obs.Metrics().RecordPolicyLoadError("", dir, "compilation")
 			return fmt.Errorf("building instance: %w", val.Err())
 		}
 
@@ -2785,6 +3478,7 @@ func (e *Engine) loadPoliciesFromSingleDir(ctx context.Context, dir string) erro
 
 			compiled, err := e.compilePolicy(fieldVal, name, ns)
 			if err != nil {
+				e.obs.Metrics().RecordPolicyLoadError(name, ns, "compilation")
 				e.logger.Warn("skipping invalid policy",
 					zap.String("name", name),
 					zap.Error(err),
@@ -2796,6 +3490,7 @@ func (e *Engine) loadPoliciesFromSingleDir(ctx context.Context, dir string) erro
 			key := policyKey(ns, name)
 			e.policies[key] = compiled
 			loadedAny = true
+			namespaceCounts[ns]++
 
 			e.logger.Info("loaded policy from directory",
 				zap.String("name", name),
@@ -2806,6 +3501,11 @@ func (e *Engine) loadPoliciesFromSingleDir(ctx context.Context, dir string) erro
 
 	if !loadedAny {
 		return fmt.Errorf("no policies found in %s", dir)
+	}
+
+	// Record loaded policy counts per namespace
+	for ns, count := range namespaceCounts {
+		e.obs.Metrics().SetPoliciesLoaded(ns, count)
 	}
 
 	return nil

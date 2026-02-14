@@ -1,5 +1,5 @@
 // plugins/prometheus/main.go
-// Package main provides the Prometheus metrics plugin for Q Policy Agent.
+// Package main provides the Prometheus metrics plugin for Garmr.
 // Exposes policy evaluation metrics in Prometheus format.
 //
 // Build with:
@@ -17,7 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/infrashift/q-policy-agent/internal/plugin"
+	"github.com/infrashift/garmr/internal/experimental/plugin"
 )
 
 // PrometheusPlugin exposes metrics for policy evaluation.
@@ -74,7 +74,7 @@ func (p *PrometheusPlugin) Metadata() plugin.Metadata {
 		Type:        plugin.TypeNotifier, // Observability category
 		Version:     "1.0.0",
 		Description: "Prometheus metrics exporter for policy evaluation observability",
-		Author:      "Q Policy Agent",
+		Author:      "Garmr",
 		License:     "Apache-2.0",
 		Capabilities: []string{
 			"metrics.export",

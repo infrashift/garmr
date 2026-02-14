@@ -13,7 +13,7 @@ package config
 	enabled: bool | *true
 	
 	// Path to audit log file
-	path: string | *"/var/log/q/audit.log"
+	path: string | *"/var/log/garmr/audit.log"
 	
 	// Format: jsonl (JSON lines), json, text
 	format: "jsonl" | "json" | "text" | *"jsonl"
@@ -109,7 +109,7 @@ package config
 	enabled: bool | *true
 	
 	// Service name for traces
-	serviceName: string | *"q-policy-agent"
+	serviceName: string | *"garmr"
 	
 	// Service version
 	serviceVersion: string | *"1.0.0"
@@ -216,7 +216,7 @@ package config
 	topic: string | *"q-audit-decisions"
 	
 	// Client ID
-	clientId: string | *"q-policy-agent"
+	clientId: string | *"garmr"
 	
 	// Partitioner: hash, random, roundrobin
 	partitioner: "hash" | "random" | "roundrobin" | *"hash"
@@ -349,9 +349,9 @@ package config
 // Q works out of the box with this
 _minimalConfig: {
 	// Uses defaults:
-	// - Storage: filesystem (/etc/q/policies)
+	// - Storage: filesystem (/etc/garmr/policies)
 	// - Logging: slog JSON to stdout
-	// - Audit: file-based (/var/log/q/audit.log)
+	// - Audit: file-based (/var/log/garmr/audit.log)
 	// - Metrics: disabled (no-op)
 	// - Tracing: disabled (no-op)
 }
@@ -366,7 +366,7 @@ _simpleDeploymentConfig: {
 	
 	audit: #FileAuditPluginConfig & {
 		enabled: true
-		path: "/var/log/q/audit.log"
+		path: "/var/log/garmr/audit.log"
 		rotation: {
 			enabled: true
 			maxSize: 52428800  // 50MB
@@ -404,7 +404,7 @@ _enterpriseConfig: {
 	}
 	
 	otel: #OTelPluginConfig & {
-		serviceName: "q-policy-agent"
+		serviceName: "garmr"
 		environment: "production"
 		exporter: {
 			type: "otlp-grpc"
@@ -421,7 +421,7 @@ _enterpriseConfig: {
 		format: "json"
 		output: "stdout"
 		defaultFields: {
-			service: "q-policy-agent"
+			service: "garmr"
 			version: "1.0.0"
 		}
 	}

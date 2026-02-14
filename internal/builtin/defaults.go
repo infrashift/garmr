@@ -1,6 +1,6 @@
 // internal/builtin/defaults.go
 // Package builtin provides built-in plugins and default configuration.
-// These plugins are compiled into Q and serve as defaults.
+// These plugins are compiled into Garmr and serve as defaults.
 package builtin
 
 import (
@@ -209,7 +209,7 @@ type AuditConfig struct {
 func DefaultAuditConfig() AuditConfig {
 	return AuditConfig{
 		Enabled: true,
-		Path:    "/var/log/q/audit.log",
+		Path:    "/var/log/garmr/audit.log",
 		Format:  "jsonl",
 	}
 }
@@ -291,13 +291,13 @@ var Defaults = struct {
 }{
 	StorageBackend: "filesystem",
 	StorageConfig: map[string]interface{}{
-		"root": "/etc/q/policies",
+		"root": "/etc/garmr/policies",
 	},
 
 	AuditBackend: "audit-file",
 	AuditConfig: map[string]interface{}{
 		"enabled": true,
-		"path":    "/var/log/q/audit.log",
+		"path":    "/var/log/garmr/audit.log",
 		"format":  "jsonl",
 		"rotation": map[string]interface{}{
 			"enabled":    true,
@@ -320,7 +320,7 @@ var RequiredPlugins = []string{
 	"audit-file", // Audit - built-in
 }
 
-// OptionalPlugins lists plugins that enhance Q but aren't required.
+// OptionalPlugins lists plugins that enhance Garmr but aren't required.
 var OptionalPlugins = []string{
 	"prometheus", // Metrics
 	"otel",       // Tracing

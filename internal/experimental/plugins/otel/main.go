@@ -1,5 +1,5 @@
 // plugins/otel/main.go
-// Package main provides the OpenTelemetry tracing plugin for Q Policy Agent.
+// Package main provides the OpenTelemetry tracing plugin for Garmr.
 // Enables distributed tracing for policy evaluations.
 //
 // Build with:
@@ -25,7 +25,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/infrashift/q-policy-agent/internal/plugin"
+	"github.com/infrashift/garmr/internal/experimental/plugin"
 )
 
 // OTelPlugin provides OpenTelemetry tracing for policy evaluation.
@@ -93,7 +93,7 @@ func (p *OTelPlugin) Metadata() plugin.Metadata {
 		Type:        plugin.TypeNotifier,
 		Version:     "1.0.0",
 		Description: "OpenTelemetry distributed tracing for policy evaluation",
-		Author:      "Q Policy Agent",
+		Author:      "Garmr",
 		License:     "Apache-2.0",
 		Capabilities: []string{
 			"tracing.otel",
@@ -109,7 +109,7 @@ func (p *OTelPlugin) Init(ctx context.Context, config map[string]interface{}) er
 	// Parse config with defaults
 	p.config = OTelConfig{
 		Enabled:        true,
-		ServiceName:    "q-policy-agent",
+		ServiceName:    "garmr",
 		ServiceVersion: "1.0.0",
 		Environment:    "production",
 		Exporter: ExporterConfig{
@@ -211,7 +211,7 @@ func (p *OTelPlugin) Init(ctx context.Context, config map[string]interface{}) er
 
 	// Create tracer
 	p.tracer = p.provider.Tracer(
-		"github.com/infrashift/q-policy-agent",
+		"github.com/infrashift/garmr",
 		trace.WithInstrumentationVersion(p.config.ServiceVersion),
 	)
 

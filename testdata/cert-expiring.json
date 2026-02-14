@@ -1,9 +1,0 @@
-{
-  "kind": "certificate",
-  "name": "expiring-certificate",
-  "expiresAt": "2025-12-20T10:30:00Z",
-  "metadata": {
-    "name": "expiring-certificate",
-    "createdAt": "2024-06-15T10:30:00Z"
-  }
-}

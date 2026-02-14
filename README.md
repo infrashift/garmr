@@ -1,15 +1,17 @@
-# Q Policy Agent
+# Garmr
 
-A CUE-based policy-as-code agent that provides a modern alternative to Open Policy Agent (OPA) and HashiCorp Sentinel.
+A CUE-based policy evaluation engine for enforcing governance, security, and compliance policies across your infrastructure and CI/CD pipelines.
 
 ## Overview
 
-Q leverages CUE's powerful type system and constraint solving to define and evaluate policies. Unlike Rego or Sentinel, policies in Q benefit from:
+Garmr provides a flexible, type-safe policy engine that uses [CUE](https://cuelang.org/) for policy definition. It supports:
 
-- **Schema-first validation**: Policies are validated at write time, not runtime
-- **Type safety**: CUE's type lattice catches errors before deployment
-- **Composability**: Policies unify cleanly without conflicts
-- **Determinism**: Hermetic evaluation with no hidden state
+- **20+ condition operators** for flexible rule construction
+- **Target filtering** to apply policies to specific resource types
+- **Namespace organization** for team-based policy management
+- **Hot reload** for zero-downtime policy updates
+- **Audit logging** with request correlation for compliance
+- **CI/CD integration** via CLI and REST API
 
 ## Quick Start
 
@@ -18,272 +20,212 @@ Q leverages CUE's powerful type system and constraint solving to define and eval
 ```bash
 # Build from source
 make build
-make install
 
-# Or use Docker
-docker pull ghcr.io/yourorg/q-policy-agent:latest
+# Binaries are in ./bin/
+./bin/garmr-server --help
+./bin/garmr --help
 ```
 
 ### Start the Server
 
 ```bash
-# Development mode
-q-server --dev --policy-dir ./examples
+# Start with example policies
+./bin/garmr-server --policy-dir ./examples --audit-path /var/log/garmr/audit.log
 
-# Production
-q-server --config /etc/q/config.yaml
+# Development mode with console logging
+./bin/garmr-server --dev --policy-dir ./examples --log-format console
 ```
 
-### Evaluate Policies
+### Evaluate a Resource
+
+```bash
+# Using the CLI
+./bin/garmr eval --input testdata/k8s-pod-secure.json
+
+# With namespace filter
+./bin/garmr eval --input testdata/k8s-pod-secure.json -n security
+
+# JSON output for CI/CD
+./bin/garmr eval --input testdata/k8s-pod-secure.json -o json
+
+# With request ID for audit correlation
+./bin/garmr eval --input testdata/k8s-pod-secure.json --request-id "pipeline-12345"
+```
+
+### Using the REST API
 
 ```bash
 # Evaluate a resource
-q eval --input deployment.json
+curl -X POST http://localhost:8080/v1/evaluate \
+  -H "Content-Type: application/json" \
+  -H "X-Request-Id: pipeline-12345" \
+  -d '{"input": {"kind": "Pod", "metadata": {"name": "web"}}}'
 
-# Evaluate with specific policy
-q eval --input pod.json --policy security/no-privileged
+# List loaded policies
+curl http://localhost:8080/v1/policies
 
-# JSON output for CI/CD
-q eval --input resource.json -o json
+# Reload policies (hot reload)
+curl -X POST http://localhost:8080/v1/policies/reload
 ```
 
-## CLI Reference
+## Documentation
 
-### q eval
+| Document | Description |
+|----------|-------------|
+| [Getting Started](docs/GETTING-STARTED.md) | First steps with Garmr |
+| [Policy Schema](docs/POLICY-SCHEMA.md) | Complete reference for condition operators |
+| [Target & Namespace Filtering](docs/FILTERING.md) | How to scope policies to resources |
+| [CLI Reference](docs/CLI.md) | Complete CLI command reference |
+| [REST API Reference](docs/REST-API.md) | HTTP API endpoints and examples |
+| [CI/CD Integration](docs/CI-CD-PIPELINE-INTEGRATION.md) | Pipeline integration patterns |
+| [Developer Experience](docs/DEVELOPER-EXPERIENCE.md) | Writing and testing policies |
+| [Roadmap](docs/ROADMAP.md) | Future features and integrations |
 
-Evaluate input against policies.
-
-```bash
-q eval [flags]
-
-Flags:
-  -i, --input string      Input file (- for stdin)
-  -d, --data string       Inline JSON data
-  -p, --policy strings    Specific policies to evaluate
-  -n, --namespace string  Policy namespace
-      --strict            Fail on warnings
-      --trace             Enable evaluation trace
-      --dry-run           Evaluate without enforcement
-  -o, --output string     Output format (table, json, yaml)
-```
-
-### q validate
-
-Validate policy files.
-
-```bash
-q validate [files...] [flags]
-
-Flags:
-      --warn    Show warnings
-      --strict  Fail on warnings
-```
-
-### q policy
-
-Manage policies.
-
-```bash
-q policy list                    # List all policies
-q policy get <name>              # Get policy details
-q policy push <file>             # Push policy to server
-q policy delete <name>           # Delete policy
-q policy reload                  # Reload from disk
-```
-
-### q health
-
-Check server health.
-
-```bash
-q health [flags]
-
-Flags:
-      --wait            Wait for server to be ready
-      --timeout duration Timeout when waiting (default 30s)
-```
-
-## Policy Schema
-
-Policies are defined in CUE using the Q schema:
+## Example Policy
 
 ```cue
-package mypolicies
+package security
 
-import "github.com/yourorg/q-policy-agent/schemas:policy"
-
-noPrivileged: policy.#Policy & {
-    apiVersion: "policy.q.io/v1"
+containerSecurity: {
+    apiVersion: "policy.garmr.io/v1"
     kind: "Policy"
     metadata: {
-        name: "no-privileged-containers"
+        name: "container-security"
         namespace: "security"
-        labels: {
-            "category": "container-security"
-            "compliance": "cis-benchmark"
-        }
     }
     spec: {
-        description: "Containers must not run in privileged mode"
-        
-        target: {
-            resources: [{
-                apiGroup: "apps"
-                kind: "Deployment" | "StatefulSet"
-            }]
-        }
-        
-        rules: [{
-            id: "SEC-001"
-            description: "Privileged mode must be disabled"
-            severity: "critical"
-            expr: {
-                forEach: {
-                    collection: "spec.containers"
-                    as: "container"
-                    expr: {
-                        compare: {
-                            left: path: "item.securityContext.privileged"
-                            op: "!="
-                            right: literal: true
+        description: "Enforce container security best practices"
+        target: resources: ["pod", "deployment"]
+        rules: [
+            {
+                id: "SEC-001"
+                description: "Containers must not run as root"
+                severity: "high"
+                expr: {
+                    forEach: {
+                        path: "spec.containers"
+                        as: "container"
+                        condition: {
+                            match: {
+                                path: "container.securityContext.runAsNonRoot"
+                                equals: true
+                            }
                         }
                     }
                 }
+                message: "Container is running as root"
             }
-            message: "Container '{{.container.name}}' cannot run privileged"
-        }]
-        
-        enforcement: {
-            action: "deny"
-            exceptions: [{
-                name: "kube-system"
-                reason: "System components"
-                match: {
-                    namespaces: ["kube-system"]
-                }
-            }]
-        }
+        ]
+        enforcement: action: "deny"
     }
 }
 ```
 
-## Expression Language
+## Key Features
 
-Q supports these expression types:
+### Condition Operators
 
-| Expression | Description |
-|------------|-------------|
-| `all` | All sub-expressions must pass (AND) |
-| `any` | At least one must pass (OR) |
-| `not` | Negation |
-| `exists` | Field must exist |
-| `absent` | Field must not exist |
-| `match` | Regex pattern matching |
-| `compare` | Value comparison (==, !=, <, >, in, etc.) |
-| `contains` | Collection contains value |
-| `forEach` | Iterate over collection |
-| `ref` | Reference external data |
-| `cue` | Raw CUE expression |
+| Category | Operators |
+|----------|-----------|
+| Existence | `exists`, `absent` |
+| Equality | `equals` |
+| Comparison | `greaterThan`, `greaterThanOrEqual`, `lessThan`, `lessThanOrEqual` |
+| String | `contains`, `hasPrefix`, `hasSuffix`, `pattern` (regex) |
+| Set | `in`, `notIn` |
+| Logical | `all`, `any`, `not` |
+| Advanced | `forEach`, `length`, `semver`, `datetime`, `compare` (cross-field) |
 
-## API Reference
+### Target Filtering
 
-### gRPC API
+Apply policies only to specific resource types:
 
-The server exposes gRPC services on port 9090:
-
-- `PolicyService` - Evaluate, Validate, Compile
-- `PolicyManagementService` - CRUD operations
-- `DataService` - External data management
-- `HealthService` - Health checks
-
-### REST API
-
-HTTP gateway on port 8080:
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/v1/evaluate` | Evaluate input |
-| POST | `/v1/validate` | Validate policy |
-| GET | `/v1/policies` | List policies |
-| PUT | `/v1/policies/{ns}/{name}` | Create/update policy |
-| DELETE | `/v1/policies/{ns}/{name}` | Delete policy |
-| GET | `/health` | Health check |
-| GET | `/ready` | Readiness check |
-
-## CI/CD Integration
-
-### GitHub Actions
-
-```yaml
-- name: Evaluate Policies
-  run: |
-    q eval --input ${{ github.workspace }}/manifests/*.yaml \
-           --server ${{ secrets.Q_SERVER }} \
-           -o json > results.json
-    
-    if jq -e '.decision == "deny"' results.json; then
-      echo "Policy violations found"
-      exit 1
-    fi
+```cue
+target: {
+    resources: [
+        "pod",
+        "deployment",
+        {
+            kind: "configmap"
+            namespaces: ["production"]
+            labels: {env: "prod"}
+        }
+    ]
+}
 ```
 
-### GitLab CI
+### Namespace Organization
 
-```yaml
-policy-check:
-  image: ghcr.io/yourorg/q-policy-agent:latest
-  script:
-    - q eval --input manifests/ --strict
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+Organize policies by team or function:
+
+```
+policies/
+├── security/       # Security team policies
+├── compliance/     # Compliance requirements
+├── platform/       # Platform team standards
+└── release/        # Release gate policies
+```
+
+### Audit Logging
+
+Every evaluation is logged with:
+- Request ID for correlation
+- Decision (allow/deny/warn)
+- Violations count
+- Resource metadata
+- Client information
+
+## Project Structure
+
+```
+garmr/
+├── cmd/
+│   ├── garmr/             # CLI client
+│   └── garmr-server/       # HTTP server
+├── internal/
+│   ├── engine/         # Policy evaluation engine
+│   ├── server/         # HTTP handlers
+│   └── client/         # Go client library
+├── examples/           # Example policies
+│   ├── advanced/       # Advanced feature examples
+│   ├── release/        # Release gate policies
+│   ├── security/       # Security policies
+│   └── test/           # Test policies
+├── testdata/           # Test input files
+│   └── operators/      # Operator-specific tests
+├── schemas/            # CUE schema definitions
+└── docs/               # Documentation
 ```
 
 ## Configuration
 
-See `config.example.yaml` for all options.
-
-Key settings:
+### Server Configuration
 
 ```yaml
-grpc_addr: ":9090"
+# config.yaml
 http_addr: ":8080"
-policy_dir: "/etc/q/policies"
-
-tls:
+policy_dir: "/etc/garmr/policies"
+audit:
   enabled: true
-  cert: "/etc/q/tls/cert.pem"
-  key: "/etc/q/tls/key.pem"
-
+  path: "/var/log/garmr/audit.log"
 log:
   level: "info"
   format: "json"
 ```
 
-## Architecture
+### Environment Variables
 
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   q CLI     │────▶│  Q Server   │────▶│ CUE Engine  │
-└─────────────┘     └─────────────┘     └─────────────┘
-                           │
-                    ┌──────┴──────┐
-                    │             │
-              ┌─────▼─────┐ ┌─────▼─────┐
-              │  Policies │ │   Data    │
-              │   (CUE)   │ │  Sources  │
-              └───────────┘ └───────────┘
-```
-
-## Comparison with OPA/Sentinel
-
-| Feature | Q | OPA | Sentinel |
-|---------|---|-----|----------|
-| Language | CUE | Rego | Sentinel |
-| Type System | Strong | Weak | Weak |
-| Schema Validation | Built-in | External | None |
-| Composition | Unification | Override | Import |
-| Learning Curve | Moderate | Steep | Moderate |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GARMR_HTTP_ADDR` | HTTP listen address | `:8080` |
+| `GARMR_POLICY_DIR` | Policy directory | - |
+| `GARMR_AUDIT_ENABLED` | Enable audit logging | `true` |
+| `GARMR_AUDIT_PATH` | Audit log path | `/var/log/garmr/audit.log` |
+| `GARMR_LOG_LEVEL` | Log level | `info` |
 
 ## License
 
 Apache 2.0
+
+## Contributing
+
+Contributions are welcome! Please read our contributing guidelines before submitting PRs.

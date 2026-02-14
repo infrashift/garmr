@@ -9,14 +9,14 @@ package config
 
 // VaultPolicy defines a policy for Vault authorization.
 #VaultPolicy: {
-	apiVersion: "policy.q.io/v1"
+	apiVersion: "policy.garmr.io/v1"
 	kind:       "Policy"
 	
 	metadata: {
 		name:      string
 		namespace: string | *"vault"
 		labels: {
-			"policy.q.io/target": "vault"
+			"policy.garmr.io/target": "vault"
 			...
 		}
 		...
@@ -84,14 +84,14 @@ package config
 
 // ConsulPolicy defines a policy for Consul authorization.
 #ConsulPolicy: {
-	apiVersion: "policy.q.io/v1"
+	apiVersion: "policy.garmr.io/v1"
 	kind:       "Policy"
 	
 	metadata: {
 		name:      string
 		namespace: string | *"consul"
 		labels: {
-			"policy.q.io/target": "consul"
+			"policy.garmr.io/target": "consul"
 			...
 		}
 		...
@@ -183,7 +183,7 @@ _vaultSecretsPolicy: #VaultPolicy & {
 		name:      "vault-secrets-access"
 		namespace: "vault"
 		labels: {
-			"policy.q.io/target": "vault"
+			"policy.garmr.io/target": "vault"
 			"vault/engine":       "kv"
 		}
 	}
@@ -241,7 +241,7 @@ _consulServicePolicy: #ConsulPolicy & {
 		name:      "consul-service-registration"
 		namespace: "consul"
 		labels: {
-			"policy.q.io/target": "consul"
+			"policy.garmr.io/target": "consul"
 			"consul/operation":   "service"
 		}
 	}
@@ -300,7 +300,7 @@ _consulIntentionPolicy: #ConsulPolicy & {
 		name:      "consul-intentions"
 		namespace: "consul"
 		labels: {
-			"policy.q.io/target":  "consul"
+			"policy.garmr.io/target":  "consul"
 			"consul/operation":    "intention"
 		}
 	}

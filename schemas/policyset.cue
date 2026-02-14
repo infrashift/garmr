@@ -9,7 +9,7 @@ package policy
 // 2. You want to share definitions across policies
 // 3. You need to version/release policies as a unit
 #PolicySet: {
-	apiVersion: "policy.q.io/v1"
+	apiVersion: "policy.garmr.io/v1"
 	kind:       "PolicySet"
 	metadata:   #PolicySetMetadata
 	spec:       #PolicySetSpec
@@ -94,7 +94,7 @@ package policy
 // Organizes DTAP policies into a cohesive unit
 
 _examplePolicySet: #PolicySet & {
-	apiVersion: "policy.q.io/v1"
+	apiVersion: "policy.garmr.io/v1"
 	kind:       "PolicySet"
 	metadata: {
 		name:      "release-pipeline"

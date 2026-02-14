@@ -1,11 +1,11 @@
 // schemas/config.cue
-// Q Policy Agent Configuration Schema
+// Garmr Configuration Schema
 // Configuration is defined in CUE for type safety and validation
 package config
 
 import "time"
 
-// Config is the root configuration for Q Policy Agent.
+// Config is the root configuration for Garmr.
 #Config: {
 	// API version for configuration schema evolution
 	apiVersion: "config.q.io/v1"
@@ -237,7 +237,7 @@ import "time"
 		// OTLP endpoint
 		endpoint?: string
 		// Service name
-		serviceName: string | *"q-policy-agent"
+		serviceName: string | *"garmr"
 		// Sample rate (0.0 - 1.0)
 		sampleRate: float | *0.1
 	}

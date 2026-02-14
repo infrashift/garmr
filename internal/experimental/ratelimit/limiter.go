@@ -1,5 +1,5 @@
 // internal/ratelimit/limiter.go
-// Package ratelimit provides request rate limiting for Q Policy Agent.
+// Package ratelimit provides request rate limiting for Garmr.
 package ratelimit
 
 import (

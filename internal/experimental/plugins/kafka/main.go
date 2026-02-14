@@ -1,5 +1,5 @@
 // plugins/kafka/main.go
-// Package main provides the Kafka audit logging plugin for Q Policy Agent.
+// Package main provides the Kafka audit logging plugin for Garmr.
 // Publishes policy decisions to Kafka for compliance and audit trails.
 //
 // Build with:
@@ -20,7 +20,7 @@ import (
 
 	"github.com/IBM/sarama"
 
-	"github.com/infrashift/q-policy-agent/internal/plugin"
+	"github.com/infrashift/garmr/internal/experimental/plugin"
 )
 
 // KafkaPlugin publishes audit decisions to Kafka.
@@ -194,7 +194,7 @@ func (p *KafkaPlugin) Metadata() plugin.Metadata {
 		Type:        plugin.TypeNotifier,
 		Version:     "1.0.0",
 		Description: "Kafka audit logging for policy decision compliance and auditing",
-		Author:      "Q Policy Agent",
+		Author:      "Garmr",
 		License:     "Apache-2.0",
 		Capabilities: []string{
 			"audit.kafka",
@@ -209,8 +209,8 @@ func (p *KafkaPlugin) Init(ctx context.Context, config map[string]interface{}) e
 	p.config = KafkaConfig{
 		Enabled:      true,
 		Brokers:      []string{"localhost:9092"},
-		Topic:        "q-audit-decisions",
-		ClientID:     "q-policy-agent",
+		Topic:        "garmr-audit-decisions",
+		ClientID:     "garmr",
 		Partitioner:  "hash",
 		RequiredAcks: "leader",
 		Compression:  "snappy",

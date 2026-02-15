@@ -1,4 +1,9 @@
 bin/
 out/
 q-audit/
-q-server.config.yaml
+garmr-audit/
+**/**/q-server.config.yaml
+**/**/garmr
+**/**/garmr-server
+**/**/audit-file.so
+**/**/coverage.out

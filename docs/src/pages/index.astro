@@ -1,6 +1,10 @@
 ---
 // Landing page — not managed by Starlight
-const base = import.meta.env.BASE_URL;
+import '../styles/landing.css';
+import bannerDark from '../assets/garmr-banner-dark.png';
+import bannerLight from '../assets/garmr-banner-light.png';
+
+const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
 ---
 
 <html lang="en" data-theme="dark">
@@ -10,7 +14,6 @@ const base = import.meta.env.BASE_URL;
 	<title>Garmr — Policy as Code, Powered by CUE</title>
 	<meta name="description" content="Garmr is a type-safe policy evaluation engine built on CUE. Define, evaluate, and enforce policies with three-outcome decisions, 25+ operators, and blazing-fast performance." />
 	<link rel="icon" type="image/jpeg" href={`${base}favicon.jpg`} />
-	<link rel="stylesheet" href="/src/styles/landing.css" />
 </head>
 <body>
 
@@ -28,8 +31,8 @@ const base = import.meta.env.BASE_URL;
 <!-- Hero -->
 <section class="hero">
 	<div class="hero-banner">
-		<img src="/src/assets/garmr-banner-dark.png" alt="Garmr" class="banner-dark" />
-		<img src="/src/assets/garmr-banner-light.png" alt="Garmr" class="banner-light" />
+		<img src={bannerDark.src} alt="Garmr" class="banner-dark" />
+		<img src={bannerLight.src} alt="Garmr" class="banner-light" />
 	</div>
 	<h1>Policy as Code, Powered by CUE</h1>
 	<p class="tagline">

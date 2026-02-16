@@ -1,4 +1,10 @@
-# Policy Schema Reference
+---
+title: "Policy Schema Reference"
+description: "Complete reference for Garmr condition operators"
+sidebar:
+  order: 0
+  label: "Policy Schema"
+---
 
 Complete reference for Garmr condition operators with CLI and API examples.
 
@@ -24,14 +30,14 @@ Garmr accepts input in both JSON and YAML formats.
 
 ```bash
 # Auto-detect from file extension
-q eval --input deployment.yaml -n security
-q eval --input deployment.json -n security
+garmr eval --input deployment.yaml -n security
+garmr eval --input deployment.json -n security
 
 # Explicit format flag
-q eval --input deployment.txt --format yaml -n security
+garmr eval --input deployment.txt --format yaml -n security
 
 # Stdin with format hint
-cat deployment.yaml | q eval --input - --format yaml -n security
+cat deployment.yaml | garmr eval --input - --format yaml -n security
 ```
 
 ### API Usage
@@ -109,19 +115,19 @@ expr: match: {
 **CLI (JSON):**
 ```bash
 # Should ALLOW (all required fields present)
-q eval --input test-data/condition-operators/exists-pass.json -n condition-operators
+garmr eval --input test-data/condition-operators/exists-pass.json -n condition-operators
 
 # Should DENY (missing requiredField)
-q eval --input test-data/condition-operators/exists-fail.json -n condition-operators
+garmr eval --input test-data/condition-operators/exists-fail.json -n condition-operators
 ```
 
 **CLI (YAML):**
 ```bash
 # Should ALLOW (auto-detects YAML from extension)
-q eval --input test-data/condition-operators/exists-pass.yaml -n condition-operators
+garmr eval --input test-data/condition-operators/exists-pass.yaml -n condition-operators
 
 # Explicit format flag
-q eval --input test-data/condition-operators/exists-pass.yaml --format yaml -n condition-operators
+garmr eval --input test-data/condition-operators/exists-pass.yaml --format yaml -n condition-operators
 ```
 
 **curl (JSON):**
@@ -179,10 +185,10 @@ expr: match: {
 **CLI:**
 ```bash
 # Should ALLOW
-q eval --input test-data/condition-operators/equals-pass.json -n condition-operators
+garmr eval --input test-data/condition-operators/equals-pass.json -n condition-operators
 
 # Should DENY
-q eval --input test-data/condition-operators/equals-fail.json -n condition-operators
+garmr eval --input test-data/condition-operators/equals-fail.json -n condition-operators
 ```
 
 **curl:**
@@ -230,10 +236,10 @@ expr: match: {
 **CLI:**
 ```bash
 # Should ALLOW (replicas=3, memory=2048, cpu=4)
-q eval --input test-data/condition-operators/comparison-pass.json -n condition-operators
+garmr eval --input test-data/condition-operators/comparison-pass.json -n condition-operators
 
 # Should DENY (replicas=1, memory=8192, cpu=16)
-q eval --input test-data/condition-operators/comparison-fail.json -n condition-operators
+garmr eval --input test-data/condition-operators/comparison-fail.json -n condition-operators
 ```
 
 **curl:**
@@ -283,10 +289,10 @@ expr: match: {
 **CLI:**
 ```bash
 # Should ALLOW
-q eval --input test-data/condition-operators/string-pass.json -n condition-operators
+garmr eval --input test-data/condition-operators/string-pass.json -n condition-operators
 
 # Should DENY (wrong registry, :latest tag, invalid name)
-q eval --input test-data/condition-operators/string-fail.json -n condition-operators
+garmr eval --input test-data/condition-operators/string-fail.json -n condition-operators
 ```
 
 **curl:**
@@ -326,10 +332,10 @@ expr: match: {
 **CLI:**
 ```bash
 # Should ALLOW (production, us-east-1, premium)
-q eval --input test-data/condition-operators/set-pass.json -n condition-operators
+garmr eval --input test-data/condition-operators/set-pass.json -n condition-operators
 
 # Should DENY (test environment, restricted region)
-q eval --input test-data/condition-operators/set-fail.json -n condition-operators
+garmr eval --input test-data/condition-operators/set-fail.json -n condition-operators
 ```
 
 **curl:**
@@ -427,10 +433,10 @@ expr: match: {
 **CLI:**
 ```bash
 # Should ALLOW (unique ports, unique container names, sorted priorities, required regions, valid zones)
-q eval --input test-data/condition-operators/set-advanced-pass.json -n condition-operators
+garmr eval --input test-data/condition-operators/set-advanced-pass.json -n condition-operators
 
 # Should DENY (duplicate ports, duplicate container names, unsorted, missing regions, invalid zones)
-q eval --input test-data/condition-operators/set-advanced-fail.json -n condition-operators
+garmr eval --input test-data/condition-operators/set-advanced-fail.json -n condition-operators
 ```
 
 **curl:**
@@ -515,10 +521,10 @@ expr: {
 **CLI:**
 ```bash
 # Should ALLOW
-q eval --input test-data/condition-operators/logical-pass.json -n condition-operators
+garmr eval --input test-data/condition-operators/logical-pass.json -n condition-operators
 
 # Should DENY (missing version, no contact, debug in prod)
-q eval --input test-data/condition-operators/logical-fail.json -n condition-operators
+garmr eval --input test-data/condition-operators/logical-fail.json -n condition-operators
 ```
 
 **curl:**
@@ -571,10 +577,10 @@ expr: {
 **CLI:**
 ```bash
 # Should ALLOW (all containers have limits, approved registries, not privileged)
-q eval --input test-data/advanced-operators/foreach-pass.json -n advanced-operators
+garmr eval --input test-data/advanced-operators/foreach-pass.json -n advanced-operators
 
 # Should DENY (missing limits, untrusted registry, privileged)
-q eval --input test-data/advanced-operators/foreach-fail.json -n advanced-operators
+garmr eval --input test-data/advanced-operators/foreach-fail.json -n advanced-operators
 ```
 
 **curl:**
@@ -620,10 +626,10 @@ expr: match: {
 **CLI:**
 ```bash
 # Should WARN (enforcement: warn) - passes with warnings
-q eval --input test-data/advanced-operators/length-pass.json -n advanced-operators
+garmr eval --input test-data/advanced-operators/length-pass.json -n advanced-operators
 
 # Should WARN with violations (name too short, no tags)
-q eval --input test-data/advanced-operators/length-fail.json -n advanced-operators
+garmr eval --input test-data/advanced-operators/length-fail.json -n advanced-operators
 ```
 
 ---
@@ -665,10 +671,10 @@ expr: match: {
 **CLI:**
 ```bash
 # Should ALLOW
-q eval --input test-data/advanced-operators/semver-pass.json -n advanced-operators
+garmr eval --input test-data/advanced-operators/semver-pass.json -n advanced-operators
 
 # Should DENY (version < 1.0.0, apiVersion not 2.x)
-q eval --input test-data/advanced-operators/semver-fail.json -n advanced-operators
+garmr eval --input test-data/advanced-operators/semver-fail.json -n advanced-operators
 ```
 
 ---
@@ -711,10 +717,10 @@ expr: match: {
 **CLI:**
 ```bash
 # Should ALLOW (certificate valid until 2026)
-q eval --input test-data/advanced-operators/datetime-pass.json -n advanced-operators
+garmr eval --input test-data/advanced-operators/datetime-pass.json -n advanced-operators
 
 # Should DENY (certificate expired)
-q eval --input test-data/advanced-operators/datetime-fail.json -n advanced-operators
+garmr eval --input test-data/advanced-operators/datetime-fail.json -n advanced-operators
 ```
 
 ---
@@ -757,10 +763,10 @@ expr: compare: {
 **CLI:**
 ```bash
 # Should ALLOW (minReplicas=2, maxReplicas=10)
-q eval --input test-data/advanced-operators/compare-pass.json -n advanced-operators
+garmr eval --input test-data/advanced-operators/compare-pass.json -n advanced-operators
 
 # Should DENY (minReplicas=10, maxReplicas=5)
-q eval --input test-data/advanced-operators/compare-fail.json -n advanced-operators
+garmr eval --input test-data/advanced-operators/compare-fail.json -n advanced-operators
 ```
 
 **curl:**
@@ -823,12 +829,12 @@ make run
 # Test all condition operators
 for f in test-data/condition-operators/*.json; do
   echo "=== $f ==="
-  q eval --input "$f" -n condition-operators -o json | jq '{decision, violations: [.results[] | select(.passed==false) | .rule_id]}'
+  garmr eval --input "$f" -n condition-operators -o json | jq '{decision, violations: [.results[] | select(.passed==false) | .rule_id]}'
 done
 
 # Test all advanced operators
 for f in test-data/advanced-operators/*.json; do
   echo "=== $f ==="
-  q eval --input "$f" -n advanced-operators -o json | jq '{decision, violations: [.results[] | select(.passed==false) | .rule_id]}'
+  garmr eval --input "$f" -n advanced-operators -o json | jq '{decision, violations: [.results[] | select(.passed==false) | .rule_id]}'
 done
 ```

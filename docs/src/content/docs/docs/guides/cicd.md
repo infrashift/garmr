@@ -1,4 +1,10 @@
-# CI/CD Pipeline Integration
+---
+title: "CI/CD Pipeline Integration"
+description: "Integrate Garmr into your CI/CD pipelines for automated policy enforcement"
+sidebar:
+  order: 3
+  label: "CI/CD Integration"
+---
 
 This guide describes how to integrate Garmr into your CI/CD pipelines for automated policy enforcement.
 
@@ -76,13 +82,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Garmr CLI
         run: |
           curl -sL https://github.com/infrashift/garmr/releases/latest/download/garmr-linux-amd64 -o garmr
           chmod +x garmr
           sudo mv garmr /usr/local/bin/
-      
+
       - name: Evaluate Kubernetes manifests
         env:
           GARMR_SERVER: ${{ vars.GARMR_SERVER_URL }}
@@ -92,7 +98,7 @@ jobs:
             garmr eval --input "$file" \
               --request-id "gh-${{ github.run_id }}-${{ github.run_attempt }}" \
               -o json | tee result.json
-            
+
             if [ "$(jq -r '.decision' result.json)" = "deny" ]; then
               echo "::error::Policy violation in $file"
               jq -r '.results[] | select(.passed == false) | "- \(.rule_id): \(.message)"' result.json
@@ -126,7 +132,7 @@ policy-check:
           --request-id "gl-${CI_PIPELINE_ID}-${CI_JOB_ID}" \
           --server "${GARMR_SERVER_URL}" \
           -o json > result.json
-        
+
         DECISION=$(jq -r '.decision' result.json)
         if [ "$DECISION" = "deny" ]; then
           echo "Policy violations found:"
@@ -153,22 +159,22 @@ deploy:
 ```groovy
 pipeline {
     agent any
-    
+
     environment {
         GARMR_SERVER = credentials('garmr-server-url')
         REQUEST_ID = "jenkins-${BUILD_NUMBER}-${JOB_NAME}"
     }
-    
+
     stages {
         stage('Policy Check') {
             steps {
                 script {
                     def files = findFiles(glob: 'k8s/*.yaml')
                     def failed = false
-                    
+
                     files.each { file ->
                         echo "Evaluating ${file.name}..."
-                        
+
                         def result = sh(
                             script: """
                                 garmr eval --input ${file.path} \
@@ -178,9 +184,9 @@ pipeline {
                             """,
                             returnStdout: true
                         ).trim()
-                        
+
                         def json = readJSON(text: result)
-                        
+
                         if (json.decision == 'deny') {
                             failed = true
                             echo "POLICY VIOLATION in ${file.name}"
@@ -189,14 +195,14 @@ pipeline {
                             }
                         }
                     }
-                    
+
                     if (failed) {
                         error("Policy violations detected")
                     }
                 }
             }
         }
-        
+
         stage('Deploy') {
             when {
                 branch 'main'
@@ -206,7 +212,7 @@ pipeline {
             }
         }
     }
-    
+
     post {
         always {
             archiveArtifacts artifacts: 'result.json', allowEmptyArchive: true
@@ -252,14 +258,14 @@ stages:
               targetType: 'inline'
               script: |
                 REQUEST_ID="azdo-$(Build.BuildId)-$(System.JobAttempt)"
-                
+
                 for file in k8s/*.yaml; do
                   echo "Checking $file..."
                   garmr eval --input "$file" \
                     --request-id "$REQUEST_ID" \
                     --server "$(GARMR_SERVER)" \
                     -o json | tee result.json
-                  
+
                   DECISION=$(jq -r '.decision' result.json)
                   if [ "$DECISION" = "deny" ]; then
                     echo "##vso[task.logissue type=error]Policy violation in $file"
@@ -296,14 +302,14 @@ jobs:
           name: Evaluate Policies
           command: |
             REQUEST_ID="circle-${CIRCLE_WORKFLOW_ID}-${CIRCLE_JOB}"
-            
+
             for file in k8s/*.yaml; do
               echo "Checking $file..."
               garmr eval --input "$file" \
                 --request-id "$REQUEST_ID" \
                 --server "${GARMR_SERVER_URL}" \
                 -o json | tee result.json
-              
+
               if [ "$(jq -r '.decision' result.json)" = "deny" ]; then
                 echo "Policy violations in $file:"
                 jq -r '.results[] | select(.passed == false) | "  \(.severity) \(.rule_id): \(.message)"' result.json
@@ -395,17 +401,17 @@ REQUEST_ID = os.environ.get('CI_JOB_ID', 'local-test')
 def evaluate_resource(resource_path: str, namespace: str = None) -> dict:
     with open(resource_path) as f:
         resource = json.load(f)
-    
+
     payload = {
         'input': resource,
         'namespace': namespace
     }
-    
+
     headers = {
         'Content-Type': 'application/json',
         'X-Request-Id': REQUEST_ID
     }
-    
+
     response = requests.post(
         f'{GARMR_SERVER}/v1/evaluate',
         json=payload,
@@ -416,17 +422,17 @@ def evaluate_resource(resource_path: str, namespace: str = None) -> dict:
 
 def main():
     result = evaluate_resource('deployment.json', namespace='security')
-    
+
     print(f"Decision: {result['decision']}")
     print(f"Request ID: {result['request_id']}")
-    
+
     if result['decision'] == 'deny':
         print("\nViolations:")
         for r in result['results']:
             if not r['passed']:
                 print(f"  - [{r['severity']}] {r['rule_id']}: {r['message']}")
         sys.exit(1)
-    
+
     print("All policies passed!")
     sys.exit(0)
 
@@ -467,17 +473,17 @@ type RuleResult struct {
 
 func evaluate(server, requestID string, input map[string]interface{}) (*EvaluateResponse, error) {
     payload, _ := json.Marshal(EvaluateRequest{Input: input})
-    
+
     req, _ := http.NewRequest("POST", server+"/v1/evaluate", bytes.NewReader(payload))
     req.Header.Set("Content-Type", "application/json")
     req.Header.Set("X-Request-Id", requestID)
-    
+
     resp, err := http.DefaultClient.Do(req)
     if err != nil {
         return nil, err
     }
     defer resp.Body.Close()
-    
+
     var result EvaluateResponse
     json.NewDecoder(resp.Body).Decode(&result)
     return &result, nil
@@ -486,20 +492,20 @@ func evaluate(server, requestID string, input map[string]interface{}) (*Evaluate
 func main() {
     server := os.Getenv("GARMR_SERVER")
     requestID := os.Getenv("CI_JOB_ID")
-    
+
     input := map[string]interface{}{
         "kind": "Deployment",
         "metadata": map[string]interface{}{
             "name": "my-app",
         },
     }
-    
+
     result, err := evaluate(server, requestID, input)
     if err != nil {
         fmt.Fprintf(os.Stderr, "Error: %v\n", err)
         os.Exit(1)
     }
-    
+
     if result.Decision == "deny" {
         fmt.Println("Policy violations:")
         for _, r := range result.Results {
@@ -509,7 +515,7 @@ func main() {
         }
         os.Exit(1)
     }
-    
+
     fmt.Println("All policies passed!")
 }
 ```
@@ -579,10 +585,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Validate lock files
         run: garmr policy validate-lock --recursive policies/
-      
+
       - name: Validate policy syntax
         run: |
           for file in $(find policies -name "*.cue" ! -name "*.lock"); do
@@ -594,16 +600,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Deploy policies
         run: |
           rsync -av policies/ ${{ secrets.GARMR_SERVER }}:/etc/garmr/policies/
-      
+
       - name: Trigger reload
         run: |
           curl -X POST https://${{ secrets.GARMR_SERVER }}/v1/policies/reload \
             -H "Authorization: Bearer ${{ secrets.GARMR_API_TOKEN }}"
-      
+
       - name: Verify deployment
         run: |
           # List policies and verify count
@@ -677,12 +683,12 @@ for i in $(seq 1 $MAX_RETRIES); do
     if garmr eval --input resource.json -o json; then
         break
     fi
-    
+
     if [ $i -eq $MAX_RETRIES ]; then
         echo "Failed after $MAX_RETRIES attempts"
         exit 1
     fi
-    
+
     echo "Retry $i/$MAX_RETRIES in ${RETRY_DELAY}s..."
     sleep $RETRY_DELAY
 done

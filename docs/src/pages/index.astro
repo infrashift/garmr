@@ -1,0 +1,158 @@
+---
+// Landing page — not managed by Starlight
+const base = import.meta.env.BASE_URL;
+---
+
+<html lang="en" data-theme="dark">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Garmr — Policy as Code, Powered by CUE</title>
+	<meta name="description" content="Garmr is a type-safe policy evaluation engine built on CUE. Define, evaluate, and enforce policies with three-outcome decisions, 25+ operators, and blazing-fast performance." />
+	<link rel="icon" type="image/jpeg" href={`${base}favicon.jpg`} />
+	<link rel="stylesheet" href="/src/styles/landing.css" />
+</head>
+<body>
+
+<!-- Nav -->
+<nav class="nav">
+	<a href={base} class="nav-logo">GARMR</a>
+	<ul class="nav-links">
+		<li><a href={`${base}docs/`}>Docs</a></li>
+		<li><a href={`${base}docs/getting-started/`}>Quick Start</a></li>
+		<li><a href="https://github.com/infrashift/garmr">GitHub</a></li>
+		<li><button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">&#9790;</button></li>
+	</ul>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+	<div class="hero-banner">
+		<img src="/src/assets/garmr-banner-dark.png" alt="Garmr" class="banner-dark" />
+		<img src="/src/assets/garmr-banner-light.png" alt="Garmr" class="banner-light" />
+	</div>
+	<h1>Policy as Code, Powered by CUE</h1>
+	<p class="tagline">
+		Define type-safe policies. Evaluate with three-outcome decisions.
+		Enforce everywhere — from CI pipelines to production gates.
+	</p>
+	<div class="hero-cta">
+		<a href={`${base}docs/getting-started/`} class="btn btn-primary">Get Started</a>
+		<a href={`${base}docs/`} class="btn btn-secondary">Read the Docs</a>
+		<a href="https://github.com/infrashift/garmr" class="btn btn-ghost">GitHub &rarr;</a>
+	</div>
+</section>
+
+<!-- Features -->
+<section class="features">
+	<h2>Why Garmr?</h2>
+	<div class="feature-grid">
+		<div class="feature-card">
+			<div class="icon">&#128274;</div>
+			<h3>Type-Safe Policies</h3>
+			<p>Written in CUE — catch misconfigurations at authoring time, not at evaluation time. Full schema validation built in.</p>
+		</div>
+		<div class="feature-card">
+			<div class="icon">&#9881;</div>
+			<h3>25+ Built-in Operators</h3>
+			<p>CIDR checks, semver comparisons, K8s resource units, regex, date/time, aggregates, and more — all out of the box.</p>
+		</div>
+		<div class="feature-card">
+			<div class="icon">&#9989;</div>
+			<h3>Three-Outcome Decisions</h3>
+			<p>Pass, fail, or warn. Not just binary gates — give teams actionable signals without blocking deploys unnecessarily.</p>
+		</div>
+		<div class="feature-card">
+			<div class="icon">&#128640;</div>
+			<h3>CI/CD Native</h3>
+			<p>CLI with exit codes, and JSON output. Drop into GitHub Actions, GitLab CI, or any pipeline in minutes.</p>
+		</div>
+		<div class="feature-card">
+			<div class="icon">&#9889;</div>
+			<h3>Blazing Fast</h3>
+			<p>Concurrent policy evaluation with CUE context pooling. Sub-millisecond per-rule evaluation. Benchmark-proven against OPA.</p>
+		</div>
+		<div class="feature-card">
+			<div class="icon">&#128260;</div>
+			<h3>Zero-Downtime Reload</h3>
+			<p>Hot-reload policies via REST API or filesystem watcher. No restarts, no downtime, no missed evaluations.</p>
+		</div>
+	</div>
+</section>
+
+<!-- Code example -->
+<section class="code-section">
+	<h2>Policies That Read Like Intent</h2>
+	<p class="subtitle">CUE gives you types, constraints, and logic — in a format your team can review in a PR.</p>
+	<div class="code-block">
+		<div class="code-header">container-security.cue</div>
+		<pre><code set:html={`package policies
+
+policy: {
+    name:        "container-security"
+    description: "Enforce container image and resource policies"
+    category:    "security"
+    severity:    "high"
+
+    rules: [{
+        name: "no-latest-tag"
+        description: "Container images must use explicit tags"
+        match: {
+            operator: "not_contains"
+            value:    ":latest"
+        }
+        message: "Image '%s' uses :latest tag — pin to a digest or semver tag"
+    }, {
+        name: "memory-limit-required"
+        description: "All containers must declare memory limits"
+        match: {
+            operator:  "greater_than"
+            field:     "resources.limits.memory"
+            value:     "0"
+        }
+        message: "Container has no memory limit set"
+    }]
+}`} /></pre>
+	</div>
+</section>
+
+<!-- OPA callout -->
+<section class="callout">
+	<div class="callout-inner">
+		<h3>Coming from OPA?</h3>
+		<p>See how Garmr compares in features and performance — with real benchmarks.</p>
+		<a href={`${base}docs/comparisons/opa-features/`} class="btn btn-primary">Feature Comparison</a>
+		<a href={`${base}docs/comparisons/opa-performance/`} class="btn btn-secondary" style="margin-left: 0.5rem;">Performance Benchmarks</a>
+	</div>
+</section>
+
+<!-- Footer -->
+<footer class="landing-footer">
+	<p>Apache 2.0 &middot; Built by <a href="https://github.com/infrashift">InfraShift</a></p>
+</footer>
+
+<script>
+// Theme toggle
+const toggle = document.getElementById('theme-toggle');
+const html = document.documentElement;
+
+function setTheme(theme) {
+	html.setAttribute('data-theme', theme);
+	localStorage.setItem('garmr-theme', theme);
+	toggle.textContent = theme === 'dark' ? '\u263E' : '\u2600';
+	// Show/hide banner variants
+	document.querySelectorAll('.banner-dark').forEach(el => el.style.display = theme === 'dark' ? 'block' : 'none');
+	document.querySelectorAll('.banner-light').forEach(el => el.style.display = theme === 'light' ? 'block' : 'none');
+}
+
+toggle.addEventListener('click', () => {
+	setTheme(html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+});
+
+// Restore saved preference
+const saved = localStorage.getItem('garmr-theme');
+setTheme(saved || 'dark');
+</script>
+
+</body>
+</html>

@@ -1,4 +1,10 @@
-# REST API Reference
+---
+title: "REST API Reference"
+description: "HTTP API endpoints and examples for Garmr"
+sidebar:
+  order: 1
+  label: "REST API"
+---
 
 Complete HTTP API reference for Garmr.
 
@@ -21,7 +27,7 @@ The OpenAPI 3.0 specification is embedded in the server binary and also availabl
 
 ## Authentication
 
-Currently, no authentication is required. See [ROADMAP.md](ROADMAP.md) for planned authentication features.
+Currently, no authentication is required. See [Roadmap](/garmr/docs/project/roadmap/) for planned authentication features.
 
 ---
 
@@ -438,7 +444,7 @@ def evaluate(input_data, namespace=None):
     payload = {'input': input_data}
     if namespace:
         payload['namespace'] = namespace
-    
+
     response = requests.post(
         f'{GARMR_SERVER}/v1/evaluate',
         json=payload,
@@ -453,11 +459,11 @@ def evaluate(input_data, namespace=None):
 if __name__ == '__main__':
     with open(sys.argv[1]) as f:
         input_data = json.load(f)
-    
+
     result = evaluate(input_data, namespace='security')
-    
+
     print(f"Decision: {result['decision']}")
-    
+
     if result['decision'] == 'deny':
         for r in result['results']:
             if not r['passed']:

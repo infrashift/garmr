@@ -1,0 +1,113 @@
+---
+title: "Garmr Documentation"
+description: "CUE-based policy evaluation engine for governance, security, and compliance"
+sidebar:
+  order: 0
+  label: "Overview"
+---
+
+A CUE-based policy evaluation engine for enforcing governance, security, and compliance policies across your infrastructure and CI/CD pipelines.
+
+## Overview
+
+Garmr provides a flexible, type-safe policy engine that uses [CUE](https://cuelang.org/) for policy definition. It supports:
+
+- **20+ condition operators** for flexible rule construction
+- **Target filtering** to apply policies to specific resource types
+- **Namespace organization** for team-based policy management
+- **Hot reload** for zero-downtime policy updates
+- **Audit logging** with request correlation for compliance
+- **CI/CD integration** via CLI and REST API
+
+## Key Features
+
+### Condition Operators
+
+| Category | Operators |
+|----------|-----------|
+| Existence | `exists`, `absent` |
+| Equality | `equals` |
+| Comparison | `greaterThan`, `greaterThanOrEqual`, `lessThan`, `lessThanOrEqual` |
+| String | `contains`, `hasPrefix`, `hasSuffix`, `pattern` (regex) |
+| Set | `in`, `notIn` |
+| Logical | `all`, `any`, `not` |
+| Advanced | `forEach`, `length`, `semver`, `datetime`, `compare` (cross-field) |
+
+### Target Filtering
+
+Apply policies only to specific resource types:
+
+```cue
+target: {
+    resources: [
+        "pod",
+        "deployment",
+        {
+            kind: "configmap"
+            namespaces: ["production"]
+            labels: {env: "prod"}
+        }
+    ]
+}
+```
+
+### Namespace Organization
+
+Organize policies by team or function:
+
+```
+policies/
+├── security/       # Security team policies
+├── compliance/     # Compliance requirements
+├── platform/       # Platform team standards
+└── release/        # Release gate policies
+```
+
+### Audit Logging
+
+Every evaluation is logged with:
+- Request ID for correlation
+- Decision (allow/deny/warn)
+- Violations count
+- Resource metadata
+- Client information
+
+## Example Policy
+
+```cue
+package security
+
+containerSecurity: {
+    apiVersion: "policy.garmr.io/v1"
+    kind: "Policy"
+    metadata: {
+        name: "container-security"
+        namespace: "security"
+    }
+    spec: {
+        description: "Enforce container security best practices"
+        target: resources: ["pod", "deployment"]
+        rules: [
+            {
+                id: "SEC-001"
+                description: "Containers must not run as root"
+                severity: "high"
+                expr: {
+                    forEach: {
+                        path: "spec.containers"
+                        as: "container"
+                        condition: {
+                            match: {
+                                path: "container.securityContext.runAsNonRoot"
+                                equals: true
+                            }
+                        }
+                    }
+                }
+                message: "Container is running as root"
+            }
+        ]
+        enforcement: action: "deny"
+    }
+}
+```

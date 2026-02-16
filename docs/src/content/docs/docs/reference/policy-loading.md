@@ -1,4 +1,10 @@
-# Policy Loading Design
+---
+title: "Policy Loading"
+description: "Policy loading architecture and hot-reload strategies"
+sidebar:
+  order: 1
+  label: "Policy Loading"
+---
 
 ## Overview
 
@@ -33,20 +39,20 @@ Garmr uses CUE for its own configuration, ensuring type safety:
 // /etc/garmr/config.cue
 {
     apiVersion: "config.garmr.io/v1"
-    
+
     server: {
         grpc: address: ":9090"
         http: address: ":8080"
     }
-    
+
     policies: {
         rootDir: "/policies"
-        
+
         namespaceStrategy: {
             mode: "hybrid"      // Use directory, allow override
             directoryDepth: 0   // First subdir is namespace
         }
-        
+
         reload: {
             enabled: true
             strategy: {
@@ -54,7 +60,7 @@ Garmr uses CUE for its own configuration, ensuring type safety:
             }
         }
     }
-    
+
     engine: {
         parallelRules: true
         cache: {
@@ -159,8 +165,8 @@ reload: strategy: {
 1. Request arrives for policy `release-gate`
 2. Garmr reads `release-gate.cue.lock`
 3. Compares lock checksum with cached policy checksum
-4. If match → use cached policy
-5. If mismatch → reload policy, update cache
+4. If match -- use cached policy
+5. If mismatch -- reload policy, update cache
 
 **Pros:**
 - Explicit version control
@@ -190,7 +196,7 @@ reload: strategy: {
 **Flow:**
 1. Request arrives for policy `release-gate`
 2. Check JIT cache (if enabled and TTL > 0)
-3. If cache miss or expired → read from disk
+3. If cache miss or expired -- read from disk
 4. Evaluate policy
 5. Update JIT cache
 
@@ -251,16 +257,16 @@ For complex policies spanning multiple files:
             "acc-release.cue",
             "prod-release.cue",
         ]
-        
+
         // Shared definitions unified with each policy
         definitions: {
             _approvalGroups: {
                 prod: ["release-managers"]
             }
         }
-        
+
         evaluationOrder: "dependency"
-        
+
         policies: [{
             file: "prod-release.cue"
             requires: ["acc-release.cue"]

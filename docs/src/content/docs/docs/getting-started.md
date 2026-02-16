@@ -1,4 +1,10 @@
-# Garmr - Quick Start Guide
+---
+title: "Getting Started"
+description: "Build, run, and evaluate your first policies with Garmr"
+sidebar:
+  order: 1
+  label: "Getting Started"
+---
 
 ## Build
 
@@ -138,14 +144,14 @@ Create a file `testdata/release-input.json`:
 ./bin/garmr eval --input testdata/release-input.json
 
 # Expected output:
-# Decision: ✓ ALLOW
+# Decision: ALLOW
 #
 # SEVERITY     POLICY/RULE                    RESULT     ID       MESSAGE
 # ----------------------------------------------------------------------------------------------------
-# CRITICAL     release/release-gate           PASS       REL-001  
-# HIGH         release/release-gate           PASS       REL-002  
-# CRITICAL     release/release-gate           PASS       REL-003  
-# MEDIUM       release/release-gate           PASS       REL-004  
+# CRITICAL     release/release-gate           PASS       REL-001
+# HIGH         release/release-gate           PASS       REL-002
+# CRITICAL     release/release-gate           PASS       REL-003
+# MEDIUM       release/release-gate           PASS       REL-004
 ```
 
 ### Example: Failing Input
@@ -179,7 +185,7 @@ Create `testdata/release-input-fail.json`:
 ./bin/garmr eval --input testdata/release-input-fail.json
 
 # Expected output:
-# Decision: ✗ DENY
+# Decision: DENY
 #
 # SEVERITY     POLICY/RULE                    RESULT     ID       MESSAGE
 # ----------------------------------------------------------------------------------------------------
@@ -191,7 +197,7 @@ Create `testdata/release-input-fail.json`:
 
 ## HTTP API
 
-The server also exposes a REST API:
+The server also exposes a REST API. See the [REST API Reference](/garmr/docs/guides/rest-api/) for full details.
 
 ### Evaluate via HTTP
 
@@ -223,6 +229,8 @@ curl http://localhost:8080/health
 
 ## CI/CD Integration
 
+For more details, see the [CI/CD Integration guide](/garmr/docs/guides/ci-cd-pipeline-integration/).
+
 ### GitHub Actions
 
 ```yaml
@@ -230,11 +238,11 @@ curl http://localhost:8080/health
   run: |
     ./bin/garmr eval --input deployment.json -o json > result.json
     if [ "$(jq -r '.decision' result.json)" = "deny" ]; then
-      echo "❌ Policy violations found:"
+      echo "Policy violations found:"
       jq -r '.results[] | select(.passed == false) | "  - [\(.severity)] \(.ruleId): \(.message)"' result.json
       exit 1
     fi
-    echo "✅ All policies passed"
+    echo "All policies passed"
 ```
 
 ### GitLab CI
@@ -297,7 +305,7 @@ log:
 # Storage backend (optional)
 storage:
   type: "filesystem"  # filesystem, s3, consul
-  
+
 # Plugins (optional)
 plugins:
   dir: "/plugins"

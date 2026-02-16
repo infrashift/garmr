@@ -1,4 +1,10 @@
-# CLI Reference
+---
+title: "CLI Reference"
+description: "Complete command reference for the Garmr CLI"
+sidebar:
+  order: 0
+  label: "CLI Reference"
+---
 
 Complete command reference for the Garmr CLI.
 
@@ -270,7 +276,7 @@ garmr test policies/ -v
 // policies/release-gate_test.cue
 {
     policy: "release-gate"
-    
+
     tests: [{
         name: "valid release passes"
         input: {

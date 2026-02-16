@@ -1,4 +1,10 @@
-# Garmr vs OPA: Feature Comparison
+---
+title: "Garmr vs OPA: Features"
+description: "Feature comparison between Garmr and Open Policy Agent"
+sidebar:
+  order: 0
+  label: "vs OPA: Features"
+---
 
 > **Last updated:** 2026-02-14
 
@@ -34,7 +40,7 @@ This document compares their feature sets side-by-side and highlights capabiliti
 | Decision outcomes | **allow / deny / warn** | allow / deny (boolean) | **Garmr advantage** — see [Three-Outcome Decisions](#1-three-outcome-decisions-allow--deny--warn) |
 | Decision structure | Structured response with per-rule results | Arbitrary JSON document | **Garmr advantage** — consistent, machine-readable format |
 | CI/CD exit codes | 0=allow, 1=deny, 2=warn | User must implement | **Garmr advantage** — native pipeline integration |
-| Dry-run mode | Built-in (deny → warn, `[DRY RUN]` prefix) | User must implement in Rego | **Garmr advantage** |
+| Dry-run mode | Built-in (deny -> warn, `[DRY RUN]` prefix) | User must implement in Rego | **Garmr advantage** |
 | Fail-fast evaluation | Built-in (stop on first critical failure) | User must implement in Rego | **Garmr advantage** |
 
 ### Rule Metadata & Organization
@@ -90,7 +96,7 @@ This document compares their feature sets side-by-side and highlights capabiliti
 | Feature | Garmr | OPA | Notes |
 |---|---|---|---|
 | CLI eval | `garmr eval --input file.json` | `opa eval -d policy.rego -i input.json` | Both provide CLI eval |
-| Client-server model | CLI → HTTP API → Server | Embedded or REST API | **Garmr advantage** — see [CI/CD-Native CLI](#6-cicd-native-cli) |
+| Client-server model | CLI -> HTTP API -> Server | Embedded or REST API | **Garmr advantage** — see [CI/CD-Native CLI](#6-cicd-native-cli) |
 | Exit codes | Semantic (0/1/2) | User-defined | **Garmr advantage** |
 | Output formats | Table, JSON, YAML | JSON, pretty, raw | Both support multiple formats |
 | Policy testing | `garmr test` with CUE test suites | `opa test` with Rego tests | Both provide testing frameworks |
@@ -282,9 +288,9 @@ Garmr's CLI is designed as a client to the Garmr server, making it a first-class
 garmr eval --input deployment.yaml -n security --fail-on-warn -o json
 
 # Exit code tells the pipeline what to do:
-#   0 = allow  → pipeline continues
-#   1 = deny   → pipeline fails
-#   2 = warn   → pipeline continues (or fails with --fail-on-warn)
+#   0 = allow  -> pipeline continues
+#   1 = deny   -> pipeline fails
+#   2 = warn   -> pipeline continues (or fails with --fail-on-warn)
 
 # Validate policies before merging
 garmr validate policies/*.cue

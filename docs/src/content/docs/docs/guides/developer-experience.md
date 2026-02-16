@@ -1,4 +1,10 @@
-# Developer Experience Guide
+---
+title: "Developer Experience"
+description: "Writing, testing, and debugging Garmr policies"
+sidebar:
+  order: 4
+  label: "Developer Experience"
+---
 
 This guide covers how to develop, test, and validate policies for Garmr.
 
@@ -7,7 +13,7 @@ This guide covers how to develop, test, and validate policies for Garmr.
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │  Write Policy   │────▶│  Test Locally   │────▶│  Deploy to      │
-│  (CUE)          │     │  (garmr eval)       │     │  Server         │
+│  (CUE)          │     │  (garmr eval)   │     │  Server         │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
         │                       │                       │
         │                       │                       │
@@ -57,7 +63,7 @@ package <namespace>
     description: "Rule description"   // Human-readable description
     severity: "critical" | "high" | "medium" | "low" | "info"
     expr: {
-        // Condition expression (see POLICY-SCHEMA.md)
+        // Condition expression (see [Policy Schema](/docs/reference/policy-schema/))
     }
     message: "Failure message"        // Shown when rule fails
 }
@@ -511,17 +517,17 @@ test_case() {
     local file=$1
     local expected_decision=$2
     local namespace=$3
-    
+
     echo -n "Testing $file (expect: $expected_decision)... "
-    
+
     ARGS="--input $file -o json"
     if [ -n "$namespace" ]; then
         ARGS="$ARGS -n $namespace"
     fi
-    
+
     RESULT=$(./bin/garmr eval$ARGS 2>/dev/null || true)
     DECISION=$(echo "$RESULT" | jq -r '.decision')
-    
+
     if [ "$DECISION" = "$expected_decision" ]; then
         echo -e "${GREEN}PASS${NC}"
         ((PASS++))
@@ -724,7 +730,7 @@ Write clear, actionable messages:
 // Bad
 message: "Failed"
 
-// Good  
+// Good
 message: "Container must specify resource limits for memory and CPU"
 
 // Better

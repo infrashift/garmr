@@ -7,3 +7,8 @@ garmr-audit/
 **/**/garmr-server
 **/**/audit-file.so
 **/**/coverage.out
+
+# Docs site (Astro/Starlight)
+docs/node_modules/
+docs/dist/
+docs/.astro/

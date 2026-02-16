@@ -1,8 +1,14 @@
-# Storage Backend Architecture
+---
+title: "Storage Backends"
+description: "Configure policy storage with filesystem, S3, or MinIO"
+sidebar:
+  order: 1
+  label: "Storage Backends"
+---
 
 ## Overview
 
-Garmr uses a pluggable storage backend architecture. The engine and loader are completely decoupled from storage implementation details—they only interact with the `storage.Backend` interface.
+Garmr uses a pluggable storage backend architecture. The engine and loader are completely decoupled from storage implementation details -- they only interact with the `storage.Backend` interface.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -37,25 +43,25 @@ All storage backends implement this interface:
 type Backend interface {
     // Type returns the backend identifier
     Type() string
-    
+
     // List returns all files matching pattern
     List(ctx context.Context, pattern string) ([]FileInfo, error)
-    
+
     // Get retrieves file content
     Get(ctx context.Context, path string) ([]byte, error)
-    
+
     // GetReader returns a streaming reader
     GetReader(ctx context.Context, path string) (io.ReadCloser, error)
-    
+
     // Stat returns file metadata
     Stat(ctx context.Context, path string) (*FileInfo, error)
-    
+
     // Watch returns change events (nil if unsupported)
     Watch(ctx context.Context, pattern string) (<-chan Event, error)
-    
+
     // Checksum returns file checksum for change detection
     Checksum(ctx context.Context, path string) (string, error)
-    
+
     // Close releases resources
     Close() error
 }
@@ -282,12 +288,12 @@ echo "Policies synced to MinIO"
 ```go
 func (b *FilesystemBackend) Get(ctx context.Context, path string) ([]byte, error) {
     fullPath := filepath.Join(b.root, path)
-    
+
     // SECURITY: Prevent escaping root directory
     if !strings.HasPrefix(filepath.Clean(fullPath), filepath.Clean(b.root)) {
         return nil, &ErrAccessDenied{Path: path, Reason: "path traversal attempt"}
     }
-    
+
     return os.ReadFile(fullPath)
 }
 ```

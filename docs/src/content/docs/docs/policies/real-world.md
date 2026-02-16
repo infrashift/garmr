@@ -1,4 +1,10 @@
-# Real-World Policies
+---
+title: "Real-World Policy Examples"
+description: "Production-ready policy patterns and examples"
+sidebar:
+  order: 0
+  label: "Real-World Examples"
+---
 
 Production-ready policy examples with user stories and usage instructions.
 
@@ -18,13 +24,13 @@ Both JSON and YAML input formats are supported. YAML is particularly useful for 
 
 ```bash
 # JSON input
-q eval --input deployment.json -n real-world
+garmr eval --input deployment.json -n real-world
 
 # YAML input (auto-detected from extension)
-q eval --input deployment.yaml -n real-world
+garmr eval --input deployment.yaml -n real-world
 
 # YAML with explicit format
-q eval --input deployment.txt --format yaml -n real-world
+garmr eval --input deployment.txt --format yaml -n real-world
 ```
 
 ## Enforcement Actions
@@ -68,13 +74,13 @@ q eval --input deployment.txt --format yaml -n real-world
 
 ```bash
 # Secure pod - should ALLOW
-q eval --input test-data/real-world/container-security-pass.json -n real-world
+garmr eval --input test-data/real-world/container-security-pass.json -n real-world
 
 # Insecure pod - should DENY
-q eval --input test-data/real-world/container-security-fail.json -n real-world
+garmr eval --input test-data/real-world/container-security-fail.json -n real-world
 
 # View violations in JSON
-q eval --input test-data/real-world/container-security-fail.json -n real-world -o json | \
+garmr eval --input test-data/real-world/container-security-fail.json -n real-world -o json | \
   jq '.results[] | select(.passed==false) | {id: .rule_id, severity: .severity, message: .message}'
 ```
 
@@ -82,13 +88,13 @@ q eval --input test-data/real-world/container-security-fail.json -n real-world -
 
 ```bash
 # Secure pod - should ALLOW (native Kubernetes YAML)
-q eval --input test-data/real-world/container-security-pass.yaml -n real-world
+garmr eval --input test-data/real-world/container-security-pass.yaml -n real-world
 
 # Insecure pod - should DENY
-q eval --input test-data/real-world/container-security-fail.yaml -n real-world
+garmr eval --input test-data/real-world/container-security-fail.yaml -n real-world
 
 # Evaluate actual Kubernetes manifests
-q eval --input k8s/deployments/web-app.yaml -n real-world
+garmr eval --input k8s/deployments/web-app.yaml -n real-world
 ```
 
 ### curl Examples (JSON)
@@ -159,13 +165,13 @@ namespace: real-world
 
 ```bash
 # Valid release - should ALLOW
-q eval --input test-data/real-world/release-gate-pass.json -n real-world
+garmr eval --input test-data/real-world/release-gate-pass.json -n real-world
 
 # Invalid release - should DENY
-q eval --input test-data/real-world/release-gate-fail.json -n real-world
+garmr eval --input test-data/real-world/release-gate-fail.json -n real-world
 
 # CI/CD integration with request ID
-q eval --input test-data/real-world/release-gate-pass.json \
+garmr eval --input test-data/real-world/release-gate-pass.json \
   -n real-world \
   --request-id "release-${VERSION}" \
   -o json
@@ -211,11 +217,11 @@ With `enforcement: action: "warn"`:
 
 ```bash
 # WARN enforcement - returns exit code 0 even with violations
-q eval --input test-data/real-world/release-gate-fail.json -n real-world
+garmr eval --input test-data/real-world/release-gate-fail.json -n real-world
 echo "Exit code: $?"  # 0
 
 # Treat warnings as failures
-q eval --input test-data/real-world/release-gate-fail.json -n real-world --fail-on-warn
+garmr eval --input test-data/real-world/release-gate-fail.json -n real-world --fail-on-warn
 echo "Exit code: $?"  # 2 if warnings present
 ```
 
@@ -247,10 +253,10 @@ echo "Exit code: $?"  # 2 if warnings present
 
 ```bash
 # Valid certificate - should ALLOW
-q eval --input test-data/real-world/certificate-pass.json -n real-world
+garmr eval --input test-data/real-world/certificate-pass.json -n real-world
 
 # Expired certificate - should DENY
-q eval --input test-data/real-world/certificate-fail.json -n real-world
+garmr eval --input test-data/real-world/certificate-fail.json -n real-world
 ```
 
 ### curl Examples
@@ -285,7 +291,7 @@ curl -s -X POST http://localhost:8080/v1/evaluate \
 ```bash
 # Check all certificates for upcoming expiration
 for cert in certs/*.json; do
-  result=$(q eval --input "$cert" -n real-world -o json)
+  result=$(garmr eval --input "$cert" -n real-world -o json)
   warnings=$(echo "$result" | jq '[.results[] | select(.passed==false)] | length')
   if [ "$warnings" -gt 0 ]; then
     echo "ATTENTION: $cert has expiration warnings"
@@ -322,13 +328,13 @@ done
 
 ```bash
 # Compliant resource - should ALLOW
-q eval --input test-data/real-world/resource-governance-pass.json -n real-world
+garmr eval --input test-data/real-world/resource-governance-pass.json -n real-world
 
 # Non-compliant resource - should DENY
-q eval --input test-data/real-world/resource-governance-fail.json -n real-world
+garmr eval --input test-data/real-world/resource-governance-fail.json -n real-world
 
 # Show all violations
-q eval --input test-data/real-world/resource-governance-fail.json -n real-world -o json | \
+garmr eval --input test-data/real-world/resource-governance-fail.json -n real-world -o json | \
   jq '.results[] | select(.passed==false) | {rule: .rule_id, message: .message}'
 ```
 
@@ -347,14 +353,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Evaluate Container Security
         run: |
-          q eval --input k8s/deployment.json \
+          garmr eval --input k8s/deployment.json \
             -n real-world \
             --request-id "gh-${{ github.run_id }}" \
             -o json > policy-result.json
-          
+
           decision=$(jq -r '.decision' policy-result.json)
           if [ "$decision" = "deny" ]; then
             echo "::error::Policy check failed"
@@ -370,11 +376,11 @@ policy-check:
   stage: validate
   script:
     - |
-      q eval --input k8s/deployment.json \
+      garmr eval --input k8s/deployment.json \
         -n real-world \
         --request-id "gl-${CI_PIPELINE_ID}" \
         -o json > policy-result.json
-      
+
       if [ "$(jq -r '.decision' policy-result.json)" = "deny" ]; then
         echo "Policy violations found:"
         jq '.results[] | select(.passed==false) | "\(.rule_id): \(.message)"' policy-result.json
@@ -407,18 +413,18 @@ make run
 
 # Test all real-world policies
 echo "=== Container Security ==="
-q eval --input test-data/real-world/container-security-pass.json -n real-world
-q eval --input test-data/real-world/container-security-fail.json -n real-world
+garmr eval --input test-data/real-world/container-security-pass.json -n real-world
+garmr eval --input test-data/real-world/container-security-fail.json -n real-world
 
 echo "=== Release Gate ==="
-q eval --input test-data/real-world/release-gate-pass.json -n real-world
-q eval --input test-data/real-world/release-gate-fail.json -n real-world
+garmr eval --input test-data/real-world/release-gate-pass.json -n real-world
+garmr eval --input test-data/real-world/release-gate-fail.json -n real-world
 
 echo "=== Certificate Management ==="
-q eval --input test-data/real-world/certificate-pass.json -n real-world
-q eval --input test-data/real-world/certificate-fail.json -n real-world
+garmr eval --input test-data/real-world/certificate-pass.json -n real-world
+garmr eval --input test-data/real-world/certificate-fail.json -n real-world
 
 echo "=== Resource Governance ==="
-q eval --input test-data/real-world/resource-governance-pass.json -n real-world
-q eval --input test-data/real-world/resource-governance-fail.json -n real-world
+garmr eval --input test-data/real-world/resource-governance-pass.json -n real-world
+garmr eval --input test-data/real-world/resource-governance-fail.json -n real-world
 ```

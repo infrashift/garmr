@@ -1,4 +1,10 @@
-.# Target and Namespace Filtering
+---
+title: "Target & Namespace Filtering"
+description: "How to scope policies to specific resources and namespaces"
+sidebar:
+  order: 2
+  label: "Filtering"
+---
 
 This guide explains how Garmr determines which policies apply to which resources.
 
@@ -151,16 +157,16 @@ Resource namespace comes from the input:
 
 ```bash
 # Evaluate against all policies (no filter)
-q eval --input pod.json
+garmr eval --input pod.json
 
 # Evaluate only security policies
-q eval --input pod.json -n security
+garmr eval --input pod.json -n security
 
 # Evaluate security and compliance policies
-q eval --input pod.json -n security -n compliance
+garmr eval --input pod.json -n security -n compliance
 
 # Evaluate all namespaces explicitly
-q eval --input pod.json --all-namespaces
+garmr eval --input pod.json --all-namespaces
 ```
 
 ### API Namespace Filter
@@ -215,10 +221,10 @@ Applicable Policies
 
 | Command | Policies Evaluated |
 |---------|-------------------|
-| `q eval --input pod.json` | container-security, network-policy, audit-logging |
-| `q eval --input pod.json -n security` | container-security, network-policy |
-| `q eval --input pod.json -n release` | (none - release policies don't target pods) |
-| `q eval --input pod.json -n compliance` | audit-logging |
+| `garmr eval --input pod.json` | container-security, network-policy, audit-logging |
+| `garmr eval --input pod.json -n security` | container-security, network-policy |
+| `garmr eval --input pod.json -n release` | (none - release policies don't target pods) |
+| `garmr eval --input pod.json -n compliance` | audit-logging |
 
 ---
 
@@ -244,10 +250,10 @@ policies/
 Usage:
 ```bash
 # Security review
-q eval --input deployment.json -n security
+garmr eval --input deployment.json -n security
 
 # Full compliance check
-q eval --input deployment.json -n security -n compliance
+garmr eval --input deployment.json -n security -n compliance
 ```
 
 ### Strategy 2: Environment-Based Namespaces
@@ -264,10 +270,10 @@ policies/
 Usage:
 ```bash
 # CI for dev branch
-q eval --input deployment.json -n dev
+garmr eval --input deployment.json -n dev
 
 # CI for production deploy
-q eval --input deployment.json -n prod
+garmr eval --input deployment.json -n prod
 ```
 
 ### Strategy 3: Pipeline Stage Gates
@@ -285,10 +291,10 @@ policies/
 Usage:
 ```bash
 # After build
-q eval --input artifact.json -n build
+garmr eval --input artifact.json -n build
 
 # Before production
-q eval --input artifact.json -n release
+garmr eval --input artifact.json -n release
 ```
 
 ### Strategy 4: Resource-Type Targeting
@@ -386,13 +392,13 @@ Create a README in your policies directory:
 
 ```bash
 # Check what policies are loaded
-q policy list
+garmr policy list
 
 # Check what namespace a policy is in
-q policy list -o json | jq '.[] | {name, namespace}'
+garmr policy list -o json | jq '.[] | {name, namespace}'
 
 # Evaluate without namespace filter to see all matches
-q eval --input resource.json -o json | jq '.results[].policy_namespace'
+garmr eval --input resource.json -o json | jq '.results[].policy_namespace'
 ```
 
 ### Target Not Matching?
@@ -409,6 +415,6 @@ grep -A5 "target:" policies/*.cue
 
 ```bash
 # Include passed rules to see full evaluation
-q eval --input resource.json --include-passed -o json | \
+garmr eval --input resource.json --include-passed -o json | \
   jq '[.results[] | {policy: .policy_name, namespace: .policy_namespace}] | unique'
 ```

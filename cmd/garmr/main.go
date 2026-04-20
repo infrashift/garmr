@@ -12,6 +12,7 @@ import (
 var (
 	version = "0.1.0"
 	cfgFile string
+	osExit  = os.Exit
 )
 
 // rootCmd is the base command for the Garmr CLI.
@@ -44,7 +45,7 @@ func init() {
 
 	// Global flags
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.garmr.yaml)")
-	rootCmd.PersistentFlags().String("server", "localhost:9090", "Garmr server address")
+	rootCmd.PersistentFlags().String("server", "http://localhost:8080", "Garmr server URL")
 	rootCmd.PersistentFlags().Bool("insecure", false, "disable TLS")
 	rootCmd.PersistentFlags().String("tls-cert", "", "TLS certificate file")
 	rootCmd.PersistentFlags().StringP("output", "o", "table", "output format (table, json, yaml)")

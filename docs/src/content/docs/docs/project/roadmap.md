@@ -46,10 +46,6 @@ This document describes what Garmr can do today and where it's headed.
 ### APIs
 
 - HTTP REST API for policy evaluation, management, and health checks
-- gRPC API with Protocol Buffers service definitions
-  - PolicyService, PolicyManagementService, DataService, HealthService
-  - Streaming evaluation for batch processing
-  - gRPC reflection for tooling (grpcurl, etc.)
 
 ### CLI
 
@@ -60,7 +56,7 @@ This document describes what Garmr can do today and where it's headed.
 
 ### Security & Networking
 
-- TLS for both HTTP and gRPC (minimum TLS 1.2)
+- TLS for HTTP (minimum TLS 1.2)
 - API key authentication
 - Configurable CORS
 - Rate limiting (per-second + burst)

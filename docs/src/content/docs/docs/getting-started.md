@@ -13,7 +13,7 @@ sidebar:
 make build
 
 # This creates:
-# - bin/garmr-server  (the gRPC/HTTP server)
+# - bin/garmr-server  (the HTTP/REST server)
 # - bin/garmr     (the CLI client)
 ```
 
@@ -26,7 +26,6 @@ make build
 ./bin/garmr-server --dev --policy-dir ./examples --log-format console
 
 # Server listens on:
-# - gRPC: localhost:9090
 # - HTTP: localhost:8080
 ```
 
@@ -44,7 +43,6 @@ cp config.example.yaml config.yaml
 
 ```bash
 export GARMR_POLICY_DIR=./examples
-export GARMR_GRPC_ADDR=:9090
 export GARMR_HTTP_ADDR=:8080
 export GARMR_LOG_LEVEL=debug
 
@@ -95,10 +93,9 @@ chmod +x scripts/garmr-eval
 GARMR_SERVER=http://localhost:8080 ./scripts/garmr-eval testdata/release-input.json
 ```
 
-### Using the CLI (requires protobuf setup)
+### Using the CLI
 
-The full CLI uses gRPC which requires protobuf code generation.
-For now, use the HTTP API or the garmr-eval script above.
+The `garmr` CLI talks to the server over the REST API. By default it targets `http://localhost:8080`; override with `--server` or the `GARMR_SERVER` environment variable.
 
 ## Example Test Data
 
@@ -284,7 +281,6 @@ Generate markdown documentation from policies:
 
 ```yaml
 # Server settings
-grpc_addr: ":9090"
 http_addr: ":8080"
 
 # Policy loading
@@ -319,12 +315,11 @@ plugins:
 ### Server won't start
 
 ```bash
-# Check if ports are in use
-lsof -i :9090
+# Check if port is in use
 lsof -i :8080
 
-# Use different ports
-./bin/garmr-server --grpc-addr :9091 --http-addr :8081
+# Use a different port
+./bin/garmr-server --http-addr :8081
 ```
 
 ### Policies not loading
@@ -343,6 +338,6 @@ lsof -i :8080
 # Check server is running
 curl http://localhost:8080/health
 
-# CLI with custom server address
-./bin/garmr eval --server localhost:9090 --input data.json
+# CLI with custom server URL
+./bin/garmr eval --server http://localhost:8080 --input data.json
 ```

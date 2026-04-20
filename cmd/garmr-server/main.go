@@ -26,7 +26,7 @@ var (
 var rootCmd = &cobra.Command{
 	Use:   "garmr-server",
 	Short: "Garmr Server",
-	Long: `Garmr Server provides gRPC and REST APIs for policy evaluation.
+	Long: `Garmr Server provides a REST API for policy evaluation.
 
 The server loads policies from CUE files and evaluates input against them,
 returning decisions and violations.
@@ -53,7 +53,6 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file")
 
 	// Server flags
-	rootCmd.Flags().String("grpc-addr", "", "gRPC listen address (e.g., :9090; empty = disabled)")
 	rootCmd.Flags().String("http-addr", ":8080", "HTTP listen address")
 	rootCmd.Flags().String("policy-dir", "", "directory containing policies")
 	rootCmd.Flags().String("data-dir", "", "directory containing data files")
@@ -71,7 +70,6 @@ func init() {
 	rootCmd.Flags().Bool("dev", false, "development mode")
 
 	// Bind to viper
-	viper.BindPFlag("grpc_addr", rootCmd.Flags().Lookup("grpc-addr"))
 	viper.BindPFlag("http_addr", rootCmd.Flags().Lookup("http-addr"))
 	viper.BindPFlag("policy_dir", rootCmd.Flags().Lookup("policy-dir"))
 	viper.BindPFlag("data_dir", rootCmd.Flags().Lookup("data-dir"))
@@ -196,7 +194,6 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	// Create server config
 	cfg := server.Config{
-		GRPCAddr:           viper.GetString("grpc_addr"),
 		HTTPAddr:           viper.GetString("http_addr"),
 		PolicyDir:          viper.GetString("policy_dir"),
 		TLSCert:            viper.GetString("tls.cert"),
@@ -242,7 +239,6 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	// Start server
 	logger.Info("server listening",
-		zap.String("grpc", cfg.GRPCAddr),
 		zap.String("http", cfg.HTTPAddr),
 	)
 

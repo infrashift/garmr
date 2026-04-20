@@ -48,11 +48,6 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	serverAddr := viper.GetString("server")
-	if !strings.HasPrefix(serverAddr, "http://") && !strings.HasPrefix(serverAddr, "https://") {
-		serverAddr = "http://" + serverAddr
-	}
-	serverAddr = strings.Replace(serverAddr, ":9090", ":8080", 1)
-
 	cfg := client.Config{
 		Address: serverAddr,
 	}
@@ -107,7 +102,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	}
 
 	if hasErrors {
-		os.Exit(1)
+		osExit(1)
 	}
 
 	return nil
@@ -362,7 +357,7 @@ func runPolicyValidateLock(cmd *cobra.Command, args []string) error {
 
 	if len(errors) > 0 {
 		fmt.Fprintf(os.Stderr, "\n%d validation error(s)\n", len(errors))
-		os.Exit(1)
+		osExit(1)
 	}
 
 	fmt.Printf("\n✓ All %d lock files valid\n", len(files))
@@ -586,11 +581,6 @@ func runPolicyList(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	serverAddr := viper.GetString("server")
-	if !strings.HasPrefix(serverAddr, "http://") && !strings.HasPrefix(serverAddr, "https://") {
-		serverAddr = "http://" + serverAddr
-	}
-	serverAddr = strings.Replace(serverAddr, ":9090", ":8080", 1)
-
 	cfg := client.Config{
 		Address: serverAddr,
 	}
@@ -640,11 +630,6 @@ func runPolicyGet(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	serverAddr := viper.GetString("server")
-	if !strings.HasPrefix(serverAddr, "http://") && !strings.HasPrefix(serverAddr, "https://") {
-		serverAddr = "http://" + serverAddr
-	}
-	serverAddr = strings.Replace(serverAddr, ":9090", ":8080", 1)
-
 	cfg := client.Config{
 		Address: serverAddr,
 	}
@@ -699,11 +684,6 @@ func runPolicyDelete(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	serverAddr := viper.GetString("server")
-	if !strings.HasPrefix(serverAddr, "http://") && !strings.HasPrefix(serverAddr, "https://") {
-		serverAddr = "http://" + serverAddr
-	}
-	serverAddr = strings.Replace(serverAddr, ":9090", ":8080", 1)
-
 	cfg := client.Config{
 		Address: serverAddr,
 	}
@@ -747,11 +727,6 @@ func runPolicyReload(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	serverAddr := viper.GetString("server")
-	if !strings.HasPrefix(serverAddr, "http://") && !strings.HasPrefix(serverAddr, "https://") {
-		serverAddr = "http://" + serverAddr
-	}
-	serverAddr = strings.Replace(serverAddr, ":9090", ":8080", 1)
-
 	cfg := client.Config{
 		Address: serverAddr,
 	}

@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -102,15 +100,8 @@ func runHealth(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	serverAddr := viper.GetString("server")
-	if !strings.HasPrefix(serverAddr, "http://") && !strings.HasPrefix(serverAddr, "https://") {
-		serverAddr = "http://" + serverAddr
-	}
-	// Use HTTP port if gRPC port specified
-	serverAddr = strings.Replace(serverAddr, ":9090", ":8080", 1)
-
 	cfg := client.Config{
-		Address: serverAddr,
+		Address: viper.GetString("server"),
 	}
 
 	wait, _ := cmd.Flags().GetBool("wait")
@@ -127,14 +118,14 @@ func runHealth(cmd *cobra.Command, args []string) error {
 			return waitForHealth(ctx, cfg)
 		}
 		fmt.Printf("✗ Server unreachable: %v\n", err)
-		os.Exit(1)
+		osExit(1)
 	}
 	defer c.Close()
 
 	result, err := c.Health(ctx)
 	if err != nil {
 		fmt.Printf("✗ Health check failed: %v\n", err)
-		os.Exit(1)
+		osExit(1)
 	}
 
 	format := viper.GetString("output")
@@ -146,7 +137,7 @@ func runHealth(cmd *cobra.Command, args []string) error {
 			fmt.Printf("✓ Server healthy (version %s)\n", result.Version)
 		} else {
 			fmt.Printf("✗ Server unhealthy\n")
-			os.Exit(1)
+			osExit(1)
 		}
 	}
 

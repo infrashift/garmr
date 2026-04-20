@@ -13,7 +13,7 @@ Complete command reference for the Garmr CLI.
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--config` | | Config file path | `~/.garmr.yaml` |
-| `--server` | | Garmr server address | `localhost:9090` |
+| `--server` | | Garmr server URL | `http://localhost:8080` |
 | `--output` | `-o` | Output format (table, json, yaml) | `table` |
 | `--quiet` | `-q` | Suppress non-essential output | `false` |
 | `--verbose` | `-v` | Verbose output | `false` |

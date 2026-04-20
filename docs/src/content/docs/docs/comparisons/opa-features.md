@@ -69,7 +69,7 @@ This document compares their feature sets side-by-side and highlights capabiliti
 | Feature | Garmr | OPA | Notes |
 |---|---|---|---|
 | HTTP API | REST (evaluate, validate, policies, reload) | REST (data, policies, query, compile) | Both provide REST APIs |
-| gRPC API | Planned | Not built-in (Envoy plugin provides gRPC) | — |
+| gRPC API | Not available (REST only) | Not built-in (Envoy plugin provides gRPC) | — |
 | API authentication | API key (header + Bearer token) | Bearer token, mTLS | OPA has more auth options |
 | CORS | Configurable allowed origins | Not built-in | Garmr advantage |
 | Rate limiting | Built-in token bucket | Not built-in | Garmr advantage |

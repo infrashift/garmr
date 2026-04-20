@@ -20,7 +20,6 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
-	"google.golang.org/grpc"
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	"github.com/infrashift/garmr/internal/engine"
@@ -37,7 +36,6 @@ var openAPISpec []byte
 
 // Config holds server configuration.
 type Config struct {
-	GRPCAddr    string // Reserved for future gRPC support
 	HTTPAddr    string
 	PolicyDir   string
 	TLSCert     string
@@ -73,7 +71,6 @@ type Server struct {
 	engine         *engine.Engine
 	logger         *zap.Logger
 	httpServer     *http.Server
-	grpcServer     *grpc.Server
 	startTime      time.Time
 	auditLogger    *slog.Logger
 	auditFile      io.Closer
@@ -275,7 +272,7 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 1)
 
 	// Start HTTP server
 	go func() {
@@ -284,28 +281,15 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
-	// Start gRPC server if configured
-	if s.config.GRPCAddr != "" {
-		go func() {
-			if err := s.startGRPC(); err != nil {
-				errCh <- fmt.Errorf("gRPC server error: %w", err)
-			}
-		}()
-	}
-
 	// Mark as ready
 	s.mu.Lock()
 	s.ready = true
 	s.checks["policies"] = true
 	s.checks["http"] = true
-	if s.config.GRPCAddr != "" {
-		s.checks["grpc"] = true
-	}
 	s.mu.Unlock()
 
 	s.logger.Info("server started",
 		zap.String("http", s.config.HTTPAddr),
-		zap.String("grpc", s.config.GRPCAddr),
 	)
 
 	select {
@@ -319,9 +303,6 @@ func (s *Server) Start(ctx context.Context) error {
 // Stop gracefully shuts down the server.
 func (s *Server) Stop() error {
 	s.logger.Info("shutting down server")
-
-	// Stop gRPC server first
-	s.stopGRPC()
 
 	// Close storage backend
 	if s.storageBackend != nil {
@@ -356,10 +337,28 @@ func (s *Server) Stop() error {
 	return nil
 }
 
-func (s *Server) startHTTP() error {
-	mux := http.NewServeMux()
+// Handler returns the fully-wired HTTP handler (routes + middleware).
+// Intended for tests that want to drive the server via httptest without binding a port.
+func (s *Server) Handler() http.Handler {
+	return s.buildHandler()
+}
 
-	s.logger.Info("registering HTTP handlers")
+// MarkReady flips the server into a ready state for tests that use Handler()
+// in place of Start(). Production code paths call Start(), which sets the
+// same flags internally.
+func (s *Server) MarkReady() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ready = true
+	if s.checks == nil {
+		s.checks = make(map[string]bool)
+	}
+	s.checks["policies"] = true
+	s.checks["http"] = true
+}
+
+func (s *Server) buildHandler() http.Handler {
+	mux := http.NewServeMux()
 
 	// Health endpoints - use sophisticated health handler
 	s.healthHandler.RegisterRoutes(mux)
@@ -383,16 +382,20 @@ func (s *Server) startHTTP() error {
 	mux.HandleFunc("/swagger-ui", s.handleSwaggerUI)
 	mux.HandleFunc("/swagger-ui/", s.handleSwaggerUI)
 
-	// Build middleware chain
 	var handler http.Handler = corsMiddleware(mux, s.config.CORSAllowedOrigins)
 	if s.rateLimiter != nil {
 		handler = s.rateLimiter.Middleware(handler)
 	}
 	handler = s.authMiddleware(handler)
+	return handler
+}
+
+func (s *Server) startHTTP() error {
+	s.logger.Info("registering HTTP handlers")
 
 	s.httpServer = &http.Server{
 		Addr:         s.config.HTTPAddr,
-		Handler:      handler,
+		Handler:      s.buildHandler(),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,

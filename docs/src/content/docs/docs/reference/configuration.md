@@ -8,18 +8,16 @@ sidebar:
 
 Garmr is configured via a YAML configuration file. Copy the example configuration to `config.yaml` and customize it for your environment.
 
-## Server Addresses
+## Server Address
 
-The server exposes both gRPC and HTTP endpoints. By default, gRPC listens on port 9090 and HTTP on port 8080.
+The server exposes a REST API on port 8080 by default.
 
 ```yaml
-grpc_addr: ":9090"
 http_addr: ":8080"
 ```
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `grpc_addr` | `:9090` | Address for the gRPC server |
 | `http_addr` | `:8080` | Address for the HTTP/REST server |
 
 ## Policy Configuration
@@ -161,8 +159,7 @@ Enable development mode for colored console output and relaxed security settings
 Below is a complete configuration file showing all available options:
 
 ```yaml
-# Server addresses
-grpc_addr: ":9090"
+# Server address
 http_addr: ":8080"
 
 # Policy configuration

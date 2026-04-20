@@ -1,8 +1,7 @@
 # Garmr Server Configuration
 # Copy to config.yaml and customize
 
-# Server addresses
-grpc_addr: ":9090"
+# Server address
 http_addr: ":8080"
 
 # Policy configuration

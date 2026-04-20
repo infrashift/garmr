@@ -1,12 +1,13 @@
 bin/
 out/
+/garmr
+/garmr-server
 q-audit/
 garmr-audit/
-**/**/q-server.config.yaml
-**/**/garmr
-**/**/garmr-server
-**/**/audit-file.so
-**/**/coverage.out
+**/q-server.config.yaml
+**/audit-file.so
+coverage.out
+coverage.html
 
 # Docs site (Astro/Starlight)
 docs/node_modules/

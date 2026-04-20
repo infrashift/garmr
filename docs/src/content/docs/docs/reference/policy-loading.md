@@ -41,7 +41,6 @@ Garmr uses CUE for its own configuration, ensuring type safety:
     apiVersion: "config.garmr.io/v1"
 
     server: {
-        grpc: address: ":9090"
         http: address: ":8080"
     }
 
@@ -301,7 +300,7 @@ COPY config.cue /etc/garmr/config.cue
 # Policies are mounted at runtime
 VOLUME /policies
 
-EXPOSE 9090 8080
+EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/garmr", "serve", "--config", "/etc/garmr/config.cue"]
 ```
@@ -314,7 +313,6 @@ podman run -d \
     --name garmr \
     -v ./policies:/policies:ro \
     -v ./config.cue:/etc/garmr/config.cue:ro \
-    -p 9090:9090 \
     -p 8080:8080 \
     garmr:latest
 ```
@@ -334,8 +332,6 @@ spec:
         - name: garmr
           image: garmr:latest
           ports:
-            - containerPort: 9090
-              name: grpc
             - containerPort: 8080
               name: http
           volumeMounts:

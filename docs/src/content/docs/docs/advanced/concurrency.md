@@ -135,8 +135,8 @@ This is lock-free for reads and safe for concurrent access.
 | Base process | ~50MB |
 | CUE contexts (pool) | ~200MB |
 | Compiled policies (100) | ~100MB |
-| gRPC buffers | ~200MB |
-| **Total** | **~500MB-1GB** |
+| HTTP buffers | ~100MB |
+| **Total** | **~400MB-800MB** |
 
 ## Benchmarking
 
@@ -148,16 +148,6 @@ hey -n 10000 -c 100 -m POST \
     -H "Content-Type: application/json" \
     -D input.json \
     http://localhost:8080/v1/evaluate
-
-# gRPC benchmarking with ghz
-go install github.com/bojand/ghz/cmd/ghz@latest
-
-ghz --insecure \
-    --proto api/proto/policy.proto \
-    --call policy.PolicyService/Evaluate \
-    -d '{"input": {...}}' \
-    -n 10000 -c 100 \
-    localhost:9090
 ```
 
 ## Future Optimizations

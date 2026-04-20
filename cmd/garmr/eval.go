@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -109,19 +110,8 @@ func runEval(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Create HTTP client
-	serverAddr := viper.GetString("server")
-	// Convert gRPC address format to HTTP if needed
-	if serverAddr == "localhost:9090" {
-		serverAddr = "http://localhost:8080"
-	}
-	// Add http:// prefix if missing
-	if !strings.HasPrefix(serverAddr, "http://") && !strings.HasPrefix(serverAddr, "https://") {
-		serverAddr = "http://" + serverAddr
-	}
-
 	cfg := client.Config{
-		Address: serverAddr,
+		Address: viper.GetString("server"),
 		Timeout: 30 * time.Second,
 	}
 
@@ -171,10 +161,10 @@ func runEval(cmd *cobra.Command, args []string) error {
 
 	switch result.Decision {
 	case "deny":
-		os.Exit(1)
+		osExit(1)
 	case "warn":
 		if failOnWarn {
-			os.Exit(2)
+			osExit(2)
 		}
 	}
 
@@ -206,7 +196,7 @@ func readInput(cmd *cobra.Command) (map[string]interface{}, error) {
 	var data []byte
 
 	if inputPath == "-" {
-		data, err = os.ReadFile("/dev/stdin")
+		data, err = io.ReadAll(os.Stdin)
 		if err != nil {
 			return nil, err
 		}

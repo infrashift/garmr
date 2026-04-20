@@ -6,7 +6,7 @@ BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)"
 
-.PHONY: all build build-server build-cli test lint proto clean docker help \
+.PHONY: all build build-server build-cli test lint clean docker help \
 	test-storage test-minio-start test-minio-stop test-s3-integration
 
 all: build
@@ -26,15 +26,6 @@ build-cli: ## Build the Garmr CLI
 build-linux: ## Build for Linux (for containers)
 	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o bin/garmr-server-linux ./cmd/garmr-server
 	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o bin/garmr-linux ./cmd/garmr
-
-## Proto generation
-
-proto: ## Generate protobuf code
-	@echo "Generating protobuf code..."
-	protoc --go_out=. --go_opt=paths=source_relative \
-		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
-		--grpc-gateway_out=. --grpc-gateway_opt=paths=source_relative \
-		api/proto/policy.proto
 
 ## CUE targets
 

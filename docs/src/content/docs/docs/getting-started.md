@@ -300,7 +300,7 @@ log:
 
 # Storage backend (optional)
 storage:
-  type: "filesystem"  # filesystem, s3, consul
+  type: "filesystem"  # filesystem, s3
 
 # Plugins (optional)
 plugins:

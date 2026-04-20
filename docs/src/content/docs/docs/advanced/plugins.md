@@ -28,16 +28,11 @@ Garmr uses a plugin architecture to keep the core binary lean while allowing ext
 │  ┌──────▼──────┐     ┌──────▼──────┐     ┌──────▼──────┐       │
 │  │  Built-in   │     │  Storage    │     │  Notifier/  │       │
 │  │             │     │  Plugins    │     │  Auth       │       │
-│  ├─────────────┤     ├─────────────┤     ├─────────────┤       │
-│  │ filesystem  │     │ s3          │     │ audit-file  │       │
-│  │ (always)    │     │ consul      │     │ kafka       │       │
-│  │             │     │ duckdb      │     │ prometheus  │       │
-│  └─────────────┘     └─────────────┘     │ otel        │       │
-│                                          │ logging     │       │
-│                                          │ vault-authz │       │
-│                                          │ consul-authz│       │
-│                                          │ markdown    │       │
-│                                          └─────────────┘       │
+│  ├─────────────┤                         ├─────────────┤       │
+│  │ filesystem  │                         │ kafka       │       │
+│  │ (always)    │                         │ prometheus  │       │
+│  │             │                         │ otel        │       │
+│  └─────────────┘                         └─────────────┘       │
 │                                                                  │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -46,10 +41,8 @@ Garmr uses a plugin architecture to keep the core binary lean while allowing ext
 
 | Type | Purpose | Plugins |
 |------|---------|---------|
-| `storage` | Policy file backends | filesystem (built-in), s3, consul, duckdb |
-| `auth` | External authorization | vault-authz, consul-authz |
-| `notifier` | Audit, metrics, tracing | audit-file, kafka, prometheus, otel, logging |
-| `function` | Custom functionality | markdown |
+| `storage` | Policy file backends | filesystem (built-in) |
+| `notifier` | Metrics, tracing, streaming audit | kafka, prometheus, otel |
 
 ## Available Plugins
 
@@ -74,176 +67,9 @@ plugins: {
 }
 ```
 
-#### S3 / MinIO
-
-S3-compatible object storage. Works with AWS S3, MinIO, and other S3-compatible services.
-
-```cue
-plugins: {
-    plugins: {
-        s3: {
-            enabled: true
-            type: "storage"
-            config: {
-                endpoint: "minio.storage.svc:9000"
-                bucket: "garmr-policies"
-                region: "us-east-1"
-                useSsl: false
-                pollInterval: "5s"
-                root: "policies/"          // S3 key prefix
-                // accessKeyId: "..."
-                // secretAccessKey: "..."
-                // sessionToken: "..."     // For temporary credentials
-            }
-        }
-    }
-}
-```
-
-Build: `go build -buildmode=plugin -o s3.so ./plugins/s3`
-
-#### Consul
-
-Consul KV storage with native watch support via blocking queries.
-
-```cue
-plugins: {
-    plugins: {
-        consul: {
-            enabled: true
-            type: "storage"
-            config: {
-                address: "consul.service.consul:8500"
-                prefix: "garmr/policies/production"
-                watch: true  // Uses blocking queries for change detection
-                // datacenter: "dc1"
-                // token: "..."
-                // useTls: true
-            }
-        }
-    }
-}
-```
-
-Build: `go build -buildmode=plugin -o consul.so ./plugins/consul`
-
-#### DuckDB
-
-Embedded SQL-queryable policy storage. No external dependencies.
-
-```cue
-plugins: {
-    plugins: {
-        duckdb: {
-            enabled: true
-            type: "storage"
-            config: {
-                database: "/var/lib/garmr/policies.duckdb"
-                tableName: "policies"
-                readOnly: true
-                poolSize: 4
-            }
-        }
-    }
-}
-```
-
-Build: `CGO_ENABLED=1 go build -buildmode=plugin -o duckdb.so ./plugins/duckdb`
-
-### Auth Plugins
-
-#### Vault Authorization
-
-External PDP for HashiCorp Vault. Serves as an open-source Sentinel alternative.
-
-```cue
-plugins: {
-    plugins: {
-        "vault-authz": {
-            enabled: true
-            type: "auth"
-            config: {
-                vaultAddr: "http://127.0.0.1:8200"
-                listenAddr: ":8280"
-                policyNamespace: "vault"
-                defaultPolicy: "vault-default"
-                policyMapping: {
-                    "secret/*": "vault-secrets"
-                    "auth/*": "vault-auth"
-                }
-                cache: {
-                    enabled: true
-                    ttl: "5m"
-                    maxSize: 1000
-                }
-                audit: {
-                    enabled: true
-                    redactSecrets: true
-                }
-            }
-        }
-    }
-}
-```
-
-#### Consul Authorization
-
-External PDP for Consul service mesh and KV policy control.
-
-```cue
-plugins: {
-    plugins: {
-        "consul-authz": {
-            enabled: true
-            type: "auth"
-            config: {
-                consulAddr: "http://127.0.0.1:8500"
-                listenAddr: ":8281"
-                policyNamespace: "consul"
-                policies: {
-                    serviceRegister: "consul-service-register"
-                    intention: "consul-intentions"
-                    kvRead: "consul-kv-read"
-                    kvWrite: "consul-kv-write"
-                }
-            }
-        }
-    }
-}
-```
+S3-compatible object storage is available via the built-in storage registry (not a `.so` plugin). Configure it with `--storage-type s3` and the corresponding `--storage-*` flags.
 
 ### Notifier Plugins
-
-#### Audit File
-
-File-based audit logging with rotation, compression, and privacy controls.
-
-```cue
-plugins: {
-    plugins: {
-        "audit-file": {
-            enabled: true
-            type: "notifier"
-            config: {
-                path: "/var/log/garmr/audit.log"
-                format: "json"             // json, jsonl, text
-                syncOnWrite: false
-                rotation: {
-                    maxSize: 100           // MB
-                    maxAge: 30             // days
-                    maxBackups: 10
-                    compress: true
-                }
-                privacy: {
-                    hashInput: false
-                    excludeInput: false
-                    redactFields: []
-                }
-            }
-        }
-    }
-}
-```
 
 #### Kafka
 
@@ -342,56 +168,6 @@ plugins: {
                     type: "ratio"          // always, never, ratio, parentbased
                     ratio: 0.1
                 }
-            }
-        }
-    }
-}
-```
-
-#### Logging
-
-Structured logging with Go slog for policy evaluation events.
-
-```cue
-plugins: {
-    plugins: {
-        logging: {
-            enabled: true
-            type: "notifier"
-            config: {
-                level: "info"              // debug, info, warn, error
-                format: "json"             // json, text
-                output: "stdout"           // stdout, stderr, or file path
-                rotation: {
-                    maxSize: 100           // MB
-                    maxAge: 30
-                    maxBackups: 5
-                    compress: true
-                }
-            }
-        }
-    }
-}
-```
-
-### Function Plugins
-
-#### Markdown
-
-Generates documentation from CUE policies. Supports multiple output formats.
-
-```cue
-plugins: {
-    plugins: {
-        markdown: {
-            enabled: true
-            type: "function"
-            config: {
-                outputFormat: "github"     // github, hugo, astro, docusaurus, plain
-                outputDir: "./docs/policies"
-                groupByNamespace: true
-                includeExamples: true
-                includeDiagrams: true      // Mermaid diagrams
             }
         }
     }
@@ -555,7 +331,7 @@ var GarmrPlugin plugin.Plugin = &MyPlugin{}
 # Standard plugin
 go build -buildmode=plugin -o myplugin.so ./plugins/myplugin
 
-# Plugin requiring CGO (like DuckDB)
+# Plugin requiring CGO
 CGO_ENABLED=1 go build -buildmode=plugin -o myplugin.so ./plugins/myplugin
 ```
 

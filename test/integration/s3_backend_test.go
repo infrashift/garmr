@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"testing"
@@ -12,7 +13,7 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
 	"github.com/infrashift/garmr/internal/engine"
-	"github.com/infrashift/garmr/internal/experimental/storage"
+	"github.com/infrashift/garmr/internal/storage"
 
 	"go.uber.org/zap"
 )
@@ -76,10 +77,7 @@ func setupMinIO(t *testing.T) *minio.Client {
 	}
 
 	// Upload test policy
-	_, err = client.PutObject(ctx, testBucket, "policy.cue", nil, 0,
-		minio.PutObjectOptions{ContentType: "text/plain"})
-	// Upload with actual content
-	reader := mustStringReader(s3TestPolicy)
+	reader := bytes.NewReader([]byte(s3TestPolicy))
 	_, err = client.PutObject(ctx, testBucket, "policy.cue", reader, int64(len(s3TestPolicy)),
 		minio.PutObjectOptions{ContentType: "text/plain"})
 	if err != nil {
@@ -97,29 +95,6 @@ func setupMinIO(t *testing.T) *minio.Client {
 
 	return client
 }
-
-func mustStringReader(s string) *readCloserString {
-	return &readCloserString{data: []byte(s)}
-}
-
-type readCloserString struct {
-	data []byte
-	pos  int
-}
-
-func (r *readCloserString) Read(p []byte) (n int, err error) {
-	if r.pos >= len(r.data) {
-		return 0, os.ErrClosed
-	}
-	n = copy(p, r.data[r.pos:])
-	r.pos += n
-	if r.pos >= len(r.data) {
-		return n, nil
-	}
-	return n, nil
-}
-
-func (r *readCloserString) Close() error { return nil }
 
 func newTestS3Backend(t *testing.T) storage.Backend {
 	t.Helper()
@@ -232,7 +207,7 @@ new_test: {
 	}
 }
 `
-	reader := mustStringReader(newPolicy)
+	reader := bytes.NewReader([]byte(newPolicy))
 	_, err = client.PutObject(ctx, testBucket, "new-policy.cue", reader, int64(len(newPolicy)),
 		minio.PutObjectOptions{ContentType: "text/plain"})
 	if err != nil {

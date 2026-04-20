@@ -110,42 +110,6 @@ package config
 	useSha256:        bool | *false
 }
 
-// DuckDB storage plugin (embedded analytics database)
-#DuckDBPluginConfig: {
-	// Path to DuckDB database file
-	database: string | *":memory:"
-	
-	// Table name for policies
-	tableName: string | *"policies"
-	
-	// Read-only mode
-	readOnly: bool | *true
-	
-	// Connection pool size
-	poolSize: int | *4
-}
-
-// Consul storage plugin
-#ConsulPluginConfig: {
-	// Consul address
-	address: string | *"localhost:8500"
-	
-	// KV path prefix for policies
-	prefix: string | *"q/policies"
-	
-	// Datacenter
-	datacenter: string | *""
-	
-	// ACL token
-	token: string | *""
-	
-	// Use TLS
-	useTls: bool | *false
-	
-	// Watch for changes (uses Consul blocking queries)
-	watch: bool | *true
-}
-
 // GCS storage plugin
 #GCSPluginConfig: {
 	bucket:          string
@@ -273,37 +237,6 @@ _multiBackendConfig: #PluginConfig & {
 			config: #S3PluginConfig & {
 				bucket: "shared-policies"
 				region: "us-west-2"
-			}
-		}
-		consul: {
-			enabled: true
-			type:    "storage"
-			config: #ConsulPluginConfig & {
-				address: "consul.service.consul:8500"
-				prefix:  "q/policies/production"
-				watch:   true
-			}
-		}
-	}
-}
-
-// DuckDB for analytics/caching
-_duckdbConfig: #PluginConfig & {
-	enabled: true
-	
-	plugins: {
-		filesystem: {
-			enabled: true
-			type:    "storage"
-			config: root: "/policies"
-		}
-		duckdb: {
-			enabled: true
-			type:    "storage"
-			config: #DuckDBPluginConfig & {
-				database:  "/var/lib/garmr/policies.duckdb"
-				tableName: "policies"
-				readOnly:  true
 			}
 		}
 	}

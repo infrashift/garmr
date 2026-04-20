@@ -5,7 +5,7 @@ package plugin
 import (
 	"context"
 
-	"github.com/infrashift/garmr/internal/experimental/storage"
+	"github.com/infrashift/garmr/internal/storage"
 )
 
 // StoragePlugin extends Plugin for storage backends.

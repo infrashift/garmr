@@ -3,7 +3,7 @@
 // Plugins extend Q's capabilities without bloating the core binary.
 //
 // Plugin Types:
-//   - storage: Policy storage backends (S3, GCS, DuckDB, Consul, etc.)
+//   - storage: Policy storage backends (S3, GCS, etc.)
 //   - auth: Authentication providers (OIDC, LDAP, mTLS, etc.)
 //   - notifier: Event notification sinks (Slack, PagerDuty, webhooks, etc.)
 //   - function: Custom CUE functions for policy evaluation
@@ -51,7 +51,7 @@ const (
 
 // Metadata describes a plugin.
 type Metadata struct {
-	// Name is the unique identifier (e.g., "s3", "consul", "duckdb")
+	// Name is the unique identifier (e.g., "s3", "kafka", "prometheus")
 	Name string `json:"name"`
 
 	// Type categorizes the plugin

@@ -697,9 +697,9 @@ func TestFullSigningWorkflow(t *testing.T) {
 
 	// Step 3: Create "plugin" files
 	plugins := map[string][]byte{
-		"s3.so":     []byte("fake s3 plugin content"),
-		"consul.so": []byte("fake consul plugin content"),
-		"duckdb.so": []byte("fake duckdb plugin content"),
+		"kafka.so":      []byte("fake kafka plugin content"),
+		"otel.so":       []byte("fake otel plugin content"),
+		"prometheus.so": []byte("fake prometheus plugin content"),
 	}
 
 	for name, content := range plugins {
@@ -760,7 +760,7 @@ func TestFullSigningWorkflow(t *testing.T) {
 	}
 
 	// Step 8: Tamper with one plugin and verify it fails
-	tamperedPath := filepath.Join(tmpDir, "s3.so")
+	tamperedPath := filepath.Join(tmpDir, "kafka.so")
 	os.WriteFile(tamperedPath, []byte("TAMPERED"), 0644)
 
 	_, err = verifier.VerifyFile(tamperedPath)

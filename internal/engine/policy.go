@@ -12,7 +12,7 @@ import (
 	"cuelang.org/go/cue/load"
 	"go.uber.org/zap"
 
-	"github.com/infrashift/garmr/internal/experimental/storage"
+	"github.com/infrashift/garmr/internal/storage"
 )
 
 // ListPolicies returns all loaded policies.

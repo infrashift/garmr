@@ -325,7 +325,4 @@ var OptionalPlugins = []string{
 	"prometheus", // Metrics
 	"otel",       // Tracing
 	"kafka",      // Enterprise audit
-	"s3",         // Cloud storage
-	"consul",     // Service mesh storage
-	"duckdb",     // Embedded database storage
 }

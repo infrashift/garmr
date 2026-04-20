@@ -56,7 +56,7 @@ test-integration: build ## Run integration tests
 	./scripts/integration-test.sh
 
 test-storage: ## Run storage backend unit tests
-	go test -v -race ./internal/experimental/storage/...
+	go test -v -race ./internal/storage/...
 
 test-minio-start: ## Start MinIO for integration testing (podman)
 	podman play kube test/integration/minio-pod.yaml
@@ -75,20 +75,12 @@ bench: ## Run benchmarks
 
 ## Plugin targets
 
-build-plugins: ## Build all plugins (requires CGO)
+build-plugins: ## Build all plugins
 	@echo "Building plugins..."
 	@mkdir -p bin/plugins
-	go build -buildmode=plugin -o bin/plugins/consul.so ./internal/experimental/plugins/consul
-	go build -buildmode=plugin -o bin/plugins/s3.so ./internal/experimental/plugins/s3
 	go build -buildmode=plugin -o bin/plugins/kafka.so ./internal/experimental/plugins/kafka
 	go build -buildmode=plugin -o bin/plugins/otel.so ./internal/experimental/plugins/otel
 	go build -buildmode=plugin -o bin/plugins/prometheus.so ./internal/experimental/plugins/prometheus
-	go build -buildmode=plugin -o bin/plugins/markdown.so ./internal/experimental/plugins/markdown
-	go build -buildmode=plugin -o bin/plugins/duckdb.so ./internal/experimental/plugins/duckdb
-	go build -buildmode=plugin -o bin/plugins/logging.so ./internal/experimental/plugins/logging
-	go build -buildmode=plugin -o bin/plugins/audit-file.so ./internal/experimental/plugins/audit-file
-	go build -buildmode=plugin -o bin/plugins/consul-authz.so ./internal/experimental/plugins/consul-authz
-	go build -buildmode=plugin -o bin/plugins/vault-authz.so ./internal/experimental/plugins/vault-authz
 
 ## Lint and format
 

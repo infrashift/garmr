@@ -25,7 +25,7 @@ import (
 	"github.com/infrashift/garmr/internal/engine"
 	"github.com/infrashift/garmr/internal/experimental/plugin"
 	"github.com/infrashift/garmr/internal/experimental/ratelimit"
-	"github.com/infrashift/garmr/internal/experimental/storage"
+	"github.com/infrashift/garmr/internal/storage"
 	"github.com/infrashift/garmr/internal/health"
 	"github.com/infrashift/garmr/internal/input"
 	"github.com/infrashift/garmr/internal/observability"
@@ -164,6 +164,10 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 		}
 	})
 
+	if err := s.initStorageBackend(); err != nil {
+		s.logger.Warn("failed to initialize storage backend", zap.Error(err))
+	}
+
 	return s, nil
 }
 
@@ -261,11 +265,7 @@ func (s *Server) initStorageBackend() error {
 
 // Start starts the HTTP server.
 func (s *Server) Start(ctx context.Context) error {
-	// Initialize storage backend and load policies
-	if err := s.initStorageBackend(); err != nil {
-		s.logger.Warn("failed to initialize storage backend", zap.Error(err))
-	}
-
+	// Load policies from the storage backend wired up in NewServer.
 	if s.storageBackend != nil {
 		if err := s.engine.LoadPoliciesFromBackend(ctx, s.storageBackend); err != nil {
 			s.logger.Warn("failed to load policies from storage backend", zap.Error(err))
@@ -766,22 +766,14 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 		requestID = uuid.New().String()
 	}
 
-	if s.storageBackend == nil && s.config.PolicyDir == "" {
+	if s.storageBackend == nil {
 		http.Error(w, "No policy source configured", http.StatusBadRequest)
 		return
 	}
 
 	startTime := time.Now()
 
-	var count int
-	var err error
-
-	// Use storage backend if available, fallback to PolicyDir
-	if s.storageBackend != nil {
-		count, err = s.engine.ReloadPoliciesFromBackend(r.Context(), s.storageBackend)
-	} else if s.config.PolicyDir != "" {
-		count, err = s.engine.ReloadPoliciesFromDir(r.Context(), s.config.PolicyDir)
-	}
+	count, err := s.engine.ReloadPoliciesFromBackend(r.Context(), s.storageBackend)
 
 	if err != nil {
 		s.logger.Error("policy reload failed", zap.Error(err))

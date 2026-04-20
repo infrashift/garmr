@@ -73,7 +73,6 @@ This document describes what Garmr can do today and where it's headed.
 
 - **Filesystem** (built-in) -- local file watching with inotify
 - **S3** (plugin) -- AWS S3 and MinIO support, polling-based change detection
-- **Consul** (plugin) -- Consul KV with native blocking query watches
 
 ### Plugin System
 
@@ -81,7 +80,7 @@ This document describes what Garmr can do today and where it's headed.
 - Ed25519 cryptographic signing and verification
 - Plugin types: storage, auth, notifier, function
 - Allowlist/blocklist and checksum verification
-- 11 available plugins (see [Plugin Architecture](/garmr/docs/advanced/plugins/))
+- 3 available plugins (see [Plugin Architecture](/garmr/docs/advanced/plugins/))
 
 ### Observability
 
@@ -90,11 +89,6 @@ This document describes what Garmr can do today and where it's headed.
 - OpenTelemetry distributed tracing (OTLP gRPC/HTTP export)
 - Structured logging with slog
 - Health check endpoints
-
-### Auth Integrations
-
-- **Vault authorization** -- external PDP for HashiCorp Vault (Sentinel alternative)
-- **Consul authorization** -- external PDP for Consul service mesh
 
 ---
 

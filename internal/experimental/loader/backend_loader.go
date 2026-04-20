@@ -14,7 +14,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/infrashift/garmr/internal/experimental/storage"
+	"github.com/infrashift/garmr/internal/storage"
 )
 
 // ReloadMode defines when policies are reloaded.

@@ -204,7 +204,7 @@ package config
 
 // KafkaPluginConfig configures Kafka audit logging.
 // This is OPTIONAL - use for enterprise/compliance requirements.
-// For simple deployments, use audit-file instead.
+// For simple deployments, use the server's built-in audit logger (--audit).
 #KafkaPluginConfig: {
 	// Enable audit logging
 	enabled: bool | *true

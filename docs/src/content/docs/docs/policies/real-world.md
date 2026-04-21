@@ -36,7 +36,7 @@ garmr eval --input deployment.txt --format yaml -n real-world
 ## Enforcement Actions
 
 - **deny**: Block deployment on rule failure (exit code 1)
-- **warn**: Log warning, allow deployment (exit code 0, or 2 with `--fail-on-warn`)
+- **warn**: Log warning, allow deployment (exit code 0)
 - **audit**: Log only, always allow (exit code 0)
 
 ---
@@ -211,7 +211,7 @@ With `enforcement: action: "warn"`:
 
 - CLI returns exit code 0 (success) even with rule violations
 - Violations are logged and returned in response
-- Use `--fail-on-warn` to treat warnings as failures (exit code 2)
+- To make warnings block CI, change the policy to `enforcement: action: "deny"` — the gating decision belongs in the policy, not in client flags.
 
 ### CLI Examples
 
@@ -219,10 +219,6 @@ With `enforcement: action: "warn"`:
 # WARN enforcement - returns exit code 0 even with violations
 garmr eval --input test-data/real-world/release-gate-fail.json -n real-world
 echo "Exit code: $?"  # 0
-
-# Treat warnings as failures
-garmr eval --input test-data/real-world/release-gate-fail.json -n real-world --fail-on-warn
-echo "Exit code: $?"  # 2 if warnings present
 ```
 
 ---

@@ -1,0 +1,159 @@
+# Default values for the Garmr Helm chart.
+#
+# Override with `helm install -f your-values.yaml ...` or `--set key=value`.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/infrashift/garmr
+  pullPolicy: IfNotPresent
+  # Defaults to the chart's appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  capabilities:
+    drop: [ALL]
+
+service:
+  type: ClusterIP
+  port: 8080
+  # Extra annotations — e.g. for Consul Connect registration when you prefer
+  # service annotations over ServiceDefaults CRDs.
+  annotations: {}
+
+# Liveness/readiness use Garmr's health endpoints — they work without any
+# additional configuration.
+probes:
+  liveness:
+    path: /livez
+    initialDelaySeconds: 10
+    periodSeconds: 20
+  readiness:
+    path: /readyz
+    initialDelaySeconds: 2
+    periodSeconds: 5
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 96Mi
+
+# Pod anti-affinity spreads replicas across nodes for HA. Override if your
+# cluster is single-node or uses topology spread constraints instead.
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: garmr
+          topologyKey: kubernetes.io/hostname
+
+nodeSelector: {}
+tolerations: []
+topologySpreadConstraints: []
+
+# Policies can live on disk (rendered from the ConfigMap below) or in an S3
+# bucket — configure one.
+policies:
+  # Inline policies go into the ConfigMap. Keys must end in .cue.
+  # Example:
+  #   inline:
+  #     example.cue: |
+  #       apiVersion: "policy.garmr.io/v1"
+  #       kind: "Policy"
+  #       ...
+  inline: {}
+
+# Primary Garmr server config. Rendered into a ConfigMap and mounted.
+# Mirrors the top-level keys consumed by garmr-server.
+config:
+  http_addr: ":8080"
+  policy_dir: /etc/garmr/policies
+  log:
+    level: info
+    format: json
+  audit:
+    enabled: true
+    path: /var/log/garmr/audit.log
+    max_size: 100
+    max_backups: 10
+    max_age: 30
+  auth:
+    # For in-mesh deployments, leave api_key empty: the sidecar authenticates
+    # callers via mTLS and identity_header carries their SPIFFE URI.
+    api_key: ""
+    api_key_header: X-API-Key
+    identity_header: X-Forwarded-Client-Cert
+  cors:
+    allowed_origins: []
+  rate_limit:
+    enabled: false
+    rps: 100
+    burst: 200
+  # Uncomment to use S3/MinIO instead of filesystem:
+  # storage:
+  #   type: s3
+  #   root: policies/
+  #   s3:
+  #     endpoint: minio.minio.svc.cluster.local:9000
+  #     bucket: garmr-policies
+  #     region: us-east-1
+  #     use_ssl: false
+  #     poll_interval: 10s
+
+# OpenTelemetry tracing. Leaving endpoint empty disables trace export;
+# incoming `traceparent` headers are still honored for log correlation.
+tracing:
+  # OTLP exporter endpoint, e.g. otel-collector.observability.svc.cluster.local:4317
+  endpoint: ""
+  protocol: grpc   # grpc or http/protobuf
+  serviceName: garmr-server
+
+# When deploying behind Consul Connect or another service mesh, the sidecar
+# injector typically requires an annotation. Leave unset if you register via
+# ServiceDefaults CRDs instead.
+mesh:
+  consulConnect:
+    enabled: false
+    # Service name exposed on the mesh. Defaults to the release fullname.
+    service: ""
+    # Override the upstream service port if yours differs from 8080.
+    port: 8080
+
+# Env vars appended verbatim to the pod spec. Useful for proxy settings.
+extraEnv: []
+# Extra volumes/mounts — e.g. for reading certs from a CSI driver.
+extraVolumes: []
+extraVolumeMounts: []
+
+# Disruption budget. Set minAvailable=1 with replicaCount=2 for rolling safety.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

@@ -7,23 +7,25 @@ import (
 	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	"github.com/infrashift/garmr/internal/engine"
-	"github.com/infrashift/garmr/internal/experimental/plugin"
 	"github.com/infrashift/garmr/internal/experimental/ratelimit"
 	"github.com/infrashift/garmr/internal/storage"
 	"github.com/infrashift/garmr/internal/health"
@@ -36,12 +38,14 @@ var openAPISpec []byte
 
 // Config holds server configuration.
 type Config struct {
-	HTTPAddr    string
-	PolicyDir   string
-	TLSCert     string
-	TLSKey      string
-	EnableTLS   bool
-	MaxRecvSize int
+	HTTPAddr        string
+	PolicyDir       string
+	TLSCert         string
+	TLSKey          string
+	EnableTLS       bool
+	MaxRecvSize     int
+	ShutdownTimeout time.Duration // graceful shutdown timeout (default 30s)
+	Version         string        // reported in /health and the health handler; injected via ldflags in main
 	// Audit logging
 	AuditEnabled    bool
 	AuditPath       string
@@ -52,6 +56,8 @@ type Config struct {
 	APIKey          string   // Required API key (empty = no auth)
 	APIKeyHeader    string   // Header name for API key (default: X-API-Key)
 	AuthExemptPaths []string // Paths exempt from auth (e.g., /health, /ready)
+	// Mesh-provided caller identity
+	IdentityHeader string // Header carrying mesh-verified client identity (default: X-Forwarded-Client-Cert)
 	// CORS
 	CORSAllowedOrigins []string // Allowed origins (empty = allow all for dev)
 	// Rate limiting
@@ -62,7 +68,12 @@ type Config struct {
 	StorageType    string                 // "filesystem" (default), "s3", "minio"
 	StorageRoot    string                 // Root path/prefix for storage backend
 	StorageOptions map[string]interface{} // Backend-specific options (S3 endpoint, bucket, etc.)
-	PluginDir      string                 // External plugin directory
+	// Evaluation posture
+	// RequireMatch is a tri-state: nil means "use the engine default" (true /
+	// fail-closed). A non-nil pointer lets operators explicitly opt out via
+	// config. Pointer form is used because the bool zero value cannot be
+	// distinguished from "unset" when Config is populated field-by-field.
+	RequireMatch *bool
 }
 
 // Server is the Garmr server.
@@ -77,7 +88,6 @@ type Server struct {
 	rateLimiter    *ratelimit.Limiter
 	healthHandler  *health.Handler
 	obs            *observability.Provider
-	pluginManager  *plugin.Manager
 	storageBackend storage.Backend
 
 	mu     sync.RWMutex
@@ -105,6 +115,12 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 	// Wire observability into the engine
 	eng.SetObservability(obs)
 
+	// Apply evaluation posture. When unset, leave the engine's default
+	// (true / fail-closed) in place.
+	if cfg.RequireMatch != nil {
+		eng.SetRequireMatch(*cfg.RequireMatch)
+	}
+
 	// Initialize audit logger if enabled
 	if cfg.AuditEnabled {
 		if err := s.initAuditLogger(); err != nil {
@@ -125,7 +141,11 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 	}
 
 	// Initialize health handler
-	s.healthHandler = health.NewHandler("0.1.0")
+	version := cfg.Version
+	if version == "" {
+		version = "dev"
+	}
+	s.healthHandler = health.NewHandler(version)
 
 	// Register a policy loader health checker
 	s.healthHandler.Register("policies", func(ctx context.Context) *health.Check {
@@ -311,13 +331,6 @@ func (s *Server) Stop() error {
 		}
 	}
 
-	// Close plugin manager
-	if s.pluginManager != nil {
-		if err := s.pluginManager.CloseAll(); err != nil {
-			s.logger.Warn("error closing plugins", zap.Error(err))
-		}
-	}
-
 	// Close audit log file
 	if s.auditFile != nil {
 		s.auditFile.Close()
@@ -329,7 +342,11 @@ func (s *Server) Stop() error {
 	}
 
 	if s.httpServer != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		timeout := s.config.ShutdownTimeout
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		return s.httpServer.Shutdown(ctx)
 	}
@@ -341,6 +358,12 @@ func (s *Server) Stop() error {
 // Intended for tests that want to drive the server via httptest without binding a port.
 func (s *Server) Handler() http.Handler {
 	return s.buildHandler()
+}
+
+// Observability returns the observability provider, allowing callers to
+// register metrics recorders, tracers, or audit loggers after construction.
+func (s *Server) Observability() *observability.Provider {
+	return s.obs
 }
 
 // MarkReady flips the server into a ready state for tests that use Handler()
@@ -382,11 +405,20 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("/swagger-ui", s.handleSwaggerUI)
 	mux.HandleFunc("/swagger-ui/", s.handleSwaggerUI)
 
-	var handler http.Handler = corsMiddleware(mux, s.config.CORSAllowedOrigins)
+	var handler http.Handler = s.identityMiddleware(mux)
+	handler = corsMiddleware(handler, s.config.CORSAllowedOrigins)
 	if s.rateLimiter != nil {
 		handler = s.rateLimiter.Middleware(handler)
 	}
 	handler = s.authMiddleware(handler)
+	handler = s.recoveryMiddleware(handler)
+	// otelhttp extracts `traceparent` from the incoming request and starts
+	// a server span covering the whole middleware chain.
+	handler = otelhttp.NewHandler(handler, "garmr-server",
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return r.Method + " " + r.URL.Path
+		}),
+	)
 	return handler
 }
 
@@ -429,9 +461,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	healthy := s.ready
 	s.mu.RUnlock()
 
+	version := s.config.Version
+	if version == "" {
+		version = "dev"
+	}
 	resp := map[string]interface{}{
 		"healthy": healthy,
-		"version": "0.1.0",
+		"version": version,
 		"uptime":  time.Since(s.startTime).String(),
 	}
 
@@ -496,7 +532,6 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		Policies      []string               `json:"policies" yaml:"policies"`
 		Trace         bool                   `json:"trace" yaml:"trace"`
 		IncludePassed bool                   `json:"include_passed" yaml:"include_passed"`
-		Strict        bool                   `json:"strict" yaml:"strict"`
 	}
 
 	// Parse based on detected format
@@ -526,9 +561,6 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	if includePassed, ok := parsed["include_passed"].(bool); ok {
 		req.IncludePassed = includePassed
 	}
-	if strict, ok := parsed["strict"].(bool); ok {
-		req.Strict = strict
-	}
 
 	if req.Input == nil {
 		http.Error(w, "input is required", http.StatusBadRequest)
@@ -542,7 +574,6 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		Options: engine.EvaluateOptions{
 			Trace:         req.Trace,
 			IncludePassed: req.IncludePassed,
-			Strict:        req.Strict,
 		},
 	}
 
@@ -560,15 +591,6 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Record HTTP evaluation metrics
-	s.obs.Metrics().RecordEvaluation(
-		"",
-		req.Namespace,
-		decisionToString(result.Decision),
-		"",
-		time.Since(startTime),
-	)
-
 	// Write audit log
 	if s.auditLogger != nil {
 		s.auditLogger.Info("decision",
@@ -581,6 +603,8 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 			"violations", violations,
 			"duration_ms", time.Since(startTime).Milliseconds(),
 			"source_ip", r.RemoteAddr,
+			"principal", PrincipalFromContext(r.Context()),
+			"trace_id", observability.TraceIDFromContext(r.Context()),
 			"user_agent", r.UserAgent(),
 			"input_kind", req.Input["kind"],
 			"input_name", getNestedString(req.Input, "metadata", "name"),
@@ -603,6 +627,7 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 			"severity":         severityToString(r.Severity),
 			"passed":           r.Passed,
 			"message":          r.Message,
+			"remediation":      r.Remediation,
 		}
 	}
 
@@ -685,6 +710,8 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 			"error_count", len(errors),
 			"warning_count", len(warnings),
 			"source_ip", r.RemoteAddr,
+			"principal", PrincipalFromContext(r.Context()),
+			"trace_id", observability.TraceIDFromContext(r.Context()),
 		)
 	}
 
@@ -741,6 +768,8 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 				"policy_namespace", namespace,
 				"deleted", deleted,
 				"source_ip", r.RemoteAddr,
+				"principal", PrincipalFromContext(r.Context()),
+			"trace_id", observability.TraceIDFromContext(r.Context()),
 			)
 		}
 
@@ -787,6 +816,8 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 				"error", err.Error(),
 				"reload_time_ms", time.Since(startTime).Milliseconds(),
 				"source_ip", r.RemoteAddr,
+				"principal", PrincipalFromContext(r.Context()),
+			"trace_id", observability.TraceIDFromContext(r.Context()),
 			)
 		}
 
@@ -808,6 +839,8 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 			"policies_loaded", count,
 			"reload_time_ms", time.Since(startTime).Milliseconds(),
 			"source_ip", r.RemoteAddr,
+			"principal", PrincipalFromContext(r.Context()),
+			"trace_id", observability.TraceIDFromContext(r.Context()),
 		)
 	}
 
@@ -822,10 +855,12 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	// Placeholder for Prometheus metrics endpoint
-	// Will be populated when metrics plugin is loaded
-	w.Header().Set("Content-Type", "text/plain")
-	w.Write([]byte("# Garmr metrics endpoint\n# Load prometheus plugin for full metrics\n"))
+	if hh, ok := s.obs.Metrics().(interface{ Handler() http.Handler }); ok {
+		hh.Handler().ServeHTTP(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	_, _ = w.Write([]byte("# Garmr metrics endpoint\n# No metrics recorder configured\n"))
 }
 
 // storageType returns the active storage type for API responses.
@@ -911,6 +946,59 @@ var swaggerUIHTML = `<!DOCTYPE html>
   </script>
 </body>
 </html>`
+
+// recoveryMiddleware recovers from panics in downstream handlers,
+// logs them with the request ID and stack trace, and returns a 500.
+// Panics of http.ErrAbortHandler are re-raised per net/http convention.
+func (s *Server) recoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			rec := recover()
+			if rec == nil {
+				return
+			}
+			if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+				panic(rec)
+			}
+
+			requestID := r.Header.Get("X-Request-Id")
+			if requestID == "" {
+				requestID = "unknown"
+			}
+
+			var recErr error
+			switch v := rec.(type) {
+			case error:
+				recErr = v
+			default:
+				recErr = fmt.Errorf("%v", v)
+			}
+
+			s.logger.Error("panic recovered in handler",
+				zap.String("request_id", requestID),
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.Error(recErr),
+				zap.ByteString("stack", debug.Stack()),
+			)
+
+			if s.obs != nil {
+				if inc, ok := s.obs.Metrics().(interface{ IncPanicsRecovered() }); ok {
+					inc.IncPanicsRecovered()
+				}
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error":      "internal server error",
+				"request_id": requestID,
+			})
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
 
 // CORS middleware
 func corsMiddleware(h http.Handler, allowedOrigins []string) http.Handler {

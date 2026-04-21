@@ -1,0 +1,30 @@
+{
+  "_comment": "Three rules fail: REL-003 (coverage < 80, advisory), REL-004 (critical/high vulns > 0, gate), REL-005 (unsigned provenance, advisory). Decision is DENY because the critical REL-004 trips release-gate; both advisory failures are also reported.",
+  "kind": "Release",
+  "apiVersion": "release.garmr.io/v1",
+  "metadata": {
+    "name": "my-service",
+    "namespace": "production"
+  },
+  "version": "v1.2.3",
+  "targetEnvironment": "production",
+  "quality": {
+    "tests": {
+      "unit": {"passed": true},
+      "integration": {"passed": true},
+      "e2e": {"passed": true}
+    },
+    "coverage": {"percentage": 50}
+  },
+  "security": {
+    "vulnerabilities": {"critical": 2, "high": 5}
+  },
+  "provenance": {
+    "signed": false,
+    "buildPlatform": "github-actions"
+  },
+  "approvals": {
+    "count": 2,
+    "leadApproved": true
+  }
+}

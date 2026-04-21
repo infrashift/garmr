@@ -28,9 +28,11 @@ Both methods support request ID correlation for audit trail tracking.
 garmr eval --input deployment.json
 
 # Exit codes:
-# 0 = ALLOW (all policies passed)
-# 1 = DENY (one or more policies failed)
-# 2 = WARN (warnings, with --fail-on-warn)
+# 0 = ALLOW or WARN (nothing blocked the evaluation)
+# 1 = DENY (a deny-enforced policy failed)
+#
+# If you need warnings to gate CI, set enforcement.action to "deny"
+# in the policy — the decision belongs in code review, not a CLI flag.
 ```
 
 ### Request ID for Audit Correlation

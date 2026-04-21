@@ -104,8 +104,7 @@ Evaluate input against loaded policies.
   "namespace": "security",
   "policies": ["security/container-security"],
   "trace": false,
-  "include_passed": false,
-  "strict": false
+  "include_passed": false
 }
 ```
 
@@ -116,7 +115,6 @@ Evaluate input against loaded policies.
 | `policies` | []string | Specific policies to evaluate | (all matching) |
 | `trace` | bool | Include evaluation trace | `false` |
 | `include_passed` | bool | Include passed rules | `false` |
-| `strict` | bool | Treat warnings as failures | `false` |
 
 **Response:**
 

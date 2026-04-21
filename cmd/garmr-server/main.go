@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -15,11 +16,15 @@ import (
 	"go.uber.org/zap/zapcore"
 
 	"github.com/infrashift/garmr/internal/engine"
+	"github.com/infrashift/garmr/internal/observability"
 	"github.com/infrashift/garmr/internal/server"
 )
 
+// version is injected at link time via the Makefile's `-X main.version=...`
+// ldflag. "dev" is the fallback for un-injected local builds.
 var (
-	version = "0.1.0"
+	version = "dev"
+	commit  = "unknown"
 	cfgFile string
 )
 
@@ -69,6 +74,15 @@ func init() {
 	// Development flags
 	rootCmd.Flags().Bool("dev", false, "development mode")
 
+	// Lifecycle flags
+	rootCmd.Flags().Duration("shutdown-timeout", 30*time.Second, "max time to wait for in-flight requests to drain on SIGTERM")
+	viper.BindPFlag("shutdown_timeout", rootCmd.Flags().Lookup("shutdown-timeout"))
+
+	// Evaluation posture: fail-closed when no policy matches (default true)
+	rootCmd.Flags().Bool("require-match", true, "return DENY when no policy matches the evaluation (fail-closed)")
+	viper.BindPFlag("evaluation.require_match", rootCmd.Flags().Lookup("require-match"))
+	viper.SetDefault("evaluation.require_match", true)
+
 	// Bind to viper
 	viper.BindPFlag("http_addr", rootCmd.Flags().Lookup("http-addr"))
 	viper.BindPFlag("policy_dir", rootCmd.Flags().Lookup("policy-dir"))
@@ -95,8 +109,10 @@ func init() {
 	// Auth flags
 	rootCmd.Flags().String("api-key", "", "API key for authentication (empty = no auth)")
 	rootCmd.Flags().String("api-key-header", "X-API-Key", "header name for API key")
+	rootCmd.Flags().String("identity-header", "X-Forwarded-Client-Cert", "header carrying mesh-verified client identity (XFCC format)")
 	viper.BindPFlag("auth.api_key", rootCmd.Flags().Lookup("api-key"))
 	viper.BindPFlag("auth.api_key_header", rootCmd.Flags().Lookup("api-key-header"))
+	viper.BindPFlag("auth.identity_header", rootCmd.Flags().Lookup("identity-header"))
 
 	// CORS flags
 	rootCmd.Flags().StringSlice("cors-origins", nil, "allowed CORS origins (empty = allow all)")
@@ -120,7 +136,6 @@ func init() {
 	rootCmd.Flags().String("s3-secret-key", "", "S3 secret access key")
 	rootCmd.Flags().Bool("s3-use-ssl", true, "use SSL for S3 connections")
 	rootCmd.Flags().String("s3-poll-interval", "10s", "S3 polling interval for change detection")
-	rootCmd.Flags().String("plugin-dir", "", "directory containing external plugins")
 	viper.BindPFlag("storage.type", rootCmd.Flags().Lookup("storage-type"))
 	viper.BindPFlag("storage.root", rootCmd.Flags().Lookup("storage-root"))
 	viper.BindPFlag("storage.s3.endpoint", rootCmd.Flags().Lookup("s3-endpoint"))
@@ -130,7 +145,6 @@ func init() {
 	viper.BindPFlag("storage.s3.secret_key", rootCmd.Flags().Lookup("s3-secret-key"))
 	viper.BindPFlag("storage.s3.use_ssl", rootCmd.Flags().Lookup("s3-use-ssl"))
 	viper.BindPFlag("storage.s3.poll_interval", rootCmd.Flags().Lookup("s3-poll-interval"))
-	viper.BindPFlag("plugin_dir", rootCmd.Flags().Lookup("plugin-dir"))
 }
 
 func initConfig() {
@@ -164,6 +178,20 @@ func runServer(cmd *cobra.Command, args []string) error {
 		zap.String("version", version),
 	)
 
+	// Initialize OpenTelemetry tracing. No-op if OTEL env vars are unset.
+	ctxInit := context.Background()
+	shutdownTracing, err := observability.InitTracing(ctxInit, "garmr-server", version)
+	if err != nil {
+		return fmt.Errorf("initializing tracing: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracing(shutdownCtx); err != nil {
+			logger.Warn("tracing shutdown returned error", zap.Error(err))
+		}
+	}()
+
 	// Create engine
 	eng, err := engine.NewEngine(logger)
 	if err != nil {
@@ -193,6 +221,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create server config
+	requireMatch := viper.GetBool("evaluation.require_match")
 	cfg := server.Config{
 		HTTPAddr:           viper.GetString("http_addr"),
 		PolicyDir:          viper.GetString("policy_dir"),
@@ -200,6 +229,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 		TLSKey:             viper.GetString("tls.key"),
 		EnableTLS:          viper.GetBool("tls.enabled"),
 		MaxRecvSize:        16 * 1024 * 1024, // 16MB
+		ShutdownTimeout:    viper.GetDuration("shutdown_timeout"),
+		Version:            version,
 		AuditEnabled:       viper.GetBool("audit.enabled"),
 		AuditPath:          viper.GetString("audit.path"),
 		AuditMaxSizeMB:     viper.GetInt("audit.max_size"),
@@ -207,6 +238,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		AuditMaxAgeDays:    viper.GetInt("audit.max_age"),
 		APIKey:             viper.GetString("auth.api_key"),
 		APIKeyHeader:       viper.GetString("auth.api_key_header"),
+		IdentityHeader:     viper.GetString("auth.identity_header"),
 		AuthExemptPaths:    []string{"/health", "/ready", "/healthz", "/readyz", "/livez", "/metrics"},
 		CORSAllowedOrigins: viper.GetStringSlice("cors.allowed_origins"),
 		RateLimitEnabled:   viper.GetBool("rate_limit.enabled"),
@@ -215,7 +247,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		StorageType:        viper.GetString("storage.type"),
 		StorageRoot:        viper.GetString("storage.root"),
 		StorageOptions:     storageOpts,
-		PluginDir:          viper.GetString("plugin_dir"),
+		RequireMatch:       &requireMatch,
 	}
 
 	// Create server
@@ -223,6 +255,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating server: %w", err)
 	}
+
+	// Wire Prometheus metrics recorder (served at /metrics).
+	srv.Observability().SetMetrics(observability.NewPrometheusMetrics())
 
 	// Handle shutdown signals
 	ctx, cancel := context.WithCancel(context.Background())

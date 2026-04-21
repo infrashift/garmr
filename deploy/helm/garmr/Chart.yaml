@@ -1,0 +1,12 @@
+apiVersion: v2
+name: garmr
+description: Garmr — CUE-based policy evaluation engine
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/infrashift/garmr-policy-agent
+sources:
+  - https://github.com/infrashift/garmr-policy-agent
+maintainers:
+  - name: Garmr authors

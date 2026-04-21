@@ -67,7 +67,7 @@ Policies specify an `enforcement.action` that determines behavior:
 | Action | Description | CLI Exit Code |
 |--------|-------------|---------------|
 | `deny` | Block on any rule failure | 1 |
-| `warn` | Log warning but allow | 2 (with `--fail-on-warn`) |
+| `warn` | Log warning but allow | 0 |
 | `audit` | Log only, always allow | 0 |
 
 ### Severity Levels

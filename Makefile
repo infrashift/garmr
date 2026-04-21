@@ -7,7 +7,8 @@ BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)"
 
 .PHONY: all build build-server build-cli test lint clean docker help \
-	test-storage test-minio-start test-minio-stop test-s3-integration
+	test-storage test-minio-start test-minio-stop test-s3-integration \
+	doc-dev
 
 all: build
 
@@ -52,6 +53,9 @@ test-cover: ## Run tests with coverage report
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report: coverage.html"
 
+check-coverage: ## Enforce coverage floor on CLI↔server integration surface
+	./scripts/check-coverage.sh
+
 test-integration: build ## Run integration tests
 	./scripts/integration-test.sh
 
@@ -73,15 +77,6 @@ test-s3-integration: test-minio-start build ## Run S3 integration tests
 bench: ## Run benchmarks
 	go test -bench=. -benchmem ./internal/engine/...
 
-## Plugin targets
-
-build-plugins: ## Build all plugins
-	@echo "Building plugins..."
-	@mkdir -p bin/plugins
-	go build -buildmode=plugin -o bin/plugins/kafka.so ./internal/experimental/plugins/kafka
-	go build -buildmode=plugin -o bin/plugins/otel.so ./internal/experimental/plugins/otel
-	go build -buildmode=plugin -o bin/plugins/prometheus.so ./internal/experimental/plugins/prometheus
-
 ## Lint and format
 
 lint: ## Run linters
@@ -100,18 +95,46 @@ run: build ## Run server with config.yaml
 
 dev: build ## Run server in development mode (no config file)
 	@mkdir -p /tmp/garmr-audit
-	./bin/garmr-server --dev --policy-dir ./examples --audit-path /tmp/garmr-audit/audit.log --log-format console
+	./bin/garmr-server --dev --policy-dir ./example-policies --audit-path /tmp/garmr-audit/audit.log --log-format console
 
 run-server: build-server ## Run the server with example config
 	./bin/garmr-server --config config.example.yaml
 
+## Docs
+
+doc-dev: ## Run the Astro documentation site locally (bun)
+	cd docs && bun install && bun --bun run dev
+
 ## Docker
 
-docker-build: ## Build Docker image
+docker-build: ## Build Docker image (host platform)
 	docker build -t garmr:$(VERSION) .
 
 docker-push: docker-build ## Push Docker image
 	docker push garmr:$(VERSION)
+
+# Multi-arch release image. Requires `docker buildx` with a qemu-enabled
+# builder already configured (`docker buildx create --use --name garmr-builder`).
+DOCKER_PLATFORMS ?= linux/amd64,linux/arm64
+DOCKER_REGISTRY  ?= ghcr.io/infrashift
+DOCKER_IMAGE     ?= $(DOCKER_REGISTRY)/garmr
+
+docker-buildx: ## Build multi-arch image without pushing (local tar only)
+	docker buildx build \
+		--platform $(DOCKER_PLATFORMS) \
+		--tag $(DOCKER_IMAGE):$(VERSION) \
+		--build-arg VERSION=$(VERSION) \
+		--output type=oci,dest=dist/garmr-$(VERSION)-oci.tar \
+		.
+
+docker-release: ## Build and push multi-arch image to $(DOCKER_IMAGE)
+	docker buildx build \
+		--platform $(DOCKER_PLATFORMS) \
+		--tag $(DOCKER_IMAGE):$(VERSION) \
+		--tag $(DOCKER_IMAGE):latest \
+		--build-arg VERSION=$(VERSION) \
+		--push \
+		.
 
 ## Install
 

@@ -57,7 +57,6 @@ type EvaluateOptions struct {
 	Namespace     string
 	Trace         bool
 	IncludePassed bool
-	Strict        bool
 	RequestID     string // Optional request ID for audit correlation
 }
 
@@ -78,6 +77,7 @@ type RuleResult struct {
 	Severity        string `json:"severity"`
 	Passed          bool   `json:"passed"`
 	Message         string `json:"message,omitempty"`
+	Remediation     string `json:"remediation,omitempty"`
 }
 
 // Metrics contains evaluation metrics.
@@ -95,7 +95,6 @@ func (c *Client) Evaluate(ctx context.Context, input map[string]interface{}, opt
 		"policies":       opts.Policies,
 		"trace":          opts.Trace,
 		"include_passed": opts.IncludePassed,
-		"strict":         opts.Strict,
 	}
 
 	body, err := json.Marshal(reqBody)

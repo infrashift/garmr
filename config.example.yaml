@@ -22,10 +22,32 @@ log:
   level: "info"     # debug, info, warn, error
   format: "json"    # json, console
 
+# Evaluation posture
+# When require_match is true (the default), any eval that matches zero
+# policies returns DENY with a synthetic "no policy matched" result,
+# rather than silently allowing it. Set to false to restore the legacy
+# fail-open behavior — only do this if you knowingly evaluate inputs that
+# no policy targets.
+evaluation:
+  require_match: true
+
 # Audit logging
 audit:
   enabled: true
   path: "/var/log/garmr/audit.log"
+
+# Authentication & caller identity
+# - api_key: if set, callers must present this value in api_key_header or
+#   as "Authorization: Bearer <key>". Intended for out-of-mesh callers.
+# - identity_header: when Garmr runs behind a sidecar that terminates mTLS
+#   (Envoy / Consul Connect / Istio), the proxy forwards the verified client
+#   identity here. Garmr parses the SPIFFE URI from the XFCC format and
+#   stores it on audit entries as "principal". Leave the header at its
+#   default unless your mesh uses a different name.
+auth:
+  api_key: ""
+  api_key_header: "X-API-Key"
+  identity_header: "X-Forwarded-Client-Cert"
 
 # Storage backend configuration
 # By default, --policy-dir is used (filesystem backend).
@@ -47,9 +69,6 @@ audit:
 #     secret_key: ""
 #     use_ssl: true
 #     poll_interval: "10s"
-
-# Plugin directory (optional)
-# plugin_dir: "/etc/garmr/plugins"
 
 # Development mode (optional)
 # dev: true  # Enables colored console output

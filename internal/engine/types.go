@@ -159,7 +159,6 @@ type EvaluateRequest struct {
 type EvaluateOptions struct {
 	Trace          bool
 	IncludePassed  bool
-	Strict         bool
 	Instrument     bool
 	DryRunOverride *bool
 

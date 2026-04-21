@@ -50,7 +50,7 @@ func init() {
 	rootCmd.PersistentFlags().String("tls-cert", "", "TLS certificate file")
 	rootCmd.PersistentFlags().StringP("output", "o", "table", "output format (table, json, yaml)")
 	rootCmd.PersistentFlags().BoolP("quiet", "q", false, "suppress non-essential output")
-	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "verbose output")
+	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "show rule details (default: show on fail, hide on pass; use --verbose=false to always hide)")
 
 	// Bind flags to viper
 	viper.BindPFlag("server", rootCmd.PersistentFlags().Lookup("server"))

@@ -168,7 +168,7 @@ garmr eval --input testdata/valid-deployment.json -n security
 garmr eval --input testdata/invalid-deployment.json -n security
 
 # Include passed rules in output
-garmr eval --input testdata/valid-deployment.json --include-passed
+garmr eval --input testdata/valid-deployment.json --verbose
 
 # JSON output for detailed inspection
 garmr eval --input testdata/valid-deployment.json -o json | jq
@@ -658,7 +658,7 @@ grep -A5 "target:" my-policy.cue
 **Unexpected failures:**
 ```bash
 # Include passed rules to see full picture
-garmr eval --input resource.json --include-passed -o json | jq '.results'
+garmr eval --input resource.json --verbose -o json | jq '.results'
 ```
 
 ---

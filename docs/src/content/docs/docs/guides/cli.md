@@ -16,7 +16,7 @@ Complete command reference for the Garmr CLI.
 | `--server` | | Garmr server URL | `http://localhost:8080` |
 | `--output` | `-o` | Output format (table, json, yaml) | `table` |
 | `--quiet` | `-q` | Suppress non-essential output | `false` |
-| `--verbose` | `-v` | Verbose output | `false` |
+| `--verbose` | `-v` | Verbose output (see per-command docs for exact effect) | unset |
 
 ---
 
@@ -38,13 +38,9 @@ garmr eval --input <file> [flags]
 | `--data` | `-d` | Inline JSON data | |
 | `--policy` | `-p` | Specific policies to evaluate | |
 | `--namespace` | `-n` | Policy namespace(s) to evaluate | |
-| `--all-namespaces` | `-A` | Evaluate all namespaces | `false` |
 | `--request-id` | | Request ID for audit correlation | |
-| `--strict` | | Fail on warnings | `false` |
 | `--trace` | | Enable evaluation trace | `false` |
-| `--include-passed` | | Include passed rules in output | `false` |
-| `--fail-on-warn` | | Exit code 2 on warnings | `false` |
-| `--fail-fast` | | Stop on first failure | `false` |
+| `--verbose` | `-v` | Show rule details. Default shows details on fail, hides on pass. `--verbose=false` always hides. | unset |
 
 **Examples:**
 
@@ -68,19 +64,54 @@ garmr eval --input deployment.json --request-id "gh-$GITHUB_RUN_ID"
 cat deployment.json | garmr eval --input -
 
 # Include all rules (passed and failed)
-garmr eval --input deployment.json --include-passed
+garmr eval --input deployment.json --verbose
 
-# Fail on warnings
-garmr eval --input deployment.json --fail-on-warn
+# Suppress rule details even on failure (show only the decision)
+garmr eval --input deployment.json --verbose=false
 ```
 
 **Exit Codes:**
 
 | Code | Meaning |
 |------|---------|
-| 0 | ALLOW - All policies passed |
-| 1 | DENY - One or more policies failed |
-| 2 | WARN - Warnings (with `--fail-on-warn`) |
+| 0 | ALLOW or WARN - Nothing blocked the evaluation |
+| 1 | DENY - A deny-enforced policy failed |
+
+Warn is advisory by design, so `garmr eval` exits `0` on warn decisions.
+If a team needs warnings to gate CI, change the policy's
+`enforcement.action` from `warn` to `deny` — the decision lives in
+version control where it can be reviewed, rather than in a CLI flag.
+
+**Fail-closed on no match:**
+
+If an evaluation matches zero policies — because the namespace doesn't
+exist, the named policy isn't loaded, the server has no policies at all,
+or nothing targets the input — Garmr returns **DENY** (exit code 1) with
+a synthetic result that tells you which of those cases applied. This is
+the default behavior and is deliberate: a silent ALLOW on no match would
+hide typos in `--namespace`, missing policy files, or forgotten loads,
+giving a false sense of safety.
+
+Example output when `--namespace` doesn't match any loaded policy:
+
+```
+Decision: ✗ DENY
+
+SEVERITY     POLICY/RULE                    RESULT     ID       MESSAGE
+----------------------------------------------------------------------------------------------------
+HIGH         __system__/policy-match        FAIL       no-match No policies found in namespace "release".
+                                                                ↳ Verify the namespace and policy names...
+```
+
+To restore the legacy fail-open behavior (not recommended), set in your
+server config:
+
+```yaml
+evaluation:
+  require_match: false
+```
+
+or pass `--require-match=false` to `garmr-server`.
 
 ---
 

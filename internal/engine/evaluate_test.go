@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -304,10 +305,176 @@ func TestEvaluate_NoPolicies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Decision != DecisionAllow {
-		t.Errorf("expected allow with no policies, got %s", resp.Decision)
+	// Fail-closed: no policies loaded → synthetic deny with remediation.
+	if resp.Decision != DecisionDeny {
+		t.Fatalf("expected deny with no policies, got %s", resp.Decision)
+	}
+	if len(resp.Results) != 1 {
+		t.Fatalf("expected exactly one synthetic result, got %d", len(resp.Results))
+	}
+	got := resp.Results[0]
+	if got.PolicyNamespace != ReservedSystemNamespace ||
+		got.PolicyName != SystemPolicyNameMatch ||
+		got.RuleID != RuleIDNoMatch {
+		t.Errorf("synthetic result has wrong identifiers: %+v", got)
+	}
+	if got.Passed {
+		t.Error("synthetic result must have Passed=false")
+	}
+	if got.Remediation == "" {
+		t.Error("synthetic result must include remediation guidance")
 	}
 }
+
+func TestEvaluate_NoMatch_SubCases(t *testing.T) {
+	const ruleBody = `{id: "r1", description: "pass", severity: "low", expr: {match: {path: "x", equals: 1}}, message: "fail"}`
+	existsDefault := makePolicy("exists", "default", "exists", ruleBody, "deny", "")
+	existsSecurity := makePolicy("exists", "security", "exists", ruleBody, "deny", "")
+
+	cases := []struct {
+		name         string
+		seedPolicies []struct{ name, ns, rules string }
+		req          *EvaluateRequest
+		wantSubstr   string
+	}{
+		{
+			name: "no policies loaded at all",
+			req: &EvaluateRequest{
+				Input: map[string]any{"kind": "Pod"},
+			},
+			wantSubstr: "No policies are loaded",
+		},
+		{
+			name: "named policy missing",
+			seedPolicies: []struct{ name, ns, rules string }{
+				{"exists", "default", existsDefault},
+			},
+			req: &EvaluateRequest{
+				Input:    map[string]any{"kind": "Pod"},
+				Policies: []string{"does-not-exist"},
+			},
+			wantSubstr: "default/does-not-exist not found",
+		},
+		{
+			name: "namespace has no policies",
+			seedPolicies: []struct{ name, ns, rules string }{
+				{"exists", "security", existsSecurity},
+			},
+			req: &EvaluateRequest{
+				Input:     map[string]any{"kind": "Pod"},
+				Namespace: "nonexistent",
+			},
+			wantSubstr: `No policies found in namespace "nonexistent"`,
+		},
+		{
+			name: "policies exist but none target input",
+			// seedPolicies and wantSubstr are populated below with a
+			// handcrafted policy that restricts target.kind to "Deployment".
+			req: &EvaluateRequest{
+				Input: map[string]any{"kind": "Pod"},
+			},
+		},
+	}
+
+	// Build a targeted policy that restricts to kind "Deployment" so a Pod
+	// input produces zero matches via target-selector mismatch. The default
+	// test template hardcodes `kind: "*"`, so we assemble the CUE directly.
+	targetedSource := `
+apiVersion: "policy.garmr.io/v1"
+kind:       "Policy"
+metadata: {
+	name:      "targeted"
+	namespace: "default"
+}
+spec: {
+	description: "only applies to deployments"
+	target: resources: [{kind: "Deployment"}]
+	rules: [{id: "r1", description: "pass", severity: "low", expr: {match: {path: "x", equals: 1}}, message: "fail"}]
+	enforcement: {action: "deny"}
+}
+`
+	cases[3].seedPolicies = []struct{ name, ns, rules string }{{"targeted", "default", targetedSource}}
+	cases[3].wantSubstr = "No policy targets this input"
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eng, err := NewEngine(zap.NewNop())
+			if err != nil {
+				t.Fatalf("NewEngine: %v", err)
+			}
+			for _, p := range tc.seedPolicies {
+				if err := eng.LoadPolicy(context.Background(), p.name, p.ns, p.rules); err != nil {
+					t.Fatalf("LoadPolicy %s: %v", p.name, err)
+				}
+			}
+			resp, err := eng.Evaluate(context.Background(), tc.req)
+			if err != nil {
+				t.Fatalf("Evaluate: %v", err)
+			}
+			if resp.Decision != DecisionDeny {
+				t.Fatalf("expected deny, got %s", resp.Decision)
+			}
+			if len(resp.Results) != 1 {
+				t.Fatalf("expected 1 synthetic result, got %d", len(resp.Results))
+			}
+			msg := resp.Results[0].Message
+			if tc.wantSubstr != "" && !strings.Contains(msg, tc.wantSubstr) {
+				t.Errorf("message %q did not contain %q", msg, tc.wantSubstr)
+			}
+		})
+	}
+}
+
+func TestEvaluate_NoMatch_OptOut(t *testing.T) {
+	eng, _ := NewEngine(zap.NewNop())
+	eng.SetRequireMatch(false)
+
+	resp, err := eng.Evaluate(context.Background(), &EvaluateRequest{
+		Input: map[string]any{"kind": "Pod"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Decision != DecisionAllow {
+		t.Errorf("expected legacy allow with require_match=false, got %s", resp.Decision)
+	}
+	if len(resp.Results) != 0 {
+		t.Errorf("expected no synthetic result in opt-out mode, got %d", len(resp.Results))
+	}
+}
+
+func TestEvaluate_NoMatch_DryRunNotApplicable(t *testing.T) {
+	// A dry-run policy in namespace "other" exists, but we evaluate
+	// namespace "missing" with no matches. The dry-run flag on the other
+	// policy must NOT downgrade the synthetic deny, because no policy is
+	// in scope.
+	dryRunSource := makePolicyFull(
+		"dry", "other", "dry",
+		`{id: "r1", description: "x", severity: "high", expr: {match: {path: "x", equals: 1}}, message: "fail"}`,
+		"deny",
+		`dryRun: true`,
+		"",
+	)
+	eng, err := NewEngine(zap.NewNop())
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	if err := eng.LoadPolicy(context.Background(), "dry", "other", dryRunSource); err != nil {
+		t.Fatalf("LoadPolicy: %v", err)
+	}
+
+	resp, err := eng.Evaluate(context.Background(), &EvaluateRequest{
+		Input:     map[string]any{"kind": "Pod"},
+		Namespace: "missing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Decision != DecisionDeny {
+		t.Errorf("expected deny (dry-run elsewhere must not downgrade), got %s", resp.Decision)
+	}
+}
+
 
 // --- Concurrent evaluations ---
 

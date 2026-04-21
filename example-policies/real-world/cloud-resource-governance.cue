@@ -7,8 +7,8 @@ resourceGovernancePolicy: {
 	apiVersion: "policy.garmr.io/v1"
 	kind:       "Policy"
 	metadata: {
-		name:      "resource-governance"
-		namespace: "governance"
+		name:      "cloud-resource-governance"
+		namespace: "cloud-governance"
 		labels: {
 			domain: "cloud"
 			team:   "platform"
@@ -16,7 +16,7 @@ resourceGovernancePolicy: {
 	}
 	spec: {
 		description: "Enforces resource governance standards for cost control and operational excellence"
-		target: resources: [{kind: "*"}]
+		target: resources: [{kind: "CloudResource"}]
 		rules: [
 			{
 				id:          "GOV-001"

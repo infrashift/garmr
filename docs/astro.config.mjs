@@ -64,9 +64,15 @@ export default defineConfig({
 					label: 'Advanced',
 					collapsed: true,
 					items: [
-						{ label: 'Plugin Architecture', slug: 'docs/advanced/plugins' },
 						{ label: 'Storage Backends', slug: 'docs/advanced/storage-backends' },
 						{ label: 'Concurrency Model', slug: 'docs/advanced/concurrency' },
+					],
+				},
+				{
+					label: 'Operations',
+					collapsed: true,
+					items: [
+						{ label: 'Deploying Garmr', slug: 'docs/operations/deploying' },
 					],
 				},
 				{

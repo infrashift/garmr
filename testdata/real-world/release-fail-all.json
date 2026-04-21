@@ -1,0 +1,29 @@
+{
+  "_comment": "Every rule fails: REL-001 non-semver version, REL-002 tests failing, REL-003 coverage < 80, REL-004 critical/high vulns, REL-005 unsigned provenance (and buildPlatform missing), REL-006 invalid targetEnvironment, REL-007 production without approvals. Decision is DENY because all four critical rules (REL-001/002/004/007) trip release-gate; the three advisory rules (REL-003/005/006) are also reported as failures.",
+  "kind": "Release",
+  "apiVersion": "release.garmr.io/v1",
+  "metadata": {
+    "name": "my-service",
+    "namespace": "production"
+  },
+  "version": "not-a-semver",
+  "targetEnvironment": "staging",
+  "quality": {
+    "tests": {
+      "unit": {"passed": false},
+      "integration": {"passed": false},
+      "e2e": {"passed": false}
+    },
+    "coverage": {"percentage": 10}
+  },
+  "security": {
+    "vulnerabilities": {"critical": 5, "high": 12}
+  },
+  "provenance": {
+    "signed": false
+  },
+  "approvals": {
+    "count": 0,
+    "leadApproved": false
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "kind": "Release",
+  "apiVersion": "release.garmr.io/v1",
+  "metadata": {
+    "name": "my-service",
+    "namespace": "production"
+  },
+  "version": "v1.2.3",
+  "targetEnvironment": "production",
+  "quality": {
+    "tests": {
+      "unit": {"passed": true},
+      "integration": {"passed": true},
+      "e2e": {"passed": true}
+    },
+    "coverage": {
+      "percentage": 85
+    }
+  },
+  "security": {
+    "vulnerabilities": {
+      "critical": 0,
+      "high": 0
+    }
+  },
+  "provenance": {
+    "signed": true,
+    "buildPlatform": "github-actions"
+  },
+  "approvals": {
+    "count": 2,
+    "leadApproved": true,
+    "reviewers": [
+      {"approver": "alice@example.com", "role": "release-manager"},
+      {"approver": "bob@example.com", "role": "tech-lead"}
+    ]
+  },
+  "artifact": {
+    "image": "registry.example.com/my-service:1.2.3",
+    "digest": "sha256:abc123...",
+    "signed": true
+  }
+}

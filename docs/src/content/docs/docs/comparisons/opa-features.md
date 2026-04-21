@@ -107,8 +107,8 @@ This document compares their feature sets side-by-side and highlights capabiliti
 
 | Feature | Garmr | OPA | Notes |
 |---|---|---|---|
-| Metrics | Prometheus-compatible (via plugin) | Built-in Prometheus endpoint | OPA is more mature |
-| Tracing | OpenTelemetry (via plugin) | Not built-in | Garmr advantage (via plugin) |
+| Metrics | Built-in Prometheus endpoint (`/metrics`) | Built-in Prometheus endpoint | On par |
+| Tracing | OpenTelemetry hooks (no-op by default) | Not built-in | Similar — both require external wiring |
 | Decision logging | File-based structured JSON | Remote push to HTTP server | OPA's remote push is more production-ready |
 | Status reporting | Health checks | Status API with bundle info | OPA provides more detail |
 
@@ -120,7 +120,7 @@ This document compares their feature sets side-by-side and highlights capabiliti
 | Kubernetes admission | Not implemented | Gatekeeper / OPA-Envoy | **OPA advantage** |
 | Envoy integration | Not implemented | OPA-Envoy plugin | **OPA advantage** |
 | Container image | Containerfile provided | Official Docker images | Both containerized |
-| Plugin system | Go plugin architecture (10 plugins) | Go plugin + WASM | Both extensible |
+| Plugin system | Not available (built-in extensions only) | Go plugin + WASM | OPA advantage |
 
 ---
 
@@ -138,13 +138,13 @@ Garmr has three first-class decision outcomes:
 |---|---|---|---|
 | `allow` | All rules passed | `0` | Pipeline continues |
 | `deny` | A deny-enforcement rule failed | `1` | Pipeline fails |
-| `warn` | A warn-enforcement rule failed, no deny failures | `2` | Pipeline continues (unless `--fail-on-warn`) |
+| `warn` | A warn-enforcement rule failed, no deny failures | `0` | Pipeline continues |
 
 **Why this matters:**
 
 - **Gradual rollout of new policies.** Deploy a new security policy with `enforcement: action: "warn"` first. Teams see violations in CI output but builds don't break. Once teams have addressed violations, flip to `enforcement: action: "deny"`.
 - **Severity-appropriate responses.** A missing `description` label is a warning. A privileged container is a deny. Both are violations, but they should have different consequences.
-- **CI/CD exit code semantics.** `garmr eval` returns exit code 0 (allow), 1 (deny), or 2 (warn). CI pipelines can use standard `$?` checking. The `--fail-on-warn` flag lets strict environments treat warnings as failures.
+- **CI/CD exit code semantics.** `garmr eval` returns exit code 0 (allow or warn) or 1 (deny). CI pipelines use standard `$?` checking. If warnings need to gate CI, promote them to `enforcement: action: "deny"` in the policy — the decision belongs in code review, not in a CLI flag that can be flipped per pipeline.
 - **Dry-run mode.** Setting `enforcement: dryRun: true` or passing `--dry-run` automatically downgrades deny to warn and prefixes messages with `[DRY RUN]` — allowing policy authors to test deny policies in production without breaking anything.
 
 ```cue
@@ -285,12 +285,14 @@ Garmr's CLI is designed as a client to the Garmr server, making it a first-class
 
 ```bash
 # CI pipeline step: evaluate a Kubernetes manifest
-garmr eval --input deployment.yaml -n security --fail-on-warn -o json
+garmr eval --input deployment.yaml -n security -o json
 
 # Exit code tells the pipeline what to do:
-#   0 = allow  -> pipeline continues
-#   1 = deny   -> pipeline fails
-#   2 = warn   -> pipeline continues (or fails with --fail-on-warn)
+#   0 = allow or warn -> pipeline continues
+#   1 = deny          -> pipeline fails
+#
+# If warnings should block CI, change enforcement.action to "deny" in
+# the policy — the gating decision belongs in code review, not a flag.
 
 # Validate policies before merging
 garmr validate policies/*.cue

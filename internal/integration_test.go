@@ -268,42 +268,32 @@ func TestIntegration_WarnFlow(t *testing.T) {
 
 // --- CLI Exit Code Mapping ---
 
+// Exit codes map directly from decision with no client-side overrides:
+// deny → 1, everything else → 0. Warns are advisory by policy design;
+// teams that want warnings to gate CI should set enforcement.action=deny
+// in the policy itself rather than reinterpreting the decision in the CLI.
 func TestExitCodeMapping(t *testing.T) {
-	// Test the logic that maps decisions to exit codes (from runEval)
 	tests := []struct {
 		decision string
 		exitCode int
 	}{
 		{"allow", 0},
 		{"deny", 1},
-		{"warn", 0}, // warn without --fail-on-warn = 0
+		{"warn", 0},
 	}
 	for _, tt := range tests {
-		code := decisionToExitCode(tt.decision, false)
+		code := decisionToExitCode(tt.decision)
 		if code != tt.exitCode {
 			t.Errorf("decision=%s → exit %d, want %d", tt.decision, code, tt.exitCode)
 		}
 	}
-
-	// warn with --fail-on-warn = 2
-	code := decisionToExitCode("warn", true)
-	if code != 2 {
-		t.Errorf("warn with fail-on-warn → exit %d, want 2", code)
-	}
 }
 
-func decisionToExitCode(decision string, failOnWarn bool) int {
-	switch decision {
-	case "deny":
+func decisionToExitCode(decision string) int {
+	if decision == "deny" {
 		return 1
-	case "warn":
-		if failOnWarn {
-			return 2
-		}
-		return 0
-	default:
-		return 0
 	}
+	return 0
 }
 
 // --- Namespace Filtering End-to-End ---
@@ -379,14 +369,15 @@ func TestIntegration_PolicyReload(t *testing.T) {
 	ts, eng := integrationServer(t, "")
 	defer ts.Close()
 
-	// Initially no policies
+	// Initially no policies: with fail-closed defaults this returns deny
+	// plus a synthetic "no policies loaded" result.
 	c, _ := client.NewClient(client.Config{Address: ts.URL})
 	result, err := c.Evaluate(context.Background(), map[string]any{"x": 1}, client.EvaluateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Decision != "allow" {
-		t.Errorf("expected allow with no policies, got %s", result.Decision)
+	if result.Decision != "deny" {
+		t.Errorf("expected deny before any policy is loaded, got %s", result.Decision)
 	}
 
 	// Load a policy

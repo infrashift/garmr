@@ -19,6 +19,15 @@ func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string)
 
 	start := time.Now()
 
+	// The reserved system namespace is used for synthetic results emitted by
+	// the engine itself (e.g. no-policy-match). Reject any user policy that
+	// would collide with it so that response consumers can distinguish real
+	// policies from engine-generated ones by namespace alone.
+	if namespace == ReservedSystemNamespace {
+		e.obs.Metrics().RecordPolicyLoadError(name, namespace, "reserved_namespace")
+		return fmt.Errorf("%w: namespace %q is reserved for internal use", ErrInvalidPolicy, namespace)
+	}
+
 	// Compile the source
 	val := e.ctx.CompileString(source)
 	if val.Err() != nil {

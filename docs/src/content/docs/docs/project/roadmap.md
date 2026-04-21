@@ -58,9 +58,11 @@ This document describes what Garmr can do today and where it's headed.
 
 - TLS for HTTP (minimum TLS 1.2)
 - API key authentication
+- Service-mesh caller identity: SPIFFE URI parsed from `X-Forwarded-Client-Cert` (XFCC) and recorded as `principal` on every audit entry
 - Configurable CORS
 - Rate limiting (per-second + burst)
 - Request body size limits
+- Panic recovery middleware (returns 500 + structured log instead of dropping the connection)
 
 ### Policy Management
 
@@ -72,23 +74,19 @@ This document describes what Garmr can do today and where it's headed.
 ### Storage Backends
 
 - **Filesystem** (built-in) -- local file watching with inotify
-- **S3** (plugin) -- AWS S3 and MinIO support, polling-based change detection
-
-### Plugin System
-
-- Go shared library plugin architecture (.so/.dylib)
-- Ed25519 cryptographic signing and verification
-- Plugin types: storage, auth, notifier, function
-- Allowlist/blocklist and checksum verification
-- 3 available plugins (see [Plugin Architecture](/garmr/docs/advanced/plugins/))
+- **S3 / MinIO** (built-in) -- AWS S3 and MinIO support, polling-based change detection
 
 ### Observability
 
-- JSON audit logging with request correlation and file rotation
-- Prometheus metrics endpoint (evaluations, latency, violations, cache, rate limits)
-- OpenTelemetry distributed tracing (OTLP gRPC/HTTP export)
-- Structured logging with slog
-- Health check endpoints
+- JSON audit logging with request correlation, file rotation, and SPIFFE
+  `principal` + W3C `trace_id` on every entry
+- Prometheus metrics endpoint (evaluations, latency histograms, violations,
+  cache, rate limits, recovered panics, Go runtime) served from `/metrics`
+- OpenTelemetry tracing via `otelhttp`:
+  - Incoming `traceparent` is always extracted for log correlation
+  - OTLP exporter is opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`
+- Structured logging with slog / zap
+- Health check endpoints (`/healthz`, `/readyz`, `/livez`)
 
 ---
 
@@ -158,10 +156,16 @@ This document describes what Garmr can do today and where it's headed.
 - Per-tenant policy namespaces
 - Resource quotas
 
-**High Availability**
-- Clustered deployment
-- Leader election for background tasks
-- Shared policy cache
+**High Availability (beyond today's stateless-replica model)**
+
+The current model — N stateless pods fronted by a Service or mesh, each
+loading policies from a shared backend — works for most deployments. The
+planned items below address scenarios today's model does not cover:
+
+- Leader election for scheduled background tasks (bulk re-evaluation,
+  remote bundle pulls)
+- Shared result cache across replicas for hot inputs
+- Clustered deployment primitives for single-writer ops
 
 **Authentication & Authorization**
 - OIDC/OAuth2 authentication

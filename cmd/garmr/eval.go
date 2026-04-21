@@ -55,20 +55,11 @@ Examples:
   # Evaluate against multiple namespaces
   garmr eval --input pod.json -n security -n compliance
 
-  # Evaluate against all namespaces
-  garmr eval --input pod.json --all-namespaces
-
   # Evaluate specific policies
   garmr eval --input pod.json --policy security/container-security
 
-  # Filter by category or tags
-  garmr eval --input pod.json --category security --tag cis-benchmark
-
   # Evaluate from stdin
   cat resource.json | garmr eval --input -
-
-  # Strict mode (fail on warnings)
-  garmr eval --input resource.json --strict --fail-on-warn
 
   # Output as JSON for CI/CD integration
   garmr eval --input resource.json -o json`,
@@ -84,21 +75,9 @@ func init() {
 	// Policy selection
 	evalCmd.Flags().StringSliceP("policy", "p", nil, "specific policies to evaluate (namespace/name)")
 	evalCmd.Flags().StringSliceP("namespace", "n", nil, "policy namespace(s) to evaluate")
-	evalCmd.Flags().BoolP("all-namespaces", "A", false, "evaluate against all namespaces")
-
-	// Filtering
-	evalCmd.Flags().StringSlice("category", nil, "filter by rule category")
-	evalCmd.Flags().StringSlice("exclude-category", nil, "exclude rules by category")
-	evalCmd.Flags().StringSlice("tag", nil, "filter by rule tag")
-	evalCmd.Flags().StringSlice("exclude-tag", nil, "exclude rules by tag")
 
 	// Evaluation options
-	evalCmd.Flags().Bool("strict", false, "fail on warnings")
 	evalCmd.Flags().Bool("trace", false, "enable evaluation trace")
-	evalCmd.Flags().Bool("include-passed", false, "include passed rules in output")
-	evalCmd.Flags().Bool("dry-run", false, "evaluate without enforcement")
-	evalCmd.Flags().Bool("fail-on-warn", false, "exit with error on warnings")
-	evalCmd.Flags().Bool("fail-fast", false, "stop on first failure (override policy setting)")
 
 	// Request tracking
 	evalCmd.Flags().String("request-id", "", "request ID for audit correlation (e.g., CI job ID)")
@@ -136,12 +115,17 @@ func runEval(cmd *cobra.Command, args []string) error {
 	policies, _ := cmd.Flags().GetStringSlice("policy")
 	requestID, _ := cmd.Flags().GetString("request-id")
 
+	verboseFlag := cmd.Flags().Lookup("verbose")
+	verboseSet := verboseFlag != nil && verboseFlag.Changed
+	verboseValue, _ := cmd.Flags().GetBool("verbose")
+	includePassed := verboseSet && verboseValue
+	suppressDetails := verboseSet && !verboseValue
+
 	opts := client.EvaluateOptions{
 		Namespace:     namespace,
 		Policies:      policies,
 		Trace:         mustBool(cmd.Flags().GetBool("trace")),
-		IncludePassed: mustBool(cmd.Flags().GetBool("include-passed")),
-		Strict:        mustBool(cmd.Flags().GetBool("strict")),
+		IncludePassed: includePassed,
 		RequestID:     requestID,
 	}
 
@@ -152,20 +136,16 @@ func runEval(cmd *cobra.Command, args []string) error {
 	}
 
 	// Output result
-	if err := outputResult(cmd, result); err != nil {
+	if err := outputResult(cmd, result, suppressDetails); err != nil {
 		return err
 	}
 
-	// Determine exit code
-	failOnWarn, _ := cmd.Flags().GetBool("fail-on-warn")
-
-	switch result.Decision {
-	case "deny":
+	// Exit code is determined by the policy decision — no client-side
+	// overrides. Warn is advisory by design; if a team wants warnings to
+	// gate CI, the policy author should change enforcement.action to
+	// "deny" so the override lives in code review, not in a CLI flag.
+	if result.Decision == "deny" {
 		osExit(1)
-	case "warn":
-		if failOnWarn {
-			osExit(2)
-		}
 	}
 
 	return nil
@@ -231,7 +211,7 @@ func readInput(cmd *cobra.Command) (map[string]interface{}, error) {
 	return result, nil
 }
 
-func outputResult(cmd *cobra.Command, result *client.EvaluateResult) error {
+func outputResult(cmd *cobra.Command, result *client.EvaluateResult, suppressDetails bool) error {
 	format := viper.GetString("output")
 	quiet, _ := cmd.Flags().GetBool("quiet")
 
@@ -241,7 +221,7 @@ func outputResult(cmd *cobra.Command, result *client.EvaluateResult) error {
 	case "yaml":
 		return outputYAML(result)
 	default:
-		return outputTable(result, quiet)
+		return outputTable(result, quiet, suppressDetails)
 	}
 }
 
@@ -265,12 +245,15 @@ func outputYAML(result *client.EvaluateResult) error {
 			if r.Message != "" {
 				fmt.Printf("    message: %s\n", r.Message)
 			}
+			if r.Remediation != "" {
+				fmt.Printf("    remediation: %s\n", r.Remediation)
+			}
 		}
 	}
 	return nil
 }
 
-func outputTable(result *client.EvaluateResult, quiet bool) error {
+func outputTable(result *client.EvaluateResult, quiet, suppressDetails bool) error {
 	// Decision with color indicator
 	var decisionSymbol string
 	switch result.Decision {
@@ -287,7 +270,7 @@ func outputTable(result *client.EvaluateResult, quiet bool) error {
 	}
 
 	// Results table
-	if len(result.Results) > 0 {
+	if !suppressDetails && len(result.Results) > 0 {
 		if !quiet {
 			fmt.Printf("%-12s %-30s %-10s %-8s %s\n",
 				"SEVERITY", "POLICY/RULE", "RESULT", "ID", "MESSAGE")
@@ -317,6 +300,10 @@ func outputTable(result *client.EvaluateResult, quiet bool) error {
 				r.RuleID,
 				msg,
 			)
+
+			if !r.Passed && r.Remediation != "" {
+				fmt.Printf("%-12s %-30s %-10s %-8s  ↳ %s\n", "", "", "", "", r.Remediation)
+			}
 		}
 	}
 

@@ -1,0 +1,18 @@
+# Deny-by-default ServiceIntentions for Garmr.
+#
+# Apply after Garmr has registered with the Consul service catalog
+# (i.e. after `helm install ... --set mesh.consulConnect.enabled=true`).
+apiVersion: consul.hashicorp.com/v1alpha1
+kind: ServiceIntentions
+metadata:
+  name: garmr
+spec:
+  destination:
+    name: garmr
+  sources:
+    - name: policy-gateway
+      action: allow
+    - name: ci-runner
+      action: allow
+    - name: "*"
+      action: deny

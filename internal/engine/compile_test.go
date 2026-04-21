@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"go.uber.org/zap"
@@ -42,5 +43,26 @@ func TestLoadPolicy_InvalidSource(t *testing.T) {
 	err := eng.LoadPolicy(context.Background(), "bad", "default", "!!! invalid CUE !!!")
 	if err == nil {
 		t.Error("expected error for invalid CUE source")
+	}
+}
+
+func TestLoadPolicy_RejectsReservedNamespace(t *testing.T) {
+	eng, _ := NewEngine(zap.NewNop())
+
+	source := makePolicy("x", ReservedSystemNamespace, "tries to use reserved ns",
+		`{id: "r1", description: "d", severity: "low", expr: {match: {path: "x", equals: 1}}, message: "m"}`,
+		"deny", "")
+
+	err := eng.LoadPolicy(context.Background(), "x", ReservedSystemNamespace, source)
+	if err == nil {
+		t.Fatal("expected LoadPolicy to reject the reserved namespace")
+	}
+	if !errors.Is(err, ErrInvalidPolicy) {
+		t.Errorf("expected ErrInvalidPolicy, got %v", err)
+	}
+
+	// Policy must not have been stored.
+	if got := eng.ListPolicies(ReservedSystemNamespace); len(got) != 0 {
+		t.Errorf("expected no policies stored in reserved namespace, got %d", len(got))
 	}
 }

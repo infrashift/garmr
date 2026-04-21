@@ -30,7 +30,7 @@ denyPolicy: {
 	}
 }
 
-// Warn enforcement — violations produce warnings but don't block (exit code 0 or 2 with --fail-on-warn)
+// Warn enforcement — violations produce warnings but don't block (exit code 0)
 warnPolicy: {
 	apiVersion: "policy.garmr.io/v1"
 	kind:       "Policy"

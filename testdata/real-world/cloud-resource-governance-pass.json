@@ -1,0 +1,23 @@
+{
+  "kind": "CloudResource",
+  "apiVersion": "cloud.garmr.io/v1",
+  "metadata": {
+    "name": "orders-api",
+    "namespace": "production",
+    "labels": {
+      "owner": "platform-team",
+      "costCenter": "cc-eng-042",
+      "environment": "production"
+    }
+  },
+  "spec": {
+    "instanceType": "m5.large",
+    "autoscaling": {
+      "minReplicas": 2,
+      "maxReplicas": 10
+    },
+    "storage": {
+      "sizeGB": 200
+    }
+  }
+}

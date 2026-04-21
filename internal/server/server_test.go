@@ -66,11 +66,13 @@ func setupTestServer(t *testing.T, cfg Config) *httptest.Server {
 	mux.HandleFunc("/v1/policies", srv.handlePolicies)
 	mux.HandleFunc("/v1/policies/reload", srv.handleReloadPolicies)
 
-	var handler http.Handler = corsMiddleware(mux, cfg.CORSAllowedOrigins)
+	var handler http.Handler = srv.identityMiddleware(mux)
+	handler = corsMiddleware(handler, cfg.CORSAllowedOrigins)
 	if srv.rateLimiter != nil {
 		handler = srv.rateLimiter.Middleware(handler)
 	}
 	handler = srv.authMiddleware(handler)
+	handler = srv.recoveryMiddleware(handler)
 
 	// Mark server as ready
 	srv.mu.Lock()
@@ -137,6 +139,37 @@ func TestHandleEvaluate_Deny(t *testing.T) {
 	results, ok := result["results"].([]any)
 	if !ok || len(results) == 0 {
 		t.Error("expected violation results")
+	}
+}
+
+func TestHandleEvaluate_NoMatch_Denies(t *testing.T) {
+	// Namespace filter picks no policies — fail-closed default should
+	// surface DENY with a synthetic "no-match" result rather than allow.
+	ts := setupTestServer(t, Config{})
+	defer ts.Close()
+
+	resp := postJSON(t, ts.URL+"/v1/evaluate", map[string]any{
+		"input":     map[string]any{"env": "prod"},
+		"namespace": "does-not-exist",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	result := decodeJSON(t, resp)
+	if result["decision"] != "deny" {
+		t.Fatalf("expected deny on no match, got %v", result["decision"])
+	}
+	results, ok := result["results"].([]any)
+	if !ok || len(results) != 1 {
+		t.Fatalf("expected exactly one synthetic result, got %v", result["results"])
+	}
+	row := results[0].(map[string]any)
+	if row["rule_id"] != "no-match" || row["policy_namespace"] != "__system__" {
+		t.Errorf("synthetic result has unexpected identifiers: %+v", row)
+	}
+	if row["remediation"] == nil || row["remediation"] == "" {
+		t.Error("synthetic result must include remediation text")
 	}
 }
 

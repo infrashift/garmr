@@ -19,17 +19,8 @@ func evalFlagSet(t *testing.T) *cobraCmd {
 		flagSpec{Kind: "string", Name: "format", Value: "auto"},
 		flagSpec{Kind: "stringSlice", Name: "policy"},
 		flagSpec{Kind: "stringSlice", Name: "namespace"},
-		flagSpec{Kind: "bool", Name: "all-namespaces"},
-		flagSpec{Kind: "stringSlice", Name: "category"},
-		flagSpec{Kind: "stringSlice", Name: "exclude-category"},
-		flagSpec{Kind: "stringSlice", Name: "tag"},
-		flagSpec{Kind: "stringSlice", Name: "exclude-tag"},
-		flagSpec{Kind: "bool", Name: "strict"},
 		flagSpec{Kind: "bool", Name: "trace"},
-		flagSpec{Kind: "bool", Name: "include-passed"},
-		flagSpec{Kind: "bool", Name: "dry-run"},
-		flagSpec{Kind: "bool", Name: "fail-on-warn"},
-		flagSpec{Kind: "bool", Name: "fail-fast"},
+		flagSpec{Kind: "bool", Name: "verbose"},
 		flagSpec{Kind: "string", Name: "request-id"},
 		flagSpec{Kind: "bool", Name: "quiet"},
 	)
@@ -77,25 +68,10 @@ func TestRunEval_DenyDecisionExits1(t *testing.T) {
 	}
 }
 
-func TestRunEval_WarnFailOnWarnExits2(t *testing.T) {
-	newTestServer(t, policyFixture{"warn-policy", "default", testWarnPolicy})
-	input := writeTempFile(t, "in.json", `{"x":999}`)
-
-	cmd := evalFlagSet(t)
-	cmd.Flags().Set("input", input)
-	cmd.Flags().Set("fail-on-warn", "true")
-
-	rec := stubExit(t)
-	_, _ = captureOutput(t, func() {
-		_ = runEval(cmd, nil)
-	})
-
-	if rec.Code != 2 {
-		t.Errorf("expected exit 2 for warn+fail-on-warn, got %d", rec.Code)
-	}
-}
-
-func TestRunEval_WarnNoFailOnWarn(t *testing.T) {
+// Warn decisions are advisory by policy design — the CLI never exits non-zero
+// on warn. Teams that want warnings to gate CI should change the policy's
+// enforcement.action to "deny" instead of overriding from the client.
+func TestRunEval_WarnExitsZero(t *testing.T) {
 	newTestServer(t, policyFixture{"warn-policy", "default", testWarnPolicy})
 	input := writeTempFile(t, "in.json", `{"x":999}`)
 
@@ -108,7 +84,7 @@ func TestRunEval_WarnNoFailOnWarn(t *testing.T) {
 	})
 
 	if rec.Called {
-		t.Errorf("expected no exit for warn without fail-on-warn, got %d", rec.Code)
+		t.Errorf("expected no exit for warn decision, got %d", rec.Code)
 	}
 }
 
@@ -239,15 +215,14 @@ func TestRunEval_BadJSONInline(t *testing.T) {
 	}
 }
 
-func TestRunEval_IncludePassedAndTraceFlags(t *testing.T) {
+func TestRunEval_VerboseAndTraceFlags(t *testing.T) {
 	newTestServer(t, policyFixture{"pass-policy", "default", testPassPolicy})
 	input := writeTempFile(t, "in.json", `{"status":"active"}`)
 
 	cmd := evalFlagSet(t)
 	cmd.Flags().Set("input", input)
-	cmd.Flags().Set("include-passed", "true")
+	cmd.Flags().Set("verbose", "true")
 	cmd.Flags().Set("trace", "true")
-	cmd.Flags().Set("strict", "true")
 	cmd.Flags().Set("request-id", "req-test-123")
 	cmd.Flags().Set("policy", "default/pass-policy")
 
@@ -257,6 +232,82 @@ func TestRunEval_IncludePassedAndTraceFlags(t *testing.T) {
 			t.Fatalf("runEval: %v", err)
 		}
 	})
+}
+
+func TestRunEval_Verbose_ShowsDetailsOnPass(t *testing.T) {
+	newTestServer(t, policyFixture{"pass-policy", "default", testPassPolicy})
+	input := writeTempFile(t, "in.json", `{"status":"active"}`)
+
+	cmd := evalFlagSet(t)
+	cmd.Flags().Set("input", input)
+	cmd.Flags().Set("verbose", "true")
+
+	stubExit(t)
+	stdout, _ := captureOutput(t, func() {
+		if err := runEval(cmd, nil); err != nil {
+			t.Fatalf("runEval: %v", err)
+		}
+	})
+	if !strings.Contains(stdout, "PASS") || !strings.Contains(stdout, "SEVERITY") {
+		t.Errorf("expected rule table with PASS row when --verbose=true on allow; got %q", stdout)
+	}
+}
+
+func TestRunEval_Default_HidesDetailsOnPass(t *testing.T) {
+	newTestServer(t, policyFixture{"pass-policy", "default", testPassPolicy})
+	input := writeTempFile(t, "in.json", `{"status":"active"}`)
+
+	cmd := evalFlagSet(t)
+	cmd.Flags().Set("input", input)
+
+	stubExit(t)
+	stdout, _ := captureOutput(t, func() {
+		if err := runEval(cmd, nil); err != nil {
+			t.Fatalf("runEval: %v", err)
+		}
+	})
+	if !strings.Contains(stdout, "ALLOW") {
+		t.Errorf("expected ALLOW decision; got %q", stdout)
+	}
+	if strings.Contains(stdout, "SEVERITY") {
+		t.Errorf("expected no rule table on pass by default; got %q", stdout)
+	}
+}
+
+func TestRunEval_Default_ShowsDetailsOnFail(t *testing.T) {
+	newTestServer(t, policyFixture{"deny-policy", "default", testDenyPolicy})
+	input := writeTempFile(t, "in.json", `{"env":"staging"}`)
+
+	cmd := evalFlagSet(t)
+	cmd.Flags().Set("input", input)
+
+	stubExit(t)
+	stdout, _ := captureOutput(t, func() {
+		_ = runEval(cmd, nil)
+	})
+	if !strings.Contains(stdout, "FAIL") || !strings.Contains(stdout, "SEVERITY") {
+		t.Errorf("expected rule table on fail by default; got %q", stdout)
+	}
+}
+
+func TestRunEval_VerboseFalse_HidesDetailsOnFail(t *testing.T) {
+	newTestServer(t, policyFixture{"deny-policy", "default", testDenyPolicy})
+	input := writeTempFile(t, "in.json", `{"env":"staging"}`)
+
+	cmd := evalFlagSet(t)
+	cmd.Flags().Set("input", input)
+	cmd.Flags().Set("verbose", "false")
+
+	stubExit(t)
+	stdout, _ := captureOutput(t, func() {
+		_ = runEval(cmd, nil)
+	})
+	if !strings.Contains(stdout, "DENY") {
+		t.Errorf("expected DENY decision still visible; got %q", stdout)
+	}
+	if strings.Contains(stdout, "SEVERITY") || strings.Contains(stdout, "FAIL") {
+		t.Errorf("expected rule table suppressed with --verbose=false; got %q", stdout)
+	}
 }
 
 func TestRunEval_YAMLFormatInput(t *testing.T) {
@@ -335,11 +386,14 @@ func TestOutputHelpers(t *testing.T) {
 	if out := mustCapture(t, func() { _ = outputYAML(result) }); !strings.Contains(out, "decision:") {
 		t.Errorf("outputYAML: %q", out)
 	}
-	if out := mustCapture(t, func() { _ = outputTable(result, false) }); !strings.Contains(out, "DENY") {
+	if out := mustCapture(t, func() { _ = outputTable(result, false, false) }); !strings.Contains(out, "DENY") {
 		t.Errorf("outputTable: %q", out)
 	}
-	if out := mustCapture(t, func() { _ = outputTable(result, true) }); strings.Contains(out, "Decision:") {
+	if out := mustCapture(t, func() { _ = outputTable(result, true, false) }); strings.Contains(out, "Decision:") {
 		t.Errorf("outputTable quiet still printed header: %q", out)
+	}
+	if out := mustCapture(t, func() { _ = outputTable(result, false, true) }); strings.Contains(out, "SEVERITY") {
+		t.Errorf("outputTable suppressDetails still printed table: %q", out)
 	}
 }
 
@@ -426,7 +480,7 @@ func TestOutputTableTruncation(t *testing.T) {
 			Severity: "low", Passed: true, Message: long,
 		}},
 	}
-	out := mustCapture(t, func() { _ = outputTable(result, false) })
+	out := mustCapture(t, func() { _ = outputTable(result, false, false) })
 	if !strings.Contains(out, "...") {
 		t.Errorf("expected truncation marker in %q", out)
 	}

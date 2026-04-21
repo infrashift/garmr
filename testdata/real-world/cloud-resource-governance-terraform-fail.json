@@ -1,0 +1,68 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.7.4",
+  "resource_changes": [
+    {
+      "address": "aws_instance.web",
+      "mode": "managed",
+      "type": "aws_instance",
+      "name": "web",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "ami": "ami-0abcdef1234567890",
+          "instance_type": "m5.24xlarge",
+          "tags": {
+            "Owner": "platform-team",
+            "CostCenter": "cc-eng-042",
+            "Environment": "qa"
+          }
+        }
+      }
+    },
+    {
+      "address": "aws_autoscaling_group.workers",
+      "mode": "managed",
+      "type": "aws_autoscaling_group",
+      "name": "workers",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "workers",
+          "min_size": 0,
+          "max_size": 200,
+          "desired_capacity": 5,
+          "tags": {
+            "CostCenter": "cc-eng-042",
+            "Environment": "qa"
+          }
+        }
+      }
+    },
+    {
+      "address": "aws_ebs_volume.data",
+      "mode": "managed",
+      "type": "aws_ebs_volume",
+      "name": "data",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "availability_zone": "us-east-1a",
+          "size": 1000,
+          "type": "gp3",
+          "tags": {
+            "Owner": "platform-team",
+            "CostCenter": "cc-eng-042",
+            "Environment": "qa"
+          }
+        }
+      }
+    }
+  ]
+}

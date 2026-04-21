@@ -49,6 +49,26 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 	policies := e.findApplicablePolicies(req)
 	resp.Metrics.PoliciesEvaluated = len(policies)
 
+	// Fail-closed on no match. Returning DecisionAllow with zero rules
+	// evaluated is a silent pass — a typo in --namespace or a missing
+	// policy looks identical to a clean bill of health. When requireMatch
+	// is set we emit DecisionDeny with a synthetic RuleResult explaining
+	// which of the four failure modes (no policies loaded, named policy
+	// missing, empty namespace, or no target match) applied.
+	if len(policies) == 0 && e.requireMatch {
+		resp.Decision = DecisionDeny
+		resp.Results = append(resp.Results, e.buildNoMatchResult(req))
+		resp.Metrics.EvaluationTimeNs = time.Since(start).Nanoseconds()
+		e.obs.Metrics().RecordEvaluation(
+			"",
+			req.Namespace,
+			string(resp.Decision),
+			"",
+			time.Since(start),
+		)
+		return resp, nil
+	}
+
 	// Timeout enforcement: find the minimum timeout across all policies
 	minTimeout := time.Duration(0)
 	for _, p := range policies {
@@ -334,6 +354,7 @@ func (e *Engine) evaluateRule(ctx context.Context, policy *CompiledPolicy, rule 
 		RuleID:          rule.ID,
 		RuleDescription: rule.Description,
 		Severity:        rule.Severity,
+		Remediation:     rule.Remediation,
 		Passed:          true,
 		Bindings:        make(map[string]any),
 	}
@@ -448,4 +469,69 @@ func (e *Engine) interpolateMessage(msg string, bindings map[string]any) string 
 		result = strings.ReplaceAll(result, placeholder, fmt.Sprintf("%v", v))
 	}
 	return result
+}
+
+// buildNoMatchResult produces the synthetic RuleResult that accompanies a
+// fail-closed DecisionDeny when zero policies matched. The message is
+// tailored to the most specific cause the engine can identify from the
+// request and the current policy set, so users get actionable remediation
+// (typo'd namespace, missing policy name, or target-selector mismatch)
+// instead of a generic deny.
+func (e *Engine) buildNoMatchResult(req *EvaluateRequest) RuleResult {
+	const remediation = "Verify the namespace and policy names in your request, and run `garmr policy list` to inspect loaded policies."
+
+	var message string
+	switch {
+	case len(e.policies) == 0:
+		message = "No policies are loaded on the server. Check the server's policy directory and ensure policies compiled successfully."
+	case len(req.Policies) > 0:
+		ns := req.Namespace
+		if ns == "" {
+			ns = "default"
+		}
+		var missing []string
+		for _, name := range req.Policies {
+			if _, ok := e.policies[policyKey(ns, name)]; !ok {
+				missing = append(missing, fmt.Sprintf("%s/%s", ns, name))
+			}
+		}
+		if len(missing) > 0 {
+			message = fmt.Sprintf("Policy %s not found. Run `garmr policy list` to see available policies.", strings.Join(missing, ", "))
+		} else {
+			message = fmt.Sprintf("Requested policies exist but none target this input (kind=%q apiVersion=%q). Check the target selectors on %s.",
+				getStringField(req.Input, "kind"),
+				getStringField(req.Input, "apiVersion"),
+				strings.Join(req.Policies, ", "),
+			)
+		}
+	case req.Namespace != "" && !e.namespaceHasPolicies(req.Namespace):
+		message = fmt.Sprintf("No policies found in namespace %q. Run `garmr policy list` to see available namespaces.", req.Namespace)
+	default:
+		message = fmt.Sprintf("No policy targets this input (kind=%q apiVersion=%q). Check resource selectors on your policies or the `kind` field of your input.",
+			getStringField(req.Input, "kind"),
+			getStringField(req.Input, "apiVersion"),
+		)
+	}
+
+	return RuleResult{
+		PolicyNamespace: ReservedSystemNamespace,
+		PolicyName:      SystemPolicyNameMatch,
+		RuleID:          RuleIDNoMatch,
+		RuleDescription: "No policy matched the evaluation request",
+		Severity:        SeverityHigh,
+		Passed:          false,
+		Message:         message,
+		Remediation:     remediation,
+		Bindings:        map[string]any{},
+	}
+}
+
+// namespaceHasPolicies reports whether any loaded policy belongs to ns.
+func (e *Engine) namespaceHasPolicies(ns string) bool {
+	for _, p := range e.policies {
+		if p.Namespace == ns {
+			return true
+		}
+	}
+	return false
 }

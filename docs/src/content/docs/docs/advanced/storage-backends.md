@@ -126,33 +126,26 @@ storage: {
 
 ### 1. Engine Remains Storage-Agnostic
 
+The engine accepts any `storage.Backend` and never learns where the bytes came from:
+
 ```go
-// Engine only sees PolicyFile, not storage details
-type Engine struct {
-    loader *loader.Loader  // Uses Backend interface internally
+// Server hands the engine a Backend; engine does the rest.
+if err := eng.LoadPoliciesFromBackend(ctx, backend); err != nil {
+    return err
 }
 
-func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) {
-    // Engine never knows if policy came from disk, S3, or anywhere else
-    policy := e.loader.GetPolicy(ctx, namespace, name)
-    // ... evaluate
-}
+// Hot reload over the same interface
+count, err := eng.ReloadPoliciesFromBackend(ctx, backend)
 ```
 
 ### 2. Unified Change Detection
 
-All backends provide consistent change detection:
+Every backend exposes the same primitives, so the server uses one code path regardless of source:
 
 ```go
-// Loader handles change detection uniformly
-switch l.config.ReloadMode {
-case ReloadWatch:
-    // Uses backend.Watch() - native for filesystem, polling for S3
-    events, _ := l.backend.Watch(ctx, "**/*.cue")
-case ReloadPoll:
-    // Compares checksums periodically
-    checksum, _ := l.backend.Checksum(ctx, path)
-}
+// Works for filesystem, S3, MinIO, or any future backend
+events, _ := backend.Watch(ctx, "**/*.cue")
+checksum, _ := backend.Checksum(ctx, path)
 ```
 
 ### 3. Easy to Add New Backends

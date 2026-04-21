@@ -1,0 +1,52 @@
+{
+  "kind": "Pod",
+  "apiVersion": "v1",
+  "metadata": {
+    "name": "payments-api",
+    "namespace": "production"
+  },
+  "spec": {
+    "containers": [
+      {
+        "name": "app",
+        "image": "registry.example.com/payments-api:v1.8.0",
+        "securityContext": {
+          "runAsNonRoot": true,
+          "runAsUser": 10001,
+          "privileged": false,
+          "readOnlyRootFilesystem": true
+        },
+        "resources": {
+          "limits": {
+            "cpu": "500m",
+            "memory": "512Mi"
+          },
+          "requests": {
+            "cpu": "100m",
+            "memory": "128Mi"
+          }
+        }
+      },
+      {
+        "name": "sidecar",
+        "image": "gcr.io/my-project/log-shipper:2.3.1",
+        "securityContext": {
+          "runAsNonRoot": true,
+          "runAsUser": 10002,
+          "privileged": false,
+          "readOnlyRootFilesystem": true
+        },
+        "resources": {
+          "limits": {
+            "cpu": "100m",
+            "memory": "128Mi"
+          },
+          "requests": {
+            "cpu": "50m",
+            "memory": "64Mi"
+          }
+        }
+      }
+    ]
+  }
+}

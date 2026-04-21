@@ -449,11 +449,6 @@
             "type": "boolean",
             "description": "Include passed rules in results",
             "default": false
-          },
-          "strict": {
-            "type": "boolean",
-            "description": "Treat warnings as failures",
-            "default": false
           }
         },
         "required": ["input"]

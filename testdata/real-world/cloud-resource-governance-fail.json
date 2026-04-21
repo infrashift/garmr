@@ -1,0 +1,22 @@
+{
+  "kind": "CloudResource",
+  "apiVersion": "cloud.garmr.io/v1",
+  "metadata": {
+    "name": "batch-cruncher",
+    "namespace": "default",
+    "labels": {
+      "costCenter": "cc-unknown",
+      "environment": "staging-eu"
+    }
+  },
+  "spec": {
+    "instanceType": "m5.24xlarge",
+    "autoscaling": {
+      "minReplicas": 0,
+      "maxReplicas": 200
+    },
+    "storage": {
+      "sizeGB": 1000
+    }
+  }
+}

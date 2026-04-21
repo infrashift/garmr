@@ -7,6 +7,11 @@ garmr-audit/
 **/q-server.config.yaml
 coverage.out
 coverage.html
+*.so
+
+# Local audit log debris
+/example-audit
+/examples-audit
 
 # Docs site (Astro/Starlight)
 docs/node_modules/

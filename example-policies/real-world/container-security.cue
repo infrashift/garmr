@@ -20,19 +20,20 @@ containerSecurityPolicy: {
 		rules: [
 			{
 				id:          "SEC-001"
-				description: "Containers must not run as root"
+				description: "Containers must assert runAsNonRoot"
 				severity:    "critical"
 				priority:    10
 				expr: forEach: {
 					path: "spec.containers"
 					as:   "c"
 					mode: "all"
-					condition: not: {
-						match: {path: "c.securityContext.runAsRoot", equals: true}
+					condition: match: {
+						path:   "c.securityContext.runAsNonRoot"
+						equals: true
 					}
 				}
-				message:     "containers must not run as root"
-				remediation: "Set securityContext.runAsRoot: false and specify a non-root runAsUser"
+				message:     "containers must set securityContext.runAsNonRoot: true"
+				remediation: "Set securityContext.runAsNonRoot: true and specify a non-root runAsUser"
 				category:    "security"
 				tags: ["cis-benchmark", "pod-security"]
 			},

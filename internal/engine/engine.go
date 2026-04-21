@@ -31,6 +31,14 @@ func (e *Engine) getCueContext(ctx context.Context) *cue.Context {
 	return e.ctx
 }
 
+// Reserved identifiers used for the synthetic "no policy matched" result
+// and for guarding a user from loading a policy into the internal namespace.
+const (
+	ReservedSystemNamespace = "__system__"
+	SystemPolicyNameMatch   = "policy-match"
+	RuleIDNoMatch           = "no-match"
+)
+
 // Engine is the core policy evaluation engine.
 type Engine struct {
 	mu       sync.RWMutex
@@ -49,6 +57,11 @@ type Engine struct {
 
 	// obs provides optional metrics, tracing, and audit logging
 	obs *observability.Provider
+
+	// requireMatch controls fail-closed behavior: when true, evaluations
+	// that match zero policies return DecisionDeny with a synthetic result
+	// instead of the default DecisionAllow.
+	requireMatch bool
 }
 
 // cueContextPool provides a pool of CUE contexts for concurrent use.
@@ -88,12 +101,13 @@ func NewEngine(logger *zap.Logger) (*Engine, error) {
 	ctx := cuecontext.New()
 
 	e := &Engine{
-		ctx:      ctx,
-		ctxPool:  newCueContextPool(),
-		policies: make(map[string]*CompiledPolicy),
-		logger:   logger,
-		builtins: make(map[string]BuiltinFunc),
-		obs:      observability.NewProvider(),
+		ctx:          ctx,
+		ctxPool:      newCueContextPool(),
+		policies:     make(map[string]*CompiledPolicy),
+		logger:       logger,
+		builtins:     make(map[string]BuiltinFunc),
+		obs:          observability.NewProvider(),
+		requireMatch: true,
 	}
 
 	// Register built-in functions
@@ -110,6 +124,16 @@ func NewEngine(logger *zap.Logger) (*Engine, error) {
 // SetObservability sets the observability provider for the engine.
 func (e *Engine) SetObservability(obs *observability.Provider) {
 	e.obs = obs
+}
+
+// SetRequireMatch controls fail-closed behavior for evaluations that match
+// zero policies. When true (the default), Evaluate returns DecisionDeny with
+// a synthetic result that explains why nothing matched. When false, the
+// legacy fail-open behavior is restored and DecisionAllow is returned.
+func (e *Engine) SetRequireMatch(v bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.requireMatch = v
 }
 
 // loadSchema loads the embedded policy schema.

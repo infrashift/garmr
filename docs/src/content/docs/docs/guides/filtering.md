@@ -164,9 +164,6 @@ garmr eval --input pod.json -n security
 
 # Evaluate security and compliance policies
 garmr eval --input pod.json -n security -n compliance
-
-# Evaluate all namespaces explicitly
-garmr eval --input pod.json --all-namespaces
 ```
 
 ### API Namespace Filter
@@ -415,6 +412,6 @@ grep -A5 "target:" policies/*.cue
 
 ```bash
 # Include passed rules to see full evaluation
-garmr eval --input resource.json --include-passed -o json | \
+garmr eval --input resource.json --verbose -o json | \
   jq '[.results[] | {policy: .policy_name, namespace: .policy_namespace}] | unique'
 ```

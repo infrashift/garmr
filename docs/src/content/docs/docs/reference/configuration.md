@@ -71,6 +71,29 @@ log:
 | `log.level` | `info` | Log level: `debug`, `info`, `warn`, `error` |
 | `log.format` | `json` | Output format: `json` or `console` |
 
+## Evaluation Posture
+
+Controls how the engine treats an evaluation that matches zero policies.
+
+```yaml
+evaluation:
+  require_match: true
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `evaluation.require_match` | `true` | When `true`, an evaluation that matches no policies returns `DENY` with a synthetic result explaining why. When `false`, restores the legacy fail-open behavior and returns `ALLOW`. |
+
+Also available as the `--require-match` CLI flag on `garmr-server`.
+
+:::caution
+The default changed to fail-closed: prior to this release, an eval with
+no matching policies silently returned `ALLOW`. If you rely on that
+behavior (for example, evaluating inputs that no policy is expected to
+target), set `require_match: false` — but prefer adding a matching
+policy over opting out.
+:::
+
 ## Audit Logging
 
 When enabled, Garmr writes an audit log of all policy evaluation requests and their results. This is useful for compliance, debugging, and security monitoring.
@@ -128,20 +151,6 @@ storage:
 
 For more details on storage backends, see the [Storage Backends](/garmr/docs/advanced/storage-backends/) documentation.
 
-## Plugins
-
-Garmr supports loading external plugins from a directory. Plugins extend functionality with additional storage backends, authentication providers, and more.
-
-```yaml
-# plugin_dir: "/etc/garmr/plugins"
-```
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `plugin_dir` | _(none)_ | Directory containing plugin `.so` files |
-
-For more details on the plugin system, see the [Plugin Architecture](/garmr/docs/advanced/plugins/) documentation.
-
 ## Development Mode
 
 Enable development mode for colored console output and relaxed security settings. This should never be enabled in production.
@@ -179,6 +188,10 @@ log:
   level: "info"
   format: "json"
 
+# Evaluation posture
+evaluation:
+  require_match: true
+
 # Audit logging
 audit:
   enabled: true
@@ -188,9 +201,6 @@ audit:
 # storage:
 #   type: "filesystem"
 #   root: "/etc/garmr/policies"
-
-# Plugin directory (optional)
-# plugin_dir: "/etc/garmr/plugins"
 
 # Development mode (optional)
 # dev: true

@@ -28,7 +28,7 @@ This document compares their feature sets side-by-side and highlights capabiliti
 | Policy compilation | Pre-compiled to CUE values | Compiled to IR / WASM | Both compile before eval |
 | Built-in functions | 30+ | 150+ | OPA has far more built-ins |
 | Custom functions | Registered via Go API | Registered via Go API | Equivalent |
-| Expression operators | 25+ (match, compare, forEach, contains, all/any/not) | Rego operators + comprehensions | Different paradigms |
+| Expression operators | 20+ (match, compare, forEach, contains, all/any/not) | Rego operators + comprehensions | Different paradigms |
 | Data references | `input.` path resolution, `func` calls | `input`, `data`, imports | OPA's `data` document is more flexible |
 | Partial evaluation | Not implemented | Compile API | OPA advantage |
 | WASM compilation | Not implemented | Supported | OPA advantage |
@@ -39,7 +39,7 @@ This document compares their feature sets side-by-side and highlights capabiliti
 |---|---|---|---|
 | Decision outcomes | **allow / deny / warn** | allow / deny (boolean) | **Garmr advantage** — see [Three-Outcome Decisions](#1-three-outcome-decisions-allow--deny--warn) |
 | Decision structure | Structured response with per-rule results | Arbitrary JSON document | **Garmr advantage** — consistent, machine-readable format |
-| CI/CD exit codes | 0=allow, 1=deny, 2=warn | User must implement | **Garmr advantage** — native pipeline integration |
+| CI/CD exit codes | 0=allow/warn, 1=deny | User must implement | **Garmr advantage** — native pipeline integration |
 | Dry-run mode | Built-in (deny -> warn, `[DRY RUN]` prefix) | User must implement in Rego | **Garmr advantage** |
 | Fail-fast evaluation | Built-in (stop on first critical failure) | User must implement in Rego | **Garmr advantage** |
 
@@ -60,7 +60,7 @@ This document compares their feature sets side-by-side and highlights capabiliti
 
 | Feature | Garmr | OPA | Notes |
 |---|---|---|---|
-| Resource selectors | Built-in (kind, apiGroup, names, labels, namespaces, wildcards) | User must implement in Rego | **Garmr advantage** — see [Declarative Target Matching](#3-declarative-target-matching) |
+| Resource selectors | Built-in (kind, apiGroup, names, labels, annotations, namespaces, wildcards) | User must implement in Rego | **Garmr advantage** — see [Declarative Target Matching](#3-declarative-target-matching) |
 | Exception handling | Built-in (named exceptions with match selectors, expiry dates, reason) | User must implement in Rego | **Garmr advantage** — see [Exception System](#4-exception-system-with-expiry) |
 | Label-based matching | Built-in with wildcard patterns | User must implement | **Garmr advantage** |
 
@@ -97,7 +97,7 @@ This document compares their feature sets side-by-side and highlights capabiliti
 |---|---|---|---|
 | CLI eval | `garmr eval --input file.json` | `opa eval -d policy.rego -i input.json` | Both provide CLI eval |
 | Client-server model | CLI -> HTTP API -> Server | Embedded or REST API | **Garmr advantage** — see [CI/CD-Native CLI](#6-cicd-native-cli) |
-| Exit codes | Semantic (0/1/2) | User-defined | **Garmr advantage** |
+| Exit codes | Semantic (0=allow/warn, 1=deny) | User-defined | **Garmr advantage** |
 | Output formats | Table, JSON, YAML | JSON, pretty, raw | Both support multiple formats |
 | Policy testing | `garmr test` with CUE test suites | `opa test` with Rego tests | Both provide testing frameworks |
 | Test coverage | Not yet implemented | `opa test --coverage` | OPA advantage |
@@ -145,7 +145,7 @@ Garmr has three first-class decision outcomes:
 - **Gradual rollout of new policies.** Deploy a new security policy with `enforcement: action: "warn"` first. Teams see violations in CI output but builds don't break. Once teams have addressed violations, flip to `enforcement: action: "deny"`.
 - **Severity-appropriate responses.** A missing `description` label is a warning. A privileged container is a deny. Both are violations, but they should have different consequences.
 - **CI/CD exit code semantics.** `garmr eval` returns exit code 0 (allow or warn) or 1 (deny). CI pipelines use standard `$?` checking. If warnings need to gate CI, promote them to `enforcement: action: "deny"` in the policy — the decision belongs in code review, not in a CLI flag that can be flipped per pipeline.
-- **Dry-run mode.** Setting `enforcement: dryRun: true` or passing `--dry-run` automatically downgrades deny to warn and prefixes messages with `[DRY RUN]` — allowing policy authors to test deny policies in production without breaking anything.
+- **Dry-run mode.** Setting `enforcement: dryRun: true` on a policy downgrades that policy's deny to warn and prefixes messages with `[DRY RUN]` — allowing policy authors to test deny policies in production without breaking anything. A dry-run policy never downgrades another policy's deny: the overall decision is the maximum across policies (allow < warn < deny).
 
 ```cue
 // In OPA, you'd write custom Rego to handle this:
@@ -182,7 +182,7 @@ rules: [{
 - **Evaluation ordering.** Rules can be evaluated by priority, by severity (critical first), by definition order, or priority-then-severity. This controls which violations appear first and which trigger fail-fast.
 - **Category/tag filtering.** At evaluation time, you can include or exclude rules by category or tag — at both the policy level and the request level. For example, run only `cis-benchmark` tagged rules, or exclude `experimental` rules.
 - **Remediation guidance.** When a rule fails, the response includes actionable remediation text. Developers don't just see "FAIL" — they see what to fix.
-- **Structured reporting.** The response summary breaks down pass/fail counts by severity, category, and namespace. Dashboards can aggregate this without custom parsing.
+- **Structured reporting.** The engine's evaluation summary breaks down pass/fail counts by severity, category, and namespace, so tooling built on the engine can aggregate results without custom parsing.
 
 In OPA, none of this is built-in. You must design your own metadata schema, embed it in Rego rules, and write helper rules to aggregate it. Every OPA deployment reinvents this differently.
 
@@ -249,7 +249,7 @@ Garmr provides a lock file system for policy integrity in GitOps workflows:
 garmr policy lock policies/security/container-security.cue --version 2.5.1
 
 # Validate lock files in CI (exits 1 if checksums don't match)
-garmr policy lock validate-lock policies/
+garmr policy validate-lock policies/
 
 # Compare policy with its lock file
 garmr policy diff policies/security/container-security.cue

@@ -8,6 +8,10 @@ sidebar:
 
 Complete command reference for the Garmr CLI.
 
+The CLI is a thin REST client: `eval`, `validate`, `policy list/get/delete/reload`, and `health` all require a running Garmr server. Only `test`, `docs generate`, and `policy lock/validate-lock/diff` run locally without a server.
+
+The CLI has no authentication or TLS client options and cannot talk to an API-key-protected server. Run the CLI against the server over a trusted network (localhost, cluster-internal), or behind a service mesh sidecar that handles mTLS — the same deployment model the server's `auth.identity_header` support is designed for.
+
 ## Global Flags
 
 | Flag | Short | Description | Default |
@@ -35,9 +39,10 @@ garmr eval --input <file> [flags]
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--input` | `-i` | Input file (required, `-` for stdin) | |
-| `--data` | `-d` | Inline JSON data | |
-| `--policy` | `-p` | Specific policies to evaluate | |
-| `--namespace` | `-n` | Policy namespace(s) to evaluate | |
+| `--data` | `-d` | Inline JSON/YAML data | |
+| `--format` | `-f` | Input format (json, yaml, auto) | `auto` |
+| `--policy` | `-p` | Specific policies to evaluate (namespace/name, repeatable) | |
+| `--namespace` | `-n` | Policy namespace to evaluate (single value) | |
 | `--request-id` | | Request ID for audit correlation | |
 | `--trace` | | Enable evaluation trace | `false` |
 | `--verbose` | `-v` | Show rule details. Default shows details on fail, hides on pass. `--verbose=false` always hides. | unset |
@@ -48,11 +53,8 @@ garmr eval --input <file> [flags]
 # Basic evaluation
 garmr eval --input deployment.json
 
-# Filter by namespace
+# Filter by namespace (single namespace per invocation)
 garmr eval --input deployment.json -n security
-
-# Multiple namespaces
-garmr eval --input deployment.json -n security -n compliance
 
 # JSON output for CI/CD
 garmr eval --input deployment.json -o json
@@ -117,10 +119,10 @@ or pass `--require-match=false` to `garmr-server`.
 
 ### garmr validate
 
-Validate policy syntax.
+Validate policy syntax. Accepts files and directories (directories are expanded recursively to `.cue` files). Requires a running server — validation happens server-side.
 
 ```bash
-garmr validate <file-or-dir> [flags]
+garmr validate <file-or-dir> [file-or-dir...] [flags]
 ```
 
 **Flags:**
@@ -179,6 +181,35 @@ garmr policy list -o json
 garmr policy list -n security
 ```
 
+#### garmr policy get
+
+Get a policy by name.
+
+```bash
+garmr policy get <name> [flags]
+```
+
+**Flags:**
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--namespace` | `-n` | Policy namespace | `default` |
+
+#### garmr policy delete
+
+Delete a policy from the server.
+
+```bash
+garmr policy delete <name> [flags]
+```
+
+**Flags:**
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--namespace` | `-n` | Policy namespace | `default` |
+| `--force` | | Skip confirmation | `false` |
+
 #### garmr policy reload
 
 Reload policies from disk.
@@ -199,10 +230,10 @@ garmr policy reload -o json
 
 #### garmr policy lock
 
-Generate a lock file for a policy.
+Generate a lock file for a policy. Runs locally (no server needed).
 
 ```bash
-garmr policy lock <file> [flags]
+garmr policy lock <file> [file...] [flags]
 ```
 
 **Flags:**
@@ -210,6 +241,8 @@ garmr policy lock <file> [flags]
 | Flag | Description |
 |------|-------------|
 | `--version` | Version to record in lock file |
+| `--recursive` | Process directories recursively |
+| `--updated-by` | Override the `updatedBy` field |
 
 **Examples:**
 
@@ -222,17 +255,11 @@ garmr policy lock policies/release-gate.cue --version 1.0.0
 
 #### garmr policy validate-lock
 
-Validate policy against its lock file.
+Validate policy against its lock file. Runs locally (no server needed). Accepts files and directories; directories are always expanded recursively.
 
 ```bash
-garmr policy validate-lock <file> [flags]
+garmr policy validate-lock <file-or-dir> [file-or-dir...]
 ```
-
-**Flags:**
-
-| Flag | Description |
-|------|-------------|
-| `--recursive` | Check all policies in directory |
 
 **Examples:**
 
@@ -240,13 +267,13 @@ garmr policy validate-lock <file> [flags]
 # Validate single policy
 garmr policy validate-lock policies/release-gate.cue
 
-# Validate all policies recursively
-garmr policy validate-lock --recursive policies/
+# Validate all policies in a directory (recursive)
+garmr policy validate-lock policies/
 ```
 
 #### garmr policy diff
 
-Show differences between policy and lock file.
+Show differences between policy and lock file. Runs locally (no server needed).
 
 ```bash
 garmr policy diff <file>
@@ -263,7 +290,18 @@ garmr policy diff policies/release-gate.cue
 
 ### garmr test
 
-Run policy tests.
+Run policy tests. Runs locally (no server needed) using the same evaluation
+engine as the server, so test results match server decisions exactly. Takes
+positional policy/test paths; test suites live in `*_test.cue` files next to
+the policy files they test (see `example-policies/real-world/release-gate_test.cue`
+for a complete example).
+
+A suite names the policy under test — by `metadata.name`, or
+`"namespace/name"` if the name is ambiguous across loaded files — and each
+test provides an `input` plus an `expect` block (`decision`, `violations`
+by rule ID with optional `severity`/`messageContains`, `noViolations`,
+`violationCount`). Inputs that the policy's target does not match fail
+closed and surface a `no-match` violation explaining why.
 
 ```bash
 garmr test <policy-file> [test-file] [flags]
@@ -341,7 +379,7 @@ Documentation generation commands.
 
 #### garmr docs generate
 
-Generate markdown documentation from policies.
+Generate markdown documentation from policies. Runs locally (no server needed).
 
 ```bash
 garmr docs generate <policy-dir> [flags]
@@ -351,7 +389,7 @@ garmr docs generate <policy-dir> [flags]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--format` | `-f` | Output format | `generic-markdown` |
+| `--format` | `-f` | Output format (only `generic-markdown` is currently supported) | `generic-markdown` |
 | `--output` | `-o` | Output directory | `./docs/policies` |
 | `--recursive` | `-r` | Process recursively | `true` |
 | `--author` | | Author for front matter | |
@@ -360,7 +398,7 @@ garmr docs generate <policy-dir> [flags]
 
 ```bash
 # Generate docs from examples
-garmr docs generate ./examples --output ./out/docs
+garmr docs generate ./example-policies --output ./out/docs
 
 # Specify format
 garmr docs generate ./policies --format generic-markdown --output ./docs
@@ -376,6 +414,13 @@ Check server health.
 garmr health [flags]
 ```
 
+**Flags:**
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--wait` | Wait for server to be ready | `false` |
+| `--timeout` | Timeout when waiting | `30s` |
+
 **Examples:**
 
 ```bash
@@ -390,7 +435,7 @@ garmr health -o json
 
 ### garmr version
 
-Show version information.
+Show version information, including the Go runtime version and platform the binary was built with.
 
 ```bash
 garmr version
@@ -424,9 +469,8 @@ garmr eval --input deployment.json
 Create `~/.garmr.yaml` or `./garmr.yaml`:
 
 ```yaml
-server: "localhost:8080"
+server: "http://localhost:8080"
 output: "table"
-insecure: false
 ```
 
 ---
@@ -499,28 +543,25 @@ results:
 make run
 
 # Basic evaluation
-garmr eval --input testdata/k8s-pod-secure.json
+garmr eval --input testdata/real-world/k8s-pod-security-context-pass.json
 
 # Security policies only
-garmr eval --input testdata/k8s-pod-secure.json -n security
-
-# Advanced features (semver, datetime, forEach)
-garmr eval --input testdata/semver-valid.json -n advanced
+garmr eval --input testdata/real-world/k8s-pod-security-context-pass.json -n security
 
 # Release pipeline gates
-garmr eval --input testdata/release-input.json -n release
+garmr eval --input testdata/real-world/release-pass.json -n release
 
 # Failing evaluations
-garmr eval --input testdata/k8s-pod-insecure.json -n security
-garmr eval --input testdata/autoscaler-invalid.json -n advanced
+garmr eval --input testdata/real-world/k8s-pod-security-context-fail.yml -n security
+garmr eval --input testdata/advanced-operators/compare-fail.yaml -n advanced-operators
 
 # JSON output
-garmr eval --input testdata/k8s-pod-secure.json -o json | jq '.decision'
+garmr eval --input testdata/real-world/k8s-pod-security-context-pass.json -o json | jq '.decision'
 
 # List policies
 garmr policy list
 garmr policy list -n security
 
 # Generate documentation
-garmr docs generate ./examples --output ./out/docs
+garmr docs generate ./example-policies --output ./out/docs
 ```

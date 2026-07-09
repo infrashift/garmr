@@ -88,7 +88,11 @@ func (e *Engine) evaluateSemver(fieldVal cue.Value, semverExpr cue.Value, path s
 	// Check for constraint (e.g., ">=1.0.0,<2.0.0")
 	if constraintVal := semverExpr.LookupPath(cue.ParsePath("constraint")); constraintVal.Exists() {
 		constraint, _ := constraintVal.String()
-		if !matchSemverConstraint(actualVer, constraint) {
+		matched, err := matchSemverConstraint(actualVer, constraint)
+		if err != nil {
+			return false, bindings, fmt.Sprintf("invalid semver constraint %q: %v", constraint, err)
+		}
+		if !matched {
 			return false, bindings, fmt.Sprintf("'%s' version %s does not satisfy constraint %s", path, version, constraint)
 		}
 		return true, bindings, ""
@@ -125,17 +129,26 @@ func parseSemver(version string) (semverParts, error) {
 		version = version[:idx]
 	}
 
-	// Parse major.minor.patch
+	// Parse major.minor.patch. Reject malformed segments instead of
+	// treating them as 0 — "garbage" must not compare equal to "0.0.0".
 	segments := strings.Split(version, ".")
+	if len(segments) > 3 {
+		return parts, fmt.Errorf("invalid semver %q: too many version segments", version)
+	}
 
-	if len(segments) >= 1 {
-		parts.Major, _ = strconv.Atoi(segments[0])
+	var err error
+	if parts.Major, err = strconv.Atoi(segments[0]); err != nil {
+		return parts, fmt.Errorf("invalid semver %q: bad major version", version)
 	}
 	if len(segments) >= 2 {
-		parts.Minor, _ = strconv.Atoi(segments[1])
+		if parts.Minor, err = strconv.Atoi(segments[1]); err != nil {
+			return parts, fmt.Errorf("invalid semver %q: bad minor version", version)
+		}
 	}
 	if len(segments) >= 3 {
-		parts.Patch, _ = strconv.Atoi(segments[2])
+		if parts.Patch, err = strconv.Atoi(segments[2]); err != nil {
+			return parts, fmt.Errorf("invalid semver %q: bad patch version", version)
+		}
 	}
 
 	return parts, nil
@@ -181,15 +194,23 @@ func compareSemverParsed(a, b semverParts) int {
 	return 0
 }
 
-// compareSemver compares two semver strings
-func compareSemver(a, b string) int {
-	aParts, _ := parseSemver(a)
-	bParts, _ := parseSemver(b)
-	return compareSemverParsed(aParts, bParts)
+// compareSemver compares two semver strings. It returns an error when either
+// operand is not a valid semantic version.
+func compareSemver(a, b string) (int, error) {
+	aParts, err := parseSemver(a)
+	if err != nil {
+		return 0, err
+	}
+	bParts, err := parseSemver(b)
+	if err != nil {
+		return 0, err
+	}
+	return compareSemverParsed(aParts, bParts), nil
 }
 
-// matchSemverConstraint checks if a version matches a constraint like ">=1.0.0,<2.0.0"
-func matchSemverConstraint(version semverParts, constraint string) bool {
+// matchSemverConstraint checks if a version matches a constraint like ">=1.0.0,<2.0.0".
+// It returns an error when the constraint itself contains an invalid version.
+func matchSemverConstraint(version semverParts, constraint string) (bool, error) {
 	// Split constraint by comma for AND conditions
 	conditions := strings.Split(constraint, ",")
 
@@ -232,42 +253,45 @@ func matchSemverConstraint(version semverParts, constraint string) bool {
 			verStr = cond
 		}
 
-		constraintVer, _ := parseSemver(strings.TrimSpace(verStr))
+		constraintVer, err := parseSemver(strings.TrimSpace(verStr))
+		if err != nil {
+			return false, err
+		}
 		cmp := compareSemverParsed(version, constraintVer)
 
 		switch op {
 		case ">":
 			if cmp <= 0 {
-				return false
+				return false, nil
 			}
 		case ">=":
 			if cmp < 0 {
-				return false
+				return false, nil
 			}
 		case "<":
 			if cmp >= 0 {
-				return false
+				return false, nil
 			}
 		case "<=":
 			if cmp > 0 {
-				return false
+				return false, nil
 			}
 		case "=":
 			if cmp != 0 {
-				return false
+				return false, nil
 			}
 		case "^":
 			// Must be same major version and >= constraint
 			if version.Major != constraintVer.Major || cmp < 0 {
-				return false
+				return false, nil
 			}
 		case "~":
 			// Must be same major.minor and >= constraint
 			if version.Major != constraintVer.Major || version.Minor != constraintVer.Minor || cmp < 0 {
-				return false
+				return false, nil
 			}
 		}
 	}
 
-	return true
+	return true, nil
 }

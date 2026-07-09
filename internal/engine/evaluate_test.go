@@ -475,7 +475,6 @@ func TestEvaluate_NoMatch_DryRunNotApplicable(t *testing.T) {
 	}
 }
 
-
 // --- Concurrent evaluations ---
 
 func TestEvaluate_Concurrent(t *testing.T) {

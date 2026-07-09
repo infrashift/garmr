@@ -184,8 +184,11 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 		}
 	})
 
+	// A misconfigured backend must fail startup: silently running with zero
+	// policies would deny everything under require_match (or worse, allow
+	// everything without it).
 	if err := s.initStorageBackend(); err != nil {
-		s.logger.Warn("failed to initialize storage backend", zap.Error(err))
+		return nil, fmt.Errorf("initializing storage backend: %w", err)
 	}
 
 	return s, nil

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 
 	"cuelang.org/go/cue"
@@ -102,11 +101,12 @@ func (e *Engine) evaluateExpression(ctx context.Context, expr cue.Value, input c
 		return e.evaluateFunc(ctx, funcVal, input)
 	}
 
-	// Check for 'ref' (reference to another policy's result)
+	// 'ref' is not supported (removed from the schema). Top-level uses are
+	// rejected at compile time; this backstop catches refs nested inside
+	// all/any/not, which would otherwise silently pass through the default
+	// unify branch below.
 	if refVal := expr.LookupPath(cue.ParsePath("ref")); refVal.Exists() {
-		// ref is a forward-looking feature; currently passes (no-op)
-		// Future: look up referenced policy/rule result
-		return true, bindings, ""
+		return false, bindings, "expr 'ref' is not supported"
 	}
 
 	// Default: try to unify and check for errors
@@ -248,7 +248,7 @@ func (e *Engine) evaluateMatch(expr cue.Value, input cue.Value) (bool, map[strin
 		}
 
 		pattern, _ := patternVal.String()
-		re, err := regexp.Compile(pattern)
+		re, err := e.getCompiledRegex(pattern)
 		if err != nil {
 			return false, bindings, fmt.Sprintf("invalid pattern: %s", err)
 		}
@@ -449,6 +449,46 @@ func (e *Engine) evaluateMatch(expr cue.Value, input cue.Value) (bool, map[strin
 		return true, bindings, ""
 	}
 
+	// Check for 'unique' (array elements must be distinct)
+	if uniqueVal := expr.LookupPath(cue.ParsePath("unique")); uniqueVal.Exists() {
+		if !fieldVal.Exists() {
+			return false, bindings, fmt.Sprintf("path '%s' not found", path)
+		}
+		return e.evaluateUnique(fieldVal, uniqueVal, path)
+	}
+
+	// Check for 'uniqueBy' (array of objects distinct by field)
+	if uniqueByVal := expr.LookupPath(cue.ParsePath("uniqueBy")); uniqueByVal.Exists() {
+		if !fieldVal.Exists() {
+			return false, bindings, fmt.Sprintf("path '%s' not found", path)
+		}
+		return e.evaluateUniqueBy(fieldVal, uniqueByVal, path)
+	}
+
+	// Check for 'sorted' (array must be in sorted order)
+	if sortedVal := expr.LookupPath(cue.ParsePath("sorted")); sortedVal.Exists() {
+		if !fieldVal.Exists() {
+			return false, bindings, fmt.Sprintf("path '%s' not found", path)
+		}
+		return e.evaluateSorted(fieldVal, sortedVal, path)
+	}
+
+	// Check for 'containsAll' (array must contain every listed value)
+	if containsAllVal := expr.LookupPath(cue.ParsePath("containsAll")); containsAllVal.Exists() {
+		if !fieldVal.Exists() {
+			return false, bindings, fmt.Sprintf("path '%s' not found", path)
+		}
+		return e.evaluateContainsAll(fieldVal, containsAllVal, path)
+	}
+
+	// Check for 'subsetOf' (every array element must be from the listed set)
+	if subsetOfVal := expr.LookupPath(cue.ParsePath("subsetOf")); subsetOfVal.Exists() {
+		if !fieldVal.Exists() {
+			return false, bindings, fmt.Sprintf("path '%s' not found", path)
+		}
+		return e.evaluateSubsetOf(fieldVal, subsetOfVal, path)
+	}
+
 	// Check for 'length' conditions (array or string length)
 	if lengthVal := expr.LookupPath(cue.ParsePath("length")); lengthVal.Exists() {
 		if !fieldVal.Exists() {
@@ -473,7 +513,7 @@ func (e *Engine) evaluateMatch(expr cue.Value, input cue.Value) (bool, map[strin
 		return e.evaluateDatetime(fieldVal, datetimeVal, path)
 	}
 
-	return false, bindings, "match requires one of: exists, pattern, equals, greaterThan, lessThan, in, notIn, contains, hasPrefix, hasSuffix, length, semver, datetime"
+	return false, bindings, "match requires one of: exists, pattern, equals, greaterThan, lessThan, in, notIn, contains, hasPrefix, hasSuffix, unique, uniqueBy, sorted, containsAll, subsetOf, length, semver, datetime"
 }
 
 // evaluateCompare evaluates a compare expression.
@@ -492,9 +532,12 @@ func (e *Engine) evaluateCompare(expr cue.Value, input cue.Value) (bool, map[str
 	op, _ := opVal.String()
 	right := e.resolveValue(rightVal, input)
 
-	result := e.compare(left, op, right)
+	result, reason := e.compare(left, op, right)
 	if !result {
-		return false, bindings, fmt.Sprintf("comparison failed: %v %s %v", left, op, right)
+		if reason == "" {
+			reason = fmt.Sprintf("comparison failed: %v %s %v", left, op, right)
+		}
+		return false, bindings, reason
 	}
 
 	return true, bindings, ""
@@ -560,76 +603,105 @@ func (e *Engine) resolveValue(val cue.Value, input cue.Value) any {
 	return nil
 }
 
-// compare performs comparison operation.
-func (e *Engine) compare(left any, op string, right any) bool {
+// compare performs a comparison operation. It returns whether the comparison
+// passed and, when it did not, a diagnostic reason. Malformed operands
+// (non-numeric values for numeric operators, unparseable semver/datetime
+// strings, invalid regex patterns, unknown operators) fail closed with a
+// reason instead of being silently coerced to zero values.
+func (e *Engine) compare(left any, op string, right any) (bool, string) {
 	leftStr := fmt.Sprintf("%v", left)
 	rightStr := fmt.Sprintf("%v", right)
 
 	switch op {
 	case "==", "eq":
-		return valuesEqual(left, right)
+		return valuesEqual(left, right), ""
 	case "!=", "ne", "neq":
-		return !valuesEqual(left, right)
-	case ">", "gt":
-		return toFloat(left) > toFloat(right)
-	case ">=", "gte":
-		return toFloat(left) >= toFloat(right)
-	case "<", "lt":
-		return toFloat(left) < toFloat(right)
-	case "<=", "lte":
-		return toFloat(left) <= toFloat(right)
+		return !valuesEqual(left, right), ""
+	case ">", "gt", ">=", "gte", "<", "lt", "<=", "lte":
+		lf, lok := toFloatOk(left)
+		rf, rok := toFloatOk(right)
+		if !lok {
+			return false, fmt.Sprintf("non-numeric operand %v for %q", left, op)
+		}
+		if !rok {
+			return false, fmt.Sprintf("non-numeric operand %v for %q", right, op)
+		}
+		switch op {
+		case ">", "gt":
+			return lf > rf, ""
+		case ">=", "gte":
+			return lf >= rf, ""
+		case "<", "lt":
+			return lf < rf, ""
+		default: // "<=", "lte"
+			return lf <= rf, ""
+		}
 	case "in":
 		if arr, ok := right.([]any); ok {
 			for _, v := range arr {
 				if valuesEqual(left, v) {
-					return true
+					return true, ""
 				}
 			}
 		}
-		return false
+		return false, ""
 	case "not_in", "notIn":
 		if arr, ok := right.([]any); ok {
 			for _, v := range arr {
 				if valuesEqual(left, v) {
-					return false
+					return false, ""
 				}
 			}
 		}
-		return true
+		return true, ""
 	case "contains":
-		return strings.Contains(leftStr, rightStr)
+		return strings.Contains(leftStr, rightStr), ""
 	case "hasPrefix", "startsWith":
-		return strings.HasPrefix(leftStr, rightStr)
+		return strings.HasPrefix(leftStr, rightStr), ""
 	case "hasSuffix", "endsWith":
-		return strings.HasSuffix(leftStr, rightStr)
+		return strings.HasSuffix(leftStr, rightStr), ""
 	case "matches":
-		re, err := regexp.Compile(rightStr)
+		re, err := e.getCompiledRegex(rightStr)
 		if err != nil {
-			return false
+			return false, fmt.Sprintf("invalid pattern %q: %v", rightStr, err)
 		}
-		return re.MatchString(leftStr)
+		return re.MatchString(leftStr), ""
 	// Semantic version comparisons
-	case "semverGt":
-		return compareSemver(leftStr, rightStr) > 0
-	case "semverGte":
-		return compareSemver(leftStr, rightStr) >= 0
-	case "semverLt":
-		return compareSemver(leftStr, rightStr) < 0
-	case "semverLte":
-		return compareSemver(leftStr, rightStr) <= 0
-	case "semverEq":
-		return compareSemver(leftStr, rightStr) == 0
+	case "semverGt", "semverGte", "semverLt", "semverLte", "semverEq":
+		cmp, err := compareSemver(leftStr, rightStr)
+		if err != nil {
+			return false, fmt.Sprintf("invalid semver operand: %v", err)
+		}
+		switch op {
+		case "semverGt":
+			return cmp > 0, ""
+		case "semverGte":
+			return cmp >= 0, ""
+		case "semverLt":
+			return cmp < 0, ""
+		case "semverLte":
+			return cmp <= 0, ""
+		default: // "semverEq"
+			return cmp == 0, ""
+		}
 	// Datetime comparisons
-	case "after":
-		return compareDatetime(leftStr, rightStr) > 0
-	case "before":
-		return compareDatetime(leftStr, rightStr) < 0
-	case "afterOrEqual":
-		return compareDatetime(leftStr, rightStr) >= 0
-	case "beforeOrEqual":
-		return compareDatetime(leftStr, rightStr) <= 0
+	case "after", "before", "afterOrEqual", "beforeOrEqual":
+		cmp, err := compareDatetime(leftStr, rightStr)
+		if err != nil {
+			return false, fmt.Sprintf("invalid datetime operand: %v", err)
+		}
+		switch op {
+		case "after":
+			return cmp > 0, ""
+		case "before":
+			return cmp < 0, ""
+		case "afterOrEqual":
+			return cmp >= 0, ""
+		default: // "beforeOrEqual"
+			return cmp <= 0, ""
+		}
 	}
-	return false
+	return false, fmt.Sprintf("unknown comparison operator %q", op)
 }
 
 // evaluateForEach evaluates a forEach expression against an array in input.
@@ -728,25 +800,37 @@ func (e *Engine) evaluateForEach(ctx context.Context, expr cue.Value, input cue.
 	return false, bindings, fmt.Sprintf("no items in '%s' matched the condition", path)
 }
 
-// createItemContext creates a new CUE value context with the item aliased.
-// Uses the pooled CUE context from the Go context for thread safety.
+// createItemContext returns the input value with the current forEach element
+// bound under alias and its position under "_index".
+//
+// Fast path: the element is grafted onto the existing input via FillPath —
+// no decode/re-encode of the whole input — so the per-element cost is
+// independent of input size. FillPath unifies rather than replaces, so when
+// the alias or "_index" already exists on the input (an unlucky field name,
+// or a nested forEach re-binding), fall back to rebuilding the input map,
+// which preserves the replace semantics.
 func (e *Engine) createItemContext(ctx context.Context, input cue.Value, item cue.Value, alias string, index int) cue.Value {
-	// Decode original input
+	aliasPath := cue.MakePath(cue.Str(alias))
+	indexPath := cue.MakePath(cue.Str("_index"))
+
+	if !input.LookupPath(aliasPath).Exists() && !input.LookupPath(indexPath).Exists() {
+		indexVal := e.getCueContext(ctx).Encode(index)
+		return input.FillPath(aliasPath, item).FillPath(indexPath, indexVal)
+	}
+
+	// Fallback: rebuild via Go values so the new bindings replace the old.
 	var inputMap map[string]any
 	input.Decode(&inputMap)
 	if inputMap == nil {
 		inputMap = make(map[string]any)
 	}
 
-	// Decode item
 	var itemData any
 	item.Decode(&itemData)
 
-	// Add item under alias
 	inputMap[alias] = itemData
 	inputMap["_index"] = index
 
-	// Rebuild CUE value using pooled context
 	return e.getCueContext(ctx).Encode(inputMap)
 }
 

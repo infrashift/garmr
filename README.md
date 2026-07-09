@@ -30,27 +30,31 @@ make build
 
 ```bash
 # Start with example policies
-./bin/garmr-server --policy-dir ./examples --audit-path /var/log/garmr/audit.log
+./bin/garmr-server --policy-dir ./example-policies --audit-path /var/log/garmr/audit.log
 
 # Development mode with console logging
-./bin/garmr-server --dev --policy-dir ./examples --log-format console
+./bin/garmr-server --dev --policy-dir ./example-policies --log-format console
 ```
 
 ### Evaluate a Resource
 
 ```bash
-# Using the CLI
-./bin/garmr eval --input testdata/k8s-pod-secure.json
+# Evaluate a pod against the security namespace (expect ALLOW)
+./bin/garmr eval --input testdata/real-world/k8s-pod-security-context-pass.json -n security
 
-# With namespace filter
-./bin/garmr eval --input testdata/k8s-pod-secure.json -n security
+# The failing variant is denied (exit code 1)
+./bin/garmr eval --input testdata/real-world/k8s-pod-security-context-fail.yml -n security
 
 # JSON output for CI/CD
-./bin/garmr eval --input testdata/k8s-pod-secure.json -o json
+./bin/garmr eval --input testdata/real-world/k8s-pod-security-context-pass.json -n security -o json
 
 # With request ID for audit correlation
-./bin/garmr eval --input testdata/k8s-pod-secure.json --request-id "pipeline-12345"
+./bin/garmr eval --input testdata/real-world/k8s-pod-security-context-pass.json -n security --request-id "pipeline-12345"
 ```
+
+Without `-n`, every loaded policy whose target matches the input applies —
+with the full example-policy set loaded, that will usually DENY, because
+policies from unrelated namespaces also evaluate the input.
 
 ### Using the REST API
 
@@ -72,14 +76,14 @@ curl -X POST http://localhost:8080/v1/policies/reload
 
 | Document | Description |
 |----------|-------------|
-| [Getting Started](docs/GETTING-STARTED.md) | First steps with Garmr |
-| [Policy Schema](docs/POLICY-SCHEMA.md) | Complete reference for condition operators |
-| [Target & Namespace Filtering](docs/FILTERING.md) | How to scope policies to resources |
-| [CLI Reference](docs/CLI.md) | Complete CLI command reference |
-| [REST API Reference](docs/REST-API.md) | HTTP API endpoints and examples |
-| [CI/CD Integration](docs/CI-CD-PIPELINE-INTEGRATION.md) | Pipeline integration patterns |
-| [Developer Experience](docs/DEVELOPER-EXPERIENCE.md) | Writing and testing policies |
-| [Roadmap](docs/ROADMAP.md) | Future features and integrations |
+| [Getting Started](docs/src/content/docs/docs/getting-started.md) | First steps with Garmr |
+| [Policy Schema](docs/src/content/docs/docs/reference/policy-schema.md) | Complete reference for condition operators |
+| [Target & Namespace Filtering](docs/src/content/docs/docs/guides/filtering.md) | How to scope policies to resources |
+| [CLI Reference](docs/src/content/docs/docs/guides/cli.md) | Complete CLI command reference |
+| [REST API Reference](docs/src/content/docs/docs/guides/rest-api.md) | HTTP API endpoints and examples |
+| [CI/CD Integration](docs/src/content/docs/docs/guides/cicd.md) | Pipeline integration patterns |
+| [Developer Experience](docs/src/content/docs/docs/guides/developer-experience.md) | Writing and testing policies |
+| [Roadmap](docs/src/content/docs/docs/project/roadmap.md) | Future features and integrations |
 
 ## Example Policy
 
@@ -179,21 +183,28 @@ Every evaluation is logged with:
 ```
 garmr/
 ├── cmd/
-│   ├── garmr/             # CLI client
+│   ├── garmr/              # CLI client
 │   └── garmr-server/       # HTTP server
 ├── internal/
-│   ├── engine/         # Policy evaluation engine
-│   ├── server/         # HTTP handlers
-│   └── client/         # Go client library
-├── examples/           # Example policies
-│   ├── advanced/       # Advanced feature examples
-│   ├── release/        # Release gate policies
-│   ├── security/       # Security policies
-│   └── test/           # Test policies
-├── testdata/           # Test input files
-│   └── operators/      # Operator-specific tests
-├── schemas/            # CUE schema definitions
-└── docs/               # Documentation
+│   ├── engine/             # Policy evaluation engine
+│   ├── server/             # HTTP handlers
+│   ├── client/             # Go client library
+│   ├── health/             # Health check handlers
+│   ├── storage/            # Storage backends
+│   └── ...                 # builtin, input, observability, validation, ...
+├── example-policies/       # Example policies
+│   ├── advanced-operators/ # forEach, length, semver, datetime, compare
+│   ├── builtins/           # Built-in function examples
+│   ├── collections/        # Collection operator examples
+│   ├── condition-operators/# Core condition operator examples
+│   ├── enforcement/        # Enforcement action examples
+│   └── real-world/         # Real-world policies (security, release gates, ...)
+├── testdata/               # Test input files
+│   ├── advanced-operators/ # Operator-specific inputs
+│   └── real-world/         # Real-world scenario inputs
+├── schemas/                # CUE schema definitions
+├── deploy/                 # Deployment manifests
+└── docs/                   # Documentation site (Astro Starlight)
 ```
 
 ## Configuration

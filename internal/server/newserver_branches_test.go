@@ -72,20 +72,17 @@ func TestNewServer_AuditInitFailureBubbles(t *testing.T) {
 	}
 }
 
-func TestNewServer_LogsStorageInitFailure(t *testing.T) {
-	// With a bogus storage type, initStorageBackend fails — NewServer logs
-	// a warning and still returns a working (storage-less) server.
+func TestNewServer_StorageInitFailureIsFatal(t *testing.T) {
+	// With a bogus storage type, initStorageBackend fails — NewServer must
+	// refuse to start rather than silently run with zero policies (which
+	// would deny everything under require_match).
 	eng, err := engine.NewEngine(zap.NewNop())
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
 
-	srv, err := NewServer(Config{StorageType: "carrier-pigeon"}, eng, zap.NewNop())
-	if err != nil {
-		t.Fatalf("NewServer should tolerate storage init failure, got %v", err)
-	}
-	if srv.storageBackend != nil {
-		t.Error("expected no storage backend after init failure")
+	if _, err := NewServer(Config{StorageType: "carrier-pigeon"}, eng, zap.NewNop()); err == nil {
+		t.Fatal("expected NewServer error for unknown storage backend")
 	}
 }
 

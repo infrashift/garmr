@@ -150,22 +150,24 @@ func parseDateTime(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unable to parse datetime: %s", s)
 }
 
-// compareDatetime compares two datetime strings
-func compareDatetime(a, b string) int {
+// compareDatetime compares two datetime strings. It returns an error when
+// either operand cannot be parsed — silently treating garbage as "equal"
+// would make ordering operators fail open.
+func compareDatetime(a, b string) (int, error) {
 	aTime, err := parseDateTime(a)
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	bTime, err := parseDateTime(b)
 	if err != nil {
-		return 0
+		return 0, err
 	}
 
 	if aTime.Before(bTime) {
-		return -1
+		return -1, nil
 	}
 	if aTime.After(bTime) {
-		return 1
+		return 1, nil
 	}
-	return 0
+	return 0, nil
 }

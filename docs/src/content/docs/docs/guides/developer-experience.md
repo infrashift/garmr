@@ -142,10 +142,12 @@ containerSecurity: {
 ./bin/garmr-server --dev --policy-dir ./my-policies --log-format console
 
 # Or use examples
-./bin/garmr-server --dev --policy-dir ./examples --log-format console
+./bin/garmr-server --dev --policy-dir ./example-policies --log-format console
 ```
 
 ### Validate Policy Syntax
+
+`garmr validate` sends policies to the running server for validation, so start the local server first. Files and directories are accepted (directories are expanded recursively).
 
 ```bash
 # Validate a policy file
@@ -494,9 +496,15 @@ testdata/
 
 ---
 
-## Automated Testing Script
+## Automated Testing
 
-Create a test script to validate all test cases:
+The built-in `garmr test` command runs policy test suites locally without a server, using the same evaluation engine the server uses — see the [CLI Reference](/garmr/docs/guides/cli/#garmr-test) for the test file format and `example-policies/real-world/release-gate_test.cue` for a worked example:
+
+```bash
+garmr test ./policies --recursive
+```
+
+For end-to-end pipeline checks you can also evaluate test inputs against a running server (the `testdata/operators/` paths and `test`/`advanced` namespaces below are placeholders for your own policies and data):
 
 ```bash
 #!/bin/bash

@@ -44,9 +44,6 @@ package policy
 	// How violations are handled
 	enforcement: #Enforcement
 
-	// Optional dependencies on other policies
-	requires?: [...#PolicyRef]
-
 	// Evaluation configuration
 	evaluation?: #EvaluationConfig
 }
@@ -85,8 +82,9 @@ package policy
 
 // Target specifies what resources a policy applies to.
 #Target: {
-	// Resource selectors (OR semantics - matches any)
-	resources: [...#ResourceSelector]
+	// Resource selectors (OR semantics - matches any).
+	// A plain string is shorthand for {kind: <string>}.
+	resources: [...(string | #ResourceSelector)]
 
 	// Pre-conditions that must be true for policy to apply
 	conditions?: [...#Condition]
@@ -210,10 +208,6 @@ package policy
 
 	// Builtin function call
 	"func"?: #FuncCallExpr
-
-	// Reference to external rule or data (reserved for future use)
-	ref?: string
-
 }
 
 // MatchExpr matches a field at a given path against various conditions.
@@ -252,6 +246,18 @@ package policy
 	// Value must NOT be one of the listed values
 	notIn?: [...]
 
+	// --- Set validation (array fields) ---
+	// Array must have no duplicate values
+	unique?: bool
+	// Array of objects must have no duplicate values for this field
+	uniqueBy?: string
+	// Array must be sorted in the given order
+	sorted?: "asc" | "desc"
+	// Array must contain all listed values (superset check)
+	containsAll?: [...]
+	// Every array element must be from the listed set (subset check)
+	subsetOf?: [...]
+
 	// --- Collection ---
 	// Length constraints for arrays or strings
 	length?: #LengthExpr
@@ -265,11 +271,13 @@ package policy
 
 // LengthExpr defines length constraints.
 #LengthExpr: {
-	equals?:          int
-	greaterThan?:     int
-	lessThan?:        int
-	min?:             int
-	max?:             int
+	equals?:             int
+	greaterThan?:        int
+	greaterThanOrEqual?: int
+	lessThan?:           int
+	lessThanOrEqual?:    int
+	min?:                int
+	max?:                int
 }
 
 // SemverExpr defines semantic version constraints.
@@ -279,10 +287,10 @@ package policy
 	lessThan?:           string
 	lessThanOrEqual?:    string
 	equals?:             string
-	// Caret constraint (^1.2.3 = >=1.2.3, <2.0.0)
-	caret?:              string
-	// Tilde constraint (~1.2.3 = >=1.2.3, <1.3.0)
-	tilde?:              string
+	// Constraint expression, comma-separated AND conditions.
+	// Supports >=, <=, >, <, =, ^ (same major), ~ (same major.minor),
+	// e.g. ">=1.0.0,<2.0.0" or "^1.2.3".
+	constraint?: string
 }
 
 // DatetimeExpr defines date/time constraints.
@@ -291,6 +299,10 @@ package policy
 	after?: string
 	// Field timestamp must be before this time
 	before?: string
+	// Field timestamp must be at or after this time
+	afterOrEqual?: string
+	// Field timestamp must be at or before this time
+	beforeOrEqual?: string
 	// Field must be within N days of now
 	withinDays?: int
 	// Field must be within N hours of now
@@ -314,7 +326,10 @@ package policy
 	"eq" | "ne" | "neq" |
 	"gt" | "gte" | "lt" | "lte" |
 	"in" | "not_in" | "notIn" |
-	"matches" | "startsWith" | "endsWith"
+	"contains" | "hasPrefix" | "hasSuffix" |
+	"matches" | "startsWith" | "endsWith" |
+	"semverGt" | "semverGte" | "semverLt" | "semverLte" | "semverEq" |
+	"after" | "before" | "afterOrEqual" | "beforeOrEqual"
 
 // Value represents a value source in comparisons and function calls.
 #Value: {
@@ -410,6 +425,9 @@ package policy
 
 	// Mode: "all" = every item must pass, "any" = at least one must pass
 	mode: "all" | "any" | *"all"
+
+	// Whether an empty array passes (true, the default) or fails (false)
+	allowEmpty?: bool
 }
 
 // Condition for policy applicability.
@@ -488,59 +506,6 @@ package policy
 
 		// Stop on first failure
 		failFast: bool | *false
-	}
-}
-
-// DataSource defines external data for policy decisions.
-#DataSource: {
-	apiVersion: "policy.garmr.io/v1"
-	kind:       "DataSource"
-	metadata:   #Metadata
-	spec: {
-		// Source type
-		type: "inline" | "http" | "file" | "git" | "s3"
-
-		// Refresh interval
-		refresh: string | *"5m"
-
-		// Inline data
-		data?: _
-
-		// Remote URL
-		url?: string
-
-		// Git-specific
-		git?: {
-			url:    string
-			ref:    string | *"main"
-			path:   string | *"/"
-			sparse: [...string]
-		}
-
-		// S3-specific
-		s3?: {
-			bucket: string
-			key:    string
-			region: string
-		}
-
-		// Authentication
-		auth?: #AuthConfig
-	}
-}
-
-// AuthConfig for authenticated data sources.
-#AuthConfig: {
-	type: "none" | "basic" | "bearer" | "mtls" | "aws" | "gcp" | "oidc"
-
-	// Secret reference (namespace/name)
-	secretRef?: string
-
-	// Direct credentials (not recommended for production)
-	credentials?: {
-		username?: string
-		password?: string
-		token?:    string
 	}
 }
 

@@ -52,9 +52,6 @@ Examples:
   # Evaluate against specific namespace
   garmr eval --input pod.json -n security
 
-  # Evaluate against multiple namespaces
-  garmr eval --input pod.json -n security -n compliance
-
   # Evaluate specific policies
   garmr eval --input pod.json --policy security/container-security
 
@@ -74,7 +71,7 @@ func init() {
 
 	// Policy selection
 	evalCmd.Flags().StringSliceP("policy", "p", nil, "specific policies to evaluate (namespace/name)")
-	evalCmd.Flags().StringSliceP("namespace", "n", nil, "policy namespace(s) to evaluate")
+	evalCmd.Flags().StringP("namespace", "n", "", "policy namespace to evaluate")
 
 	// Evaluation options
 	evalCmd.Flags().Bool("trace", false, "enable evaluation trace")
@@ -107,11 +104,7 @@ func runEval(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build options
-	namespaces, _ := cmd.Flags().GetStringSlice("namespace")
-	namespace := ""
-	if len(namespaces) > 0 {
-		namespace = namespaces[0]
-	}
+	namespace, _ := cmd.Flags().GetString("namespace")
 	policies, _ := cmd.Flags().GetStringSlice("policy")
 	requestID, _ := cmd.Flags().GetString("request-id")
 

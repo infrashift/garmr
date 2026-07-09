@@ -20,7 +20,8 @@ func TestValuesEqual(t *testing.T) {
 	}
 }
 
-func TestMatchesPattern(t *testing.T) {
+func TestMatchesPatternCached(t *testing.T) {
+	e := newTestEngine(t)
 	tests := []struct {
 		pattern, value string
 		want           bool
@@ -32,8 +33,8 @@ func TestMatchesPattern(t *testing.T) {
 		{"*.apps", "deploy.apps", true},
 	}
 	for _, tt := range tests {
-		if got := matchesPattern(tt.pattern, tt.value); got != tt.want {
-			t.Errorf("matchesPattern(%q, %q) = %v, want %v", tt.pattern, tt.value, got, tt.want)
+		if got := e.matchesPatternCached(tt.pattern, tt.value); got != tt.want {
+			t.Errorf("matchesPatternCached(%q, %q) = %v, want %v", tt.pattern, tt.value, got, tt.want)
 		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"cuelang.org/go/cue"
+	"cuelang.org/go/cue/cuecontext"
 	"cuelang.org/go/cue/load"
 	"go.uber.org/zap"
 
@@ -16,12 +17,16 @@ import (
 )
 
 // ListPolicies returns all loaded policies.
+//
+// The returned CompiledPolicy values must be treated as read-only metadata
+// snapshots; their CUE values belong to a pooled replica context.
 func (e *Engine) ListPolicies(namespace string) []*CompiledPolicy {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	set := e.currentSet()
+	rep := set.get()
+	defer set.put(rep)
 
 	var result []*CompiledPolicy
-	for _, p := range e.policies {
+	for _, p := range rep.policies {
 		if namespace == "" || p.Namespace == namespace {
 			result = append(result, p)
 		}
@@ -29,13 +34,14 @@ func (e *Engine) ListPolicies(namespace string) []*CompiledPolicy {
 	return result
 }
 
-// GetPolicy returns a specific policy.
+// GetPolicy returns a specific policy (read-only metadata snapshot).
 func (e *Engine) GetPolicy(namespace, name string) (*CompiledPolicy, error) {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	set := e.currentSet()
+	rep := set.get()
+	defer set.put(rep)
 
 	key := policyKey(namespace, name)
-	if p, ok := e.policies[key]; ok {
+	if p, ok := rep.policies[key]; ok {
 		return p, nil
 	}
 	return nil, ErrPolicyNotFound
@@ -47,11 +53,17 @@ func (e *Engine) DeletePolicy(namespace, name string) bool {
 	defer e.mu.Unlock()
 
 	key := policyKey(namespace, name)
-	if _, ok := e.policies[key]; ok {
-		delete(e.policies, key)
-		return true
-	}
-	return false
+	found := false
+	e.set.forEachExclusive(func(i int, r *policyReplica) error {
+		if _, ok := r.policies[key]; ok {
+			delete(r.policies, key)
+			if i == 0 {
+				found = true
+			}
+		}
+		return nil
+	})
+	return found
 }
 
 // ClearPolicies removes all loaded policies.
@@ -59,7 +71,10 @@ func (e *Engine) ClearPolicies() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	e.policies = make(map[string]*CompiledPolicy)
+	e.set.forEachExclusive(func(i int, r *policyReplica) error {
+		r.policies = make(map[string]*CompiledPolicy)
+		return nil
+	})
 	e.logger.Info("cleared all policies")
 }
 
@@ -67,182 +82,57 @@ func (e *Engine) ClearPolicies() {
 // This is safe to call while evaluations are in progress - in-flight evaluations
 // will complete with the old policy set, new evaluations will use the new set.
 func (e *Engine) ReloadPoliciesFromDir(ctx context.Context, dir string) (int, error) {
-	// Load into a new map (no lock needed during load)
-	newPolicies := make(map[string]*CompiledPolicy)
-
-	if err := e.loadPoliciesIntoMap(ctx, dir, newPolicies); err != nil {
+	// Build a completely new replica set (no lock needed during load)
+	newSet, err := newPolicySet(defaultReplicaCount())
+	if err != nil {
 		return 0, err
 	}
 
-	// Atomic swap - only hold lock briefly
+	count := 0
+	if err := newSet.forEachExclusive(func(i int, r *policyReplica) error {
+		if err := e.loadDirIntoReplica(ctx, dir, r, i != 0); err != nil {
+			return err
+		}
+		if i == 0 {
+			count = len(r.policies)
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+
+	// Atomic swap - only hold lock briefly. In-flight evaluations keep the
+	// replicas of the old set alive until they finish.
 	e.mu.Lock()
-	e.policies = newPolicies
+	e.set = newSet
 	e.mu.Unlock()
 
-	e.logger.Info("policies reloaded atomically", zap.Int("count", len(newPolicies)))
-	return len(newPolicies), nil
+	e.logger.Info("policies reloaded atomically", zap.Int("count", count))
+	return count, nil
 }
 
-// loadPoliciesIntoMap loads policies into the provided map (no locking).
-func (e *Engine) loadPoliciesIntoMap(ctx context.Context, dir string, policies map[string]*CompiledPolicy) error {
+// LoadPoliciesFromDir loads all policies from a directory and its
+// subdirectories, adding to any policies already loaded.
+func (e *Engine) LoadPoliciesFromDir(ctx context.Context, dir string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return e.set.forEachExclusive(func(i int, r *policyReplica) error {
+		return e.loadDirIntoReplica(ctx, dir, r, i != 0)
+	})
+}
+
+// loadDirIntoReplica loads policies from dir (and its subdirectories) into a
+// replica, compiling everything with the replica's own context. When quiet is
+// true, logs and metrics are suppressed — used when replaying the same load
+// onto the remaining replicas of a set.
+func (e *Engine) loadDirIntoReplica(ctx context.Context, dir string, r *policyReplica, quiet bool) error {
 	// Load from the directory itself
-	if err := e.loadSingleDirIntoMap(ctx, dir, policies); err != nil {
+	if err := e.loadSingleDirIntoReplica(dir, r, quiet); err != nil && !quiet {
 		e.logger.Debug("no policies in root, scanning subdirectories", zap.String("dir", dir))
 	}
 
 	// Walk subdirectories
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("reading directory: %w", err)
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		name := entry.Name()
-		if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "cue.mod" {
-			continue
-		}
-
-		subdir := filepath.Join(dir, name)
-
-		hasCueFiles, _ := e.hasCueFiles(subdir)
-		if hasCueFiles {
-			if err := e.loadSingleDirIntoMap(ctx, subdir, policies); err != nil {
-				e.logger.Warn("failed to load policies from subdirectory",
-					zap.String("dir", subdir),
-					zap.Error(err),
-				)
-				continue
-			}
-		} else {
-			// Recursively check deeper
-			e.loadPoliciesIntoMap(ctx, subdir, policies)
-		}
-	}
-
-	return nil
-}
-
-// loadSingleDirIntoMap loads policies from a single directory into the map.
-func (e *Engine) loadSingleDirIntoMap(ctx context.Context, dir string, policies map[string]*CompiledPolicy) error {
-	// Use pooled context since this may be called without the engine lock
-	// (e.g., from ReloadPoliciesFromDir).
-	cueCtx := e.ctxPool.get()
-	defer e.ctxPool.put(cueCtx)
-
-	cfg := &load.Config{
-		Dir: dir,
-	}
-
-	instances := load.Instances([]string{"."}, cfg)
-	loadedAny := false
-
-	for _, inst := range instances {
-		if inst.Err != nil {
-			return fmt.Errorf("loading instance: %w", inst.Err)
-		}
-
-		val := cueCtx.BuildInstance(inst)
-		if val.Err() != nil {
-			return fmt.Errorf("building instance: %w", val.Err())
-		}
-
-		iter, _ := val.Fields()
-		for iter.Next() {
-			fieldVal := iter.Value()
-
-			kindVal := fieldVal.LookupPath(cue.ParsePath("kind"))
-			if !kindVal.Exists() {
-				continue
-			}
-
-			kind, _ := kindVal.String()
-			if kind != "Policy" {
-				continue
-			}
-
-			nameVal := fieldVal.LookupPath(cue.ParsePath("metadata.name"))
-			nsVal := fieldVal.LookupPath(cue.ParsePath("metadata.namespace"))
-
-			name, _ := nameVal.String()
-			ns := "default"
-			if nsVal.Exists() {
-				ns, _ = nsVal.String()
-			}
-
-			compiled, err := e.compilePolicy(fieldVal, name, ns)
-			if err != nil {
-				e.logger.Warn("skipping invalid policy",
-					zap.String("name", name),
-					zap.Error(err),
-				)
-				continue
-			}
-
-			compiled.LoadedAt = time.Now()
-			key := policyKey(ns, name)
-			policies[key] = compiled
-			loadedAny = true
-
-			e.logger.Info("loaded policy from directory",
-				zap.String("name", name),
-				zap.String("namespace", ns),
-			)
-		}
-	}
-
-	if !loadedAny {
-		return fmt.Errorf("no policies found in %s", dir)
-	}
-
-	return nil
-}
-
-// Validate validates a policy without loading it.
-func (e *Engine) Validate(source string) ([]ValidationError, []ValidationError) {
-	// Use pooled context for thread-safe concurrent validation
-	cueCtx := e.ctxPool.get()
-	defer e.ctxPool.put(cueCtx)
-
-	val := cueCtx.CompileString(source)
-	if val.Err() != nil {
-		return []ValidationError{{
-			Message: val.Err().Error(),
-			Code:    "PARSE_ERROR",
-		}}, nil
-	}
-
-	unified := val.Unify(e.schema.LookupPath(cue.ParsePath("#Policy")))
-	if unified.Err() != nil {
-		return []ValidationError{{
-			Message: unified.Err().Error(),
-			Code:    "SCHEMA_ERROR",
-		}}, nil
-	}
-
-	return nil, nil
-}
-
-// policyKey creates a unique key for a policy.
-func policyKey(namespace, name string) string {
-	if namespace == "" {
-		namespace = "default"
-	}
-	return namespace + "/" + name
-}
-
-// LoadPoliciesFromDir loads all policies from a directory and its subdirectories.
-func (e *Engine) LoadPoliciesFromDir(ctx context.Context, dir string) error {
-	// First, try to load from the directory itself
-	if err := e.loadPoliciesFromSingleDir(ctx, dir); err != nil {
-		// If it fails, it might be a parent directory - try subdirectories
-		e.logger.Debug("no policies in root, scanning subdirectories", zap.String("dir", dir))
-	}
-
-	// Walk subdirectories to find more policies
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("reading directory: %w", err)
@@ -261,20 +151,20 @@ func (e *Engine) LoadPoliciesFromDir(ctx context.Context, dir string) error {
 
 		subdir := filepath.Join(dir, name)
 
-		// Check if subdirectory contains .cue files
 		hasCueFiles, _ := e.hasCueFiles(subdir)
 		if hasCueFiles {
-			if err := e.loadPoliciesFromSingleDir(ctx, subdir); err != nil {
-				e.logger.Warn("failed to load policies from subdirectory",
-					zap.String("dir", subdir),
-					zap.Error(err),
-				)
-				// Continue with other directories
+			if err := e.loadSingleDirIntoReplica(subdir, r, quiet); err != nil {
+				if !quiet {
+					e.logger.Warn("failed to load policies from subdirectory",
+						zap.String("dir", subdir),
+						zap.Error(err),
+					)
+				}
 				continue
 			}
 		} else {
 			// Recursively check deeper directories
-			if err := e.LoadPoliciesFromDir(ctx, subdir); err != nil {
+			if err := e.loadDirIntoReplica(ctx, subdir, r, quiet); err != nil && !quiet {
 				e.logger.Debug("no policies in subdirectory", zap.String("dir", subdir))
 			}
 		}
@@ -283,47 +173,47 @@ func (e *Engine) LoadPoliciesFromDir(ctx context.Context, dir string) error {
 	return nil
 }
 
-// hasCueFiles checks if a directory contains .cue files
-func (e *Engine) hasCueFiles(dir string) (bool, error) {
-	entries, err := os.ReadDir(dir)
+// loadSingleDirIntoReplica loads policies from a single directory (non-recursive)
+// into a replica using the replica's context.
+func (e *Engine) loadSingleDirIntoReplica(dir string, r *policyReplica, quiet bool) error {
+	keys, err := e.loadInstancesIntoReplica([]string{"."}, dir, r, quiet)
 	if err != nil {
-		return false, err
+		return err
 	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".cue") {
-			return true, nil
-		}
+	if len(keys) == 0 {
+		return fmt.Errorf("no policies found in %s", dir)
 	}
-	return false, nil
+	return nil
 }
 
-// loadPoliciesFromSingleDir loads policies from a single directory (non-recursive)
-func (e *Engine) loadPoliciesFromSingleDir(ctx context.Context, dir string) error {
-	// Use pooled context for thread safety during reload operations
-	cueCtx := e.ctxPool.get()
-	defer e.ctxPool.put(cueCtx)
-
+// loadInstancesIntoReplica loads the given CUE package/file args (resolved
+// relative to dir) into a replica using the replica's context. It returns
+// the namespace/name keys of the policies loaded.
+func (e *Engine) loadInstancesIntoReplica(args []string, dir string, r *policyReplica, quiet bool) ([]string, error) {
 	cfg := &load.Config{
 		Dir: dir,
 	}
 
-	instances := load.Instances([]string{"."}, cfg)
-	loadedAny := false
+	instances := load.Instances(args, cfg)
+	var keys []string
 
 	// Track namespaces that got policies loaded for metrics
 	namespaceCounts := make(map[string]int)
 
 	for _, inst := range instances {
 		if inst.Err != nil {
-			e.obs.Metrics().RecordPolicyLoadError("", dir, "compilation")
-			return fmt.Errorf("loading instance: %w", inst.Err)
+			if !quiet {
+				e.obs.Metrics().RecordPolicyLoadError("", dir, "compilation")
+			}
+			return nil, fmt.Errorf("loading instance: %w", inst.Err)
 		}
 
-		val := cueCtx.BuildInstance(inst)
+		val := r.ctx.BuildInstance(inst)
 		if val.Err() != nil {
-			e.obs.Metrics().RecordPolicyLoadError("", dir, "compilation")
-			return fmt.Errorf("building instance: %w", val.Err())
+			if !quiet {
+				e.obs.Metrics().RecordPolicyLoadError("", dir, "compilation")
+			}
+			return nil, fmt.Errorf("building instance: %w", val.Err())
 		}
 
 		// Iterate fields to find policies
@@ -354,37 +244,159 @@ func (e *Engine) loadPoliciesFromSingleDir(ctx context.Context, dir string) erro
 
 			compiled, err := e.compilePolicy(fieldVal, name, ns)
 			if err != nil {
-				e.obs.Metrics().RecordPolicyLoadError(name, ns, "compilation")
-				e.logger.Warn("skipping invalid policy",
-					zap.String("name", name),
-					zap.Error(err),
-				)
+				if !quiet {
+					e.obs.Metrics().RecordPolicyLoadError(name, ns, "compilation")
+					e.logger.Warn("skipping invalid policy",
+						zap.String("name", name),
+						zap.Error(err),
+					)
+				}
 				continue
 			}
 
 			compiled.LoadedAt = time.Now()
 			key := policyKey(ns, name)
-			e.policies[key] = compiled
-			loadedAny = true
+			r.policies[key] = compiled
+			keys = append(keys, key)
 			namespaceCounts[ns]++
 
-			e.logger.Info("loaded policy from directory",
-				zap.String("name", name),
-				zap.String("namespace", ns),
-			)
+			if !quiet {
+				e.logger.Info("loaded policy from directory",
+					zap.String("name", name),
+					zap.String("namespace", ns),
+				)
+			}
 		}
 	}
 
-	if !loadedAny {
-		return fmt.Errorf("no policies found in %s", dir)
-	}
-
 	// Record loaded policy counts per namespace
-	for ns, count := range namespaceCounts {
-		e.obs.Metrics().SetPoliciesLoaded(ns, count)
+	if !quiet {
+		for ns, count := range namespaceCounts {
+			e.obs.Metrics().SetPoliciesLoaded(ns, count)
+		}
 	}
 
-	return nil
+	return keys, nil
+}
+
+// LoadPoliciesFromFile loads every policy declared in a single CUE file,
+// adding to any policies already loaded. It returns the namespace/name keys
+// of the policies the file declared.
+func (e *Engine) LoadPoliciesFromFile(ctx context.Context, path string) ([]string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolving %s: %w", path, err)
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	var keys []string
+	err = e.set.forEachExclusive(func(i int, r *policyReplica) error {
+		loaded, err := e.loadInstancesIntoReplica(
+			[]string{"./" + filepath.Base(abs)}, filepath.Dir(abs), r, i != 0)
+		if err != nil {
+			return err
+		}
+		if i == 0 {
+			keys = loaded
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("no policies found in %s", path)
+	}
+	return keys, nil
+}
+
+// Validate validates policy source without loading it. It accepts both a
+// bare policy document (as used by LoadPolicy) and the on-disk file format
+// where one or more policies are declared as named top-level fields (as used
+// by the directory loader). It uses a throwaway CUE context so concurrent
+// validations never share evaluator state.
+func (e *Engine) Validate(source string) ([]ValidationError, []ValidationError) {
+	vctx := cuecontext.New()
+
+	schema := vctx.CompileString(policySchemaSource)
+	if schema.Err() != nil {
+		return []ValidationError{{
+			Message: schema.Err().Error(),
+			Code:    "SCHEMA_ERROR",
+		}}, nil
+	}
+
+	val := vctx.CompileString(source)
+	if val.Err() != nil {
+		return []ValidationError{{
+			Message: val.Err().Error(),
+			Code:    "PARSE_ERROR",
+		}}, nil
+	}
+
+	// Collect policy documents: the value itself if it is a bare policy,
+	// otherwise every top-level field declaring kind: "Policy".
+	var candidates []cue.Value
+	if val.LookupPath(cue.ParsePath("kind")).Exists() {
+		candidates = append(candidates, val)
+	} else {
+		iter, _ := val.Fields()
+		for iter.Next() {
+			fieldVal := iter.Value()
+			kindVal := fieldVal.LookupPath(cue.ParsePath("kind"))
+			if !kindVal.Exists() {
+				continue
+			}
+			if kind, _ := kindVal.String(); kind == "Policy" {
+				candidates = append(candidates, fieldVal)
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		return []ValidationError{{
+			Message: "no Policy documents found (expected kind: \"Policy\")",
+			Code:    "SCHEMA_ERROR",
+		}}, nil
+	}
+
+	var errs []ValidationError
+	schemaPolicy := schema.LookupPath(cue.ParsePath("#Policy"))
+	for _, candidate := range candidates {
+		if unified := candidate.Unify(schemaPolicy); unified.Err() != nil {
+			errs = append(errs, ValidationError{
+				Message: unified.Err().Error(),
+				Code:    "SCHEMA_ERROR",
+			})
+		}
+	}
+
+	return errs, nil
+}
+
+// policyKey creates a unique key for a policy.
+func policyKey(namespace, name string) string {
+	if namespace == "" {
+		namespace = "default"
+	}
+	return namespace + "/" + name
+}
+
+// hasCueFiles checks if a directory contains .cue files
+func (e *Engine) hasCueFiles(dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".cue") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // LoadPoliciesFromBackend loads all policies from a storage backend.
@@ -421,22 +433,16 @@ func (e *Engine) ReloadPoliciesFromBackend(ctx context.Context, backend storage.
 	}
 	defer cleanup()
 
-	// Load into a new map
-	newPolicies := make(map[string]*CompiledPolicy)
-	if err := e.loadPoliciesIntoMap(ctx, tempDir, newPolicies); err != nil {
+	count, err := e.ReloadPoliciesFromDir(ctx, tempDir)
+	if err != nil {
 		return 0, err
 	}
 
-	// Atomic swap
-	e.mu.Lock()
-	e.policies = newPolicies
-	e.mu.Unlock()
-
 	e.logger.Info("policies reloaded from backend",
 		zap.String("backend", backend.Type()),
-		zap.Int("count", len(newPolicies)),
+		zap.Int("count", count),
 	)
-	return len(newPolicies), nil
+	return count, nil
 }
 
 // stageBackendFiles downloads CUE files from a backend into a temp directory,

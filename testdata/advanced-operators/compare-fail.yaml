@@ -2,13 +2,14 @@ kind: test-compare
 metadata:
   name: invalid-autoscaler
 spec:
-  minReplicas: 10
-  maxReplicas: 5
+  autoscaling:
+    minReplicas: 10
+    maxReplicas: 5
   resources:
-    requests:
-      memory: 1024
-    limits:
-      memory: 512
-schedule:
-  startDate: "2025-12-31T00:00:00Z"
-  endDate: "2025-01-01T00:00:00Z"
+    memoryRequest: 1024
+    memoryLimit: 512
+  image:
+    tag: latest
+  containers:
+    - name: app
+    - name: sidecar

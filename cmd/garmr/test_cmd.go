@@ -83,7 +83,10 @@ func init() {
 
 func runTest(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
-	runner := qtesting.NewRunner(testVerbose)
+	runner, err := qtesting.NewRunner(testVerbose)
+	if err != nil {
+		return fmt.Errorf("creating test runner: %w", err)
+	}
 
 	// Collect policy and test files
 	var policyFiles, testFiles []string

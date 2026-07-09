@@ -26,6 +26,28 @@ const (
 	DecisionWarn  Decision = "warn"
 )
 
+// decisionRank orders decisions by severity: Allow < Warn < Deny.
+func decisionRank(d Decision) int {
+	switch d {
+	case DecisionDeny:
+		return 2
+	case DecisionWarn:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// maxDecision returns the more severe of two decisions. Aggregating with this
+// makes the overall decision independent of policy evaluation order: one
+// policy can never lower a decision another policy has already raised.
+func maxDecision(a, b Decision) Decision {
+	if decisionRank(b) > decisionRank(a) {
+		return b
+	}
+	return a
+}
+
 // Severity levels.
 type Severity string
 
@@ -61,7 +83,6 @@ type CompiledPolicy struct {
 	Name        string
 	Namespace   string
 	Hash        string
-	Value       cue.Value
 	Rules       []CompiledRule
 	Target      TargetSpec
 	Enforcement EnforcementSpec
@@ -124,11 +145,12 @@ type TargetSpec struct {
 
 // ResourceSelector identifies resources.
 type ResourceSelector struct {
-	APIGroup   string
-	Kind       string
-	Names      []string
-	Labels     map[string]string
-	Namespaces []string
+	APIGroup    string
+	Kind        string
+	Names       []string
+	Labels      map[string]string
+	Annotations map[string]string
+	Namespaces  []string
 }
 
 // EnforcementSpec defines enforcement behavior.
@@ -148,11 +170,10 @@ type ExceptionSpec struct {
 
 // EvaluateRequest contains the input for policy evaluation.
 type EvaluateRequest struct {
-	Input      map[string]any
-	Policies   []string // Specific policies to evaluate (empty = all matching)
-	Namespace  string   // Filter policies by namespace (empty = all namespaces)
-	Namespaces []string // Multiple namespaces to include
-	Options    EvaluateOptions
+	Input     map[string]any
+	Policies  []string // Specific policies to evaluate (empty = all matching)
+	Namespace string   // Filter policies by namespace (empty = all namespaces)
+	Options   EvaluateOptions
 }
 
 // EvaluateOptions controls evaluation behavior.
@@ -189,8 +210,6 @@ type EvaluateResponse struct {
 
 // EvaluationMode indicates how evaluation was performed.
 type EvaluationMode struct {
-	// Order used for rule evaluation
-	Order EvaluationOrder
 	// Whether fail-fast was enabled
 	FailFast bool
 	// Whether evaluation was terminated early due to fail-fast
@@ -275,11 +294,12 @@ type TraceEvent struct {
 	Locals    map[string]any
 }
 
-// ValidationError represents a policy validation error.
+// ValidationError represents a policy validation error. The JSON tags define
+// the /v1/validate wire format consumed by internal/client.
 type ValidationError struct {
-	Message  string
-	Code     string
-	Line     int
-	Column   int
-	Filename string
+	Message  string `json:"message"`
+	Code     string `json:"code,omitempty"`
+	Line     int    `json:"line,omitempty"`
+	Column   int    `json:"column,omitempty"`
+	Filename string `json:"filename,omitempty"`
 }

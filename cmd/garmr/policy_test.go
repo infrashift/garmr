@@ -66,6 +66,72 @@ func TestRunValidate_MissingFile(t *testing.T) {
 	}
 }
 
+func TestRunValidate_Directory(t *testing.T) {
+	newTestServer(t)
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "nested")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "a.cue"), []byte(testPassPolicy), 0644)
+	os.WriteFile(filepath.Join(sub, "b.cue"), []byte(testPassPolicy), 0644)
+	os.WriteFile(filepath.Join(dir, "ignored.txt"), []byte("not cue"), 0644)
+
+	cmd := validateFlagSet(t)
+	rec := stubExit(t)
+	stdout, _ := captureOutput(t, func() {
+		if err := runValidate(cmd, []string{dir}); err != nil {
+			t.Fatalf("runValidate: %v", err)
+		}
+	})
+
+	if rec.Called {
+		t.Errorf("unexpected exit: %d", rec.Code)
+	}
+	if !strings.Contains(stdout, "a.cue") || !strings.Contains(stdout, "b.cue") {
+		t.Errorf("expected both .cue files validated recursively, got %q", stdout)
+	}
+	if strings.Contains(stdout, "ignored.txt") {
+		t.Errorf("non-CUE file should be skipped, got %q", stdout)
+	}
+}
+
+func TestRunValidate_EmptyDirectory(t *testing.T) {
+	newTestServer(t)
+	cmd := validateFlagSet(t)
+	rec := stubExit(t)
+	_, stderr := captureOutput(t, func() {
+		_ = runValidate(cmd, []string{t.TempDir()})
+	})
+	if rec.Code != 1 {
+		t.Errorf("expected exit 1 for directory without .cue files, got %d", rec.Code)
+	}
+	if !strings.Contains(stderr, "No .cue files") {
+		t.Errorf("expected no-cue-files message, got %q", stderr)
+	}
+}
+
+func TestRunValidate_MixedFileAndDirectory(t *testing.T) {
+	newTestServer(t)
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.cue"), []byte(testPassPolicy), 0644)
+	file := writeTempFile(t, "direct.cue", testPassPolicy)
+
+	cmd := validateFlagSet(t)
+	rec := stubExit(t)
+	stdout, _ := captureOutput(t, func() {
+		if err := runValidate(cmd, []string{dir, file}); err != nil {
+			t.Fatalf("runValidate: %v", err)
+		}
+	})
+	if rec.Called {
+		t.Errorf("unexpected exit: %d", rec.Code)
+	}
+	if !strings.Contains(stdout, "a.cue") || !strings.Contains(stdout, "direct.cue") {
+		t.Errorf("expected dir contents and explicit file validated, got %q", stdout)
+	}
+}
+
 // --- policy list ---
 
 func policyListFlagSet(t *testing.T) *cobraCmd {
@@ -263,6 +329,12 @@ func TestRunPolicyReload_Success(t *testing.T) {
 	if !strings.Contains(stdout, "Reloaded") {
 		t.Errorf("expected Reloaded, got %q", stdout)
 	}
+	// Contract check against the real server: the storage type must arrive
+	// in the response and be printed (the field was previously misdecoded
+	// as policy_dir and always printed empty).
+	if !strings.Contains(stdout, "Storage: filesystem") {
+		t.Errorf("expected storage type in output, got %q", stdout)
+	}
 }
 
 func TestRunPolicyReload_JSONOutput(t *testing.T) {
@@ -280,12 +352,13 @@ func TestRunPolicyReload_JSONOutput(t *testing.T) {
 	}
 }
 
-// --- policy push ---
+// --- policy push (stub removed) ---
 
-func TestRunPolicyPush_NotImplemented(t *testing.T) {
-	err := runPolicyPush(nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "not yet available") {
-		t.Errorf("expected not-available error, got %v", err)
+func TestPolicyPushRemoved(t *testing.T) {
+	for _, c := range policyCmd.Commands() {
+		if c.Name() == "push" {
+			t.Error("stub 'policy push' command should not be registered")
+		}
 	}
 }
 

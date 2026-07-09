@@ -1,0 +1,16 @@
+{
+  "kind": "test-set-advanced",
+  "metadata": {
+    "name": "well-formed-deployment"
+  },
+  "spec": {
+    "ports": [80, 443, 8080],
+    "containers": [
+      {"name": "app"},
+      {"name": "sidecar"}
+    ],
+    "priorities": [1, 2, 3],
+    "regions": ["us-east-1", "eu-west-1", "ap-south-1"],
+    "zones": ["zone-a", "zone-b"]
+  }
+}

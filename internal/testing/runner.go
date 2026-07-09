@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/cuecontext"
+	"go.uber.org/zap"
+
+	"github.com/infrashift/garmr/internal/engine"
 )
 
 // TestSuite represents a collection of policy tests.
@@ -138,46 +140,41 @@ type SuiteResult struct {
 	Results  []TestResult  `json:"results"`
 }
 
-// Runner executes policy tests.
+// Runner executes policy tests against the real evaluation engine, so test
+// results reflect exactly what the server would decide.
 type Runner struct {
-	ctx      *cue.Context
-	policies map[string]cue.Value
+	eng *engine.Engine
+	// suiteCtx compiles test-suite CUE sources; suite data is decoded to Go
+	// values before any evaluation, so it never mixes with engine contexts.
+	suiteCtx *cue.Context
 	verbose  bool
 }
 
 // NewRunner creates a new test runner.
-func NewRunner(verbose bool) *Runner {
-	return &Runner{
-		ctx:      cuecontext.New(),
-		policies: make(map[string]cue.Value),
-		verbose:  verbose,
-	}
-}
-
-// LoadPolicy loads a policy for testing.
-func (r *Runner) LoadPolicy(name string, source string) error {
-	value := r.ctx.CompileString(source, cue.Filename(name+".cue"))
-	if value.Err() != nil {
-		return fmt.Errorf("compiling policy: %w", value.Err())
-	}
-	r.policies[name] = value
-	return nil
-}
-
-// LoadPolicyFile loads a policy from a file.
-func (r *Runner) LoadPolicyFile(path string) error {
-	content, err := os.ReadFile(path)
+func NewRunner(verbose bool) (*Runner, error) {
+	eng, err := engine.NewEngine(zap.NewNop())
 	if err != nil {
-		return fmt.Errorf("reading file: %w", err)
+		return nil, fmt.Errorf("creating engine: %w", err)
 	}
+	return &Runner{
+		eng:      eng,
+		suiteCtx: cuecontext.New(),
+		verbose:  verbose,
+	}, nil
+}
 
-	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	return r.LoadPolicy(name, string(content))
+// LoadPolicyFile loads every policy declared in a CUE policy file (the same
+// on-disk format the server's policy directory uses).
+func (r *Runner) LoadPolicyFile(path string) error {
+	if _, err := r.eng.LoadPoliciesFromFile(context.Background(), path); err != nil {
+		return err
+	}
+	return nil
 }
 
 // LoadTestSuite loads a test suite from CUE source.
 func (r *Runner) LoadTestSuite(source string) (*TestSuite, error) {
-	value := r.ctx.CompileString(source)
+	value := r.suiteCtx.CompileString(source)
 	if value.Err() != nil {
 		return nil, fmt.Errorf("compiling test suite: %w", value.Err())
 	}
@@ -334,17 +331,17 @@ func (r *Runner) RunTest(ctx context.Context, policyName string, tc TestCase) Te
 		return result
 	}
 
-	// Get policy
-	policy, exists := r.policies[policyName]
-	if !exists {
+	// Resolve the policy under test (by name, or namespace/name)
+	namespace, name, err := r.resolvePolicy(policyName)
+	if err != nil {
 		result.Passed = false
-		result.Failures = append(result.Failures, fmt.Sprintf("policy not loaded: %s", policyName))
+		result.Failures = append(result.Failures, err.Error())
 		result.Duration = time.Since(start)
 		return result
 	}
 
-	// Evaluate policy
-	actual, evalErr := r.evaluate(ctx, policy, tc.Input, tc.Context)
+	// Evaluate through the real engine
+	actual, evalErr := r.evaluate(ctx, namespace, name, tc.Input)
 	result.Actual = actual
 
 	// Check expectations
@@ -402,51 +399,64 @@ func (r *Runner) RunTest(ctx context.Context, policyName string, tc TestCase) Te
 	return result
 }
 
-func (r *Runner) evaluate(ctx context.Context, policy cue.Value, input map[string]interface{}, evalCtx map[string]interface{}) (*ActualResult, error) {
+// resolvePolicy maps a suite's policy reference to a loaded namespace/name.
+// Accepts a bare metadata.name (unique across loaded namespaces) or the
+// qualified "namespace/name" form.
+func (r *Runner) resolvePolicy(policyName string) (namespace, name string, err error) {
+	if ns, n, ok := strings.Cut(policyName, "/"); ok {
+		if _, err := r.eng.GetPolicy(ns, n); err != nil {
+			return "", "", fmt.Errorf("policy not loaded: %s", policyName)
+		}
+		return ns, n, nil
+	}
+
+	var matches []string
+	for _, p := range r.eng.ListPolicies("") {
+		if p.Name == policyName {
+			matches = append(matches, p.Namespace)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", "", fmt.Errorf("policy not loaded: %s", policyName)
+	case 1:
+		return matches[0], policyName, nil
+	default:
+		return "", "", fmt.Errorf("policy name %q is ambiguous (namespaces: %s); use \"namespace/name\"",
+			policyName, strings.Join(matches, ", "))
+	}
+}
+
+// evaluate runs the input through the engine against exactly the policy
+// under test and maps the response to the test-facing result shape. Failed
+// rules become violations; if the policy's target does not match the input,
+// the engine's fail-closed no-match result surfaces as a violation whose
+// message explains the mismatch.
+func (r *Runner) evaluate(ctx context.Context, namespace, name string, input map[string]interface{}) (*ActualResult, error) {
 	result := &ActualResult{
 		Decision: "allow", // Default
 	}
 
-	// Encode input
-	inputValue := r.ctx.Encode(input)
-	if inputValue.Err() != nil {
-		result.Error = inputValue.Err().Error()
-		return result, inputValue.Err()
+	resp, err := r.eng.Evaluate(ctx, &engine.EvaluateRequest{
+		Input:     input,
+		Policies:  []string{name},
+		Namespace: namespace,
+	})
+	if err != nil {
+		result.Error = err.Error()
+		return result, err
 	}
 
-	// Unify with policy
-	unified := policy.FillPath(cue.ParsePath("input"), inputValue)
-	if unified.Err() != nil {
-		result.Error = unified.Err().Error()
-		return result, nil // Not an error for testing purposes
-	}
-
-	// Extract decision
-	if decision := unified.LookupPath(cue.ParsePath("decision")); decision.Exists() {
-		result.Decision, _ = decision.String()
-	}
-
-	// Extract violations
-	if violations := unified.LookupPath(cue.ParsePath("violations")); violations.Exists() {
-		iter, _ := violations.List()
-		for iter.Next() {
-			v := Violation{}
-			if id := iter.Value().LookupPath(cue.ParsePath("id")); id.Exists() {
-				v.ID, _ = id.String()
-			}
-			if sev := iter.Value().LookupPath(cue.ParsePath("severity")); sev.Exists() {
-				v.Severity, _ = sev.String()
-			}
-			if msg := iter.Value().LookupPath(cue.ParsePath("message")); msg.Exists() {
-				v.Message, _ = msg.String()
-			}
-			result.Violations = append(result.Violations, v)
+	result.Decision = string(resp.Decision)
+	for _, rr := range resp.Results {
+		if rr.Passed {
+			continue
 		}
-	}
-
-	// Infer decision from violations if not explicit
-	if result.Decision == "allow" && len(result.Violations) > 0 {
-		result.Decision = "deny"
+		result.Violations = append(result.Violations, Violation{
+			ID:       rr.RuleID,
+			Severity: string(rr.Severity),
+			Message:  rr.Message,
+		})
 	}
 
 	return result, nil

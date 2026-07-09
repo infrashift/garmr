@@ -347,7 +347,7 @@ func TestClient_ReloadPolicies(t *testing.T) {
 			"success":         true,
 			"policies_loaded": 5,
 			"reload_time_ms":  42,
-			"policy_dir":      "/etc/garmr/policies",
+			"storage_type":    "filesystem",
 		})
 	}))
 	defer server.Close()
@@ -362,6 +362,9 @@ func TestClient_ReloadPolicies(t *testing.T) {
 	}
 	if result.PoliciesLoaded != 5 {
 		t.Errorf("expected 5 policies loaded, got %d", result.PoliciesLoaded)
+	}
+	if result.StorageType != "filesystem" {
+		t.Errorf("expected storage_type=filesystem, got %q", result.StorageType)
 	}
 }
 

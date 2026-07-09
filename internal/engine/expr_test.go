@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -315,6 +316,159 @@ func TestEvaluate_ForEach(t *testing.T) {
 	})
 	if resp.Decision != DecisionAllow {
 		t.Errorf("expected allow, got %s", resp.Decision)
+	}
+}
+
+// TestEvaluate_ForEach_AliasCollision covers inputs that already carry a
+// top-level field with the same name as the forEach alias: the element
+// binding must shadow the input's own field (the FillPath fast path cannot
+// do this, so this exercises the rebuild fallback).
+func TestEvaluate_ForEach_AliasCollision(t *testing.T) {
+	source := makePolicy("foreach-collision", "default", "alias collision",
+		`{
+			id: "r1"
+			description: "all entries must be enabled"
+			severity: "high"
+			expr: {forEach: {
+				path: "entries"
+				as: "item"
+				condition: {match: {path: "item.enabled", equals: true}}
+			}}
+			message: "all entries must be enabled"
+		}`,
+		"deny", "")
+	eng := loadTestPolicy(t, "foreach-collision", "default", source)
+
+	// The input's own "item" field would fail the condition; the bound
+	// array elements pass. If the alias didn't shadow it, this would deny.
+	resp, err := eng.Evaluate(context.Background(), &EvaluateRequest{
+		Input: map[string]any{
+			"kind": "Config",
+			"item": map[string]any{"enabled": false},
+			"entries": []any{
+				map[string]any{"enabled": true},
+				map[string]any{"enabled": true},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("evaluate failed: %v", err)
+	}
+	if resp.Decision != DecisionAllow {
+		t.Errorf("expected alias to shadow input field (allow), got %s", resp.Decision)
+	}
+}
+
+// TestEvaluate_ForEach_Nested exercises a forEach inside a forEach: the
+// inner iteration re-binds "_index", which forces the rebuild fallback and
+// must not corrupt the outer binding.
+func TestEvaluate_ForEach_Nested(t *testing.T) {
+	source := makePolicy("foreach-nested", "default", "nested forEach",
+		`{
+			id: "r1"
+			description: "every container port must be above 1024"
+			severity: "high"
+			expr: {forEach: {
+				path: "spec.containers"
+				as: "container"
+				condition: {forEach: {
+					path: "container.ports"
+					as: "port"
+					condition: {match: {path: "port.number", greaterThan: 1024}}
+				}}
+			}}
+			message: "privileged ports are not allowed"
+		}`,
+		"deny", "")
+	eng := loadTestPolicy(t, "foreach-nested", "default", source)
+
+	makeInput := func(sidecarPort int) map[string]any {
+		return map[string]any{
+			"kind": "Pod",
+			"spec": map[string]any{
+				"containers": []any{
+					map[string]any{"name": "app", "ports": []any{
+						map[string]any{"number": 8080},
+						map[string]any{"number": 9090},
+					}},
+					map[string]any{"name": "sidecar", "ports": []any{
+						map[string]any{"number": sidecarPort},
+					}},
+				},
+			},
+		}
+	}
+
+	resp, err := eng.Evaluate(context.Background(), &EvaluateRequest{Input: makeInput(15021)})
+	if err != nil {
+		t.Fatalf("evaluate failed: %v", err)
+	}
+	if resp.Decision != DecisionAllow {
+		t.Errorf("expected allow for unprivileged ports, got %s", resp.Decision)
+	}
+
+	resp, err = eng.Evaluate(context.Background(), &EvaluateRequest{Input: makeInput(80)})
+	if err != nil {
+		t.Fatalf("evaluate failed: %v", err)
+	}
+	if resp.Decision != DecisionDeny {
+		t.Errorf("expected deny for privileged port, got %s", resp.Decision)
+	}
+}
+
+// BenchmarkForEach_LargeInput measures forEach cost on a large input. The
+// "fastpath" case grafts elements via FillPath; the "fallback" case forces
+// the decode/re-encode rebuild (the pre-optimization behavior) via an alias
+// collision, so the two cases directly compare the old and new paths.
+func BenchmarkForEach_LargeInput(b *testing.B) {
+	source := makePolicy("foreach-bench", "default", "bench",
+		`{
+			id: "r1"
+			description: "all entries enabled"
+			severity: "low"
+			expr: {forEach: {
+				path: "entries"
+				as: "entry"
+				condition: {match: {path: "entry.enabled", equals: true}}
+			}}
+		}`,
+		"deny", "")
+
+	eng, err := NewEngine(nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := eng.LoadPolicy(context.Background(), "foreach-bench", "default", source); err != nil {
+		b.Fatal(err)
+	}
+
+	// Large input: 200 padding objects plus 50 iterated elements.
+	makeInput := func(collide bool) map[string]any {
+		padding := make(map[string]any, 200)
+		for i := 0; i < 200; i++ {
+			padding[fmt.Sprintf("key%d", i)] = map[string]any{"a": i, "b": "some padding value"}
+		}
+		entries := make([]any, 50)
+		for i := range entries {
+			entries[i] = map[string]any{"enabled": true}
+		}
+		input := map[string]any{"kind": "Big", "padding": padding, "entries": entries}
+		if collide {
+			input["entry"] = "collides with alias"
+		}
+		return input
+	}
+
+	for name, collide := range map[string]bool{"fastpath": false, "fallback": true} {
+		b.Run(name, func(b *testing.B) {
+			input := makeInput(collide)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := eng.Evaluate(context.Background(), &EvaluateRequest{Input: input}); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
 
@@ -1156,8 +1310,15 @@ func TestEvaluate_Compare_NotEqual(t *testing.T) {
 // --- compareDatetime ---
 
 func TestCompareDatetime(t *testing.T) {
-	r := compareDatetime("2024-01-15T12:00:00Z", "2024-01-14T12:00:00Z")
+	r, err := compareDatetime("2024-01-15T12:00:00Z", "2024-01-14T12:00:00Z")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if r <= 0 {
 		t.Error("expected 2024-01-15 to be after 2024-01-14")
+	}
+
+	if _, err := compareDatetime("not-a-date", "2024-01-14T12:00:00Z"); err == nil {
+		t.Error("expected error for unparseable datetime")
 	}
 }

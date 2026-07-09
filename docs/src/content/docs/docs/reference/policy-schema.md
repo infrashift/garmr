@@ -10,7 +10,7 @@ Complete reference for Garmr condition operators with CLI and API examples.
 
 ## Overview
 
-Garmr supports 25+ condition operators organized into:
+Garmr supports 20+ condition operators organized into:
 
 - **Condition Operators**: Basic operations (exists, equals, comparison, string, set, logical)
 - **Advanced Operators**: Complex operations (forEach, length, semver, datetime, compare)
@@ -86,6 +86,8 @@ Rules specify severity to prioritize violations:
 
 ## Condition Operators
 
+Note: several example policies in the `condition-operators` namespace target all kinds (`*`), so an evaluation against that namespace can run multiple policies at once. The expected decisions below describe the rules of the operator being illustrated.
+
 ### exists / absent
 
 Validates field presence or absence.
@@ -104,30 +106,13 @@ expr: match: {
 }
 ```
 
-**Test Data (JSON):**
-- Pass: `test-data/condition-operators/exists-pass.json`
-- Fail: `test-data/condition-operators/exists-fail.json`
-
-**Test Data (YAML):**
-- Pass: `test-data/condition-operators/exists-pass.yaml`
-- Fail: `test-data/condition-operators/exists-fail.yaml`
-
-**CLI (JSON):**
+**CLI:**
 ```bash
-# Should ALLOW (all required fields present)
-garmr eval --input test-data/condition-operators/exists-pass.json -n condition-operators
+# Should ALLOW (required field present)
+garmr eval -d '{"kind": "test-exists", "requiredField": "present", "metadata": {"name": "test"}}' -n condition-operators
 
 # Should DENY (missing requiredField)
-garmr eval --input test-data/condition-operators/exists-fail.json -n condition-operators
-```
-
-**CLI (YAML):**
-```bash
-# Should ALLOW (auto-detects YAML from extension)
-garmr eval --input test-data/condition-operators/exists-pass.yaml -n condition-operators
-
-# Explicit format flag
-garmr eval --input test-data/condition-operators/exists-pass.yaml --format yaml -n condition-operators
+garmr eval -d '{"kind": "test-exists", "metadata": {"name": "test"}}' -n condition-operators
 ```
 
 **curl (JSON):**
@@ -178,17 +163,13 @@ expr: match: {
 }
 ```
 
-**Test Data:**
-- Pass: `test-data/condition-operators/equals-pass.json`
-- Fail: `test-data/condition-operators/equals-fail.json`
-
 **CLI:**
 ```bash
 # Should ALLOW
-garmr eval --input test-data/condition-operators/equals-pass.json -n condition-operators
+garmr eval -d '{"kind": "test-equals", "status": "active", "count": 10, "enabled": true}' -n condition-operators
 
-# Should DENY
-garmr eval --input test-data/condition-operators/equals-fail.json -n condition-operators
+# Should DENY (wrong status)
+garmr eval -d '{"kind": "test-equals", "status": "inactive", "count": 10, "enabled": true}' -n condition-operators
 ```
 
 **curl:**
@@ -229,17 +210,13 @@ expr: match: {
 }
 ```
 
-**Test Data:**
-- Pass: `test-data/condition-operators/comparison-pass.json`
-- Fail: `test-data/condition-operators/comparison-fail.json`
-
 **CLI:**
 ```bash
 # Should ALLOW (replicas=3, memory=2048, cpu=4)
-garmr eval --input test-data/condition-operators/comparison-pass.json -n condition-operators
+garmr eval -d '{"kind": "test-comparison", "replicas": 3, "memoryMB": 2048, "cpuCores": 4}' -n condition-operators
 
 # Should DENY (replicas=1, memory=8192, cpu=16)
-garmr eval --input test-data/condition-operators/comparison-fail.json -n condition-operators
+garmr eval -d '{"kind": "test-comparison", "replicas": 1, "memoryMB": 8192, "cpuCores": 16}' -n condition-operators
 ```
 
 **curl:**
@@ -282,17 +259,13 @@ expr: match: {
 }
 ```
 
-**Test Data:**
-- Pass: `test-data/condition-operators/string-pass.json`
-- Fail: `test-data/condition-operators/string-fail.json`
-
 **CLI:**
 ```bash
 # Should ALLOW
-garmr eval --input test-data/condition-operators/string-pass.json -n condition-operators
+garmr eval -d '{"kind": "test-string", "metadata": {"name": "web-api"}, "image": "gcr.io/project/app:v1.0.0", "environment": "production"}' -n condition-operators
 
-# Should DENY (wrong registry, :latest tag, invalid name)
-garmr eval --input test-data/condition-operators/string-fail.json -n condition-operators
+# Should DENY (wrong registry, :latest tag)
+garmr eval -d '{"kind": "test-string", "metadata": {"name": "web-api"}, "image": "docker.io/app:latest", "environment": "production"}' -n condition-operators
 ```
 
 **curl:**
@@ -307,11 +280,9 @@ curl -X POST http://localhost:8080/v1/evaluate \
 
 ### Set Operators
 
-Set membership and validation: `in`, `notIn`, `unique`, `uniqueBy`, `sorted`, `containsAll`, `subsetOf`.
+Set membership and array validation: `in`, `notIn`, `unique`, `uniqueBy`, `sorted`, `containsAll`, `subsetOf`.
 
 **Policy:** `example-policies/condition-operators/set.cue`
-
-#### Basic Set Membership
 
 ```cue
 expr: match: {
@@ -325,17 +296,13 @@ expr: match: {
 }
 ```
 
-**Test Data:**
-- Pass: `test-data/condition-operators/set-pass.json`
-- Fail: `test-data/condition-operators/set-fail.json`
-
 **CLI:**
 ```bash
-# Should ALLOW (production, us-east-1, premium)
-garmr eval --input test-data/condition-operators/set-pass.json -n condition-operators
+# Should ALLOW (production, us-east-1)
+garmr eval -d '{"kind": "test-set", "environment": "production", "region": "us-east-1", "tier": "premium"}' -n condition-operators
 
-# Should DENY (test environment, restricted region)
-garmr eval --input test-data/condition-operators/set-fail.json -n condition-operators
+# Should DENY (unknown environment)
+garmr eval -d '{"kind": "test-set", "environment": "test", "region": "us-east-1", "tier": "premium"}' -n condition-operators
 ```
 
 **curl:**
@@ -348,6 +315,13 @@ curl -X POST http://localhost:8080/v1/evaluate \
 
 #### Advanced Set Operators
 
+Array validation operators. Element equality is numeric-aware (`1` and
+`1.0` are the same value), and a non-array value at the path fails the
+rule with a diagnostic.
+
+**Policy:** `example-policies/condition-operators/set.cue` (the
+`set-advanced` policy, targeting `kind: "test-set-advanced"`)
+
 ##### unique / uniqueBy
 
 Validates no duplicate values in arrays.
@@ -359,12 +333,15 @@ expr: match: {
     unique: true
 }
 
-// Array of objects - no duplicates by field
+// Array of objects - no duplicates by field (dot-notation paths supported)
 expr: match: {
     path:     "spec.containers"
     uniqueBy: "name"
 }
 ```
+
+An element missing the `uniqueBy` field fails the rule. `unique: false`
+places no constraint.
 
 **Use Cases:**
 - No duplicate port numbers in a service
@@ -373,7 +350,9 @@ expr: match: {
 
 ##### sorted
 
-Validates array is in sorted order.
+Validates array is in sorted order (`"asc"` or `"desc"`). Equal neighbors
+are allowed. Elements are compared numerically when both are numbers,
+otherwise as strings; arrays of objects are not orderable and fail the rule.
 
 ```cue
 // Ascending order
@@ -411,7 +390,8 @@ expr: match: {
 
 ##### subsetOf
 
-Validates all array values are from an approved list (subset check).
+Validates all array values are from an approved list (subset check). An
+empty array passes.
 
 ```cue
 expr: match: {
@@ -427,16 +407,20 @@ expr: match: {
 
 #### Advanced Set Test Data
 
-- Pass: `test-data/condition-operators/set-advanced-pass.json`
-- Fail: `test-data/condition-operators/set-advanced-fail.json`
+- Pass: `testdata/condition-operators/set-advanced-pass.json`
+- Fail: `testdata/condition-operators/set-advanced-fail.json`
+
+The `condition-operators` namespace contains several wildcard-target
+policies, so evaluate these fixtures against the `set-advanced` policy
+specifically with `-p`:
 
 **CLI:**
 ```bash
-# Should ALLOW (unique ports, unique container names, sorted priorities, required regions, valid zones)
-garmr eval --input test-data/condition-operators/set-advanced-pass.json -n condition-operators
+# Should ALLOW (unique ports and names, sorted priorities, required regions, approved zones)
+garmr eval --input testdata/condition-operators/set-advanced-pass.json -n condition-operators -p set-advanced
 
-# Should DENY (duplicate ports, duplicate container names, unsorted, missing regions, invalid zones)
-garmr eval --input test-data/condition-operators/set-advanced-fail.json -n condition-operators
+# Should DENY (duplicate ports and names, unsorted priorities, missing region, invalid zone)
+garmr eval --input testdata/condition-operators/set-advanced-fail.json -n condition-operators -p set-advanced
 ```
 
 **curl:**
@@ -455,24 +439,8 @@ curl -X POST http://localhost:8080/v1/evaluate \
         "zones": ["zone-a"]
       }
     },
-    "namespace": "condition-operators"
-  }'
-
-# Test containsAll - should DENY (missing eu-west-1)
-curl -X POST http://localhost:8080/v1/evaluate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "input": {
-      "kind": "test-set-advanced",
-      "spec": {
-        "ports": [80, 443],
-        "containers": [{"name": "app"}],
-        "priorities": [1, 2],
-        "regions": ["us-west-2"],
-        "zones": ["zone-a"]
-      }
-    },
-    "namespace": "condition-operators"
+    "namespace": "condition-operators",
+    "policies": ["set-advanced"]
   }'
 ```
 
@@ -514,17 +482,13 @@ expr: {
 }
 ```
 
-**Test Data:**
-- Pass: `test-data/condition-operators/logical-pass.json`
-- Fail: `test-data/condition-operators/logical-fail.json`
-
 **CLI:**
 ```bash
 # Should ALLOW
-garmr eval --input test-data/condition-operators/logical-pass.json -n condition-operators
+garmr eval -d '{"kind": "test-logical", "name": "app", "version": "1.0.0", "environment": "production", "debug": false, "contact": {"email": "team@example.com"}}' -n condition-operators
 
 # Should DENY (missing version, no contact, debug in prod)
-garmr eval --input test-data/condition-operators/logical-fail.json -n condition-operators
+garmr eval -d '{"kind": "test-logical", "name": "app", "environment": "production", "debug": true}' -n condition-operators
 ```
 
 **curl:**
@@ -538,6 +502,8 @@ curl -X POST http://localhost:8080/v1/evaluate \
 ---
 
 ## Advanced Operators
+
+Note: the example policies in the `advanced-operators` namespace mostly target all kinds (`*`), so an evaluation against that namespace runs every policy in it — expect results from rules beyond the operator being illustrated. Rules whose fields are missing from the input fail closed.
 
 ### forEach
 
@@ -570,26 +536,13 @@ expr: {
 | `allowEmpty` | bool | Pass if array is empty |
 | `condition` | object | Condition to evaluate per item |
 
-**Test Data:**
-- Pass: `test-data/advanced-operators/foreach-pass.json`
-- Fail: `test-data/advanced-operators/foreach-fail.json`
-
 **CLI:**
 ```bash
-# Should ALLOW (all containers have limits, approved registries, not privileged)
-garmr eval --input test-data/advanced-operators/foreach-pass.json -n advanced-operators
+# All containers have limits - forEach rules FE-001 pass
+garmr eval -d '{"kind": "Pod", "spec": {"containers": [{"name": "app", "image": "registry.corp.example.com/app:v1", "resources": {"cpuLimit": "500m", "memoryLimit": "512Mi"}}]}}' -n advanced-operators
 
-# Should DENY (missing limits, untrusted registry, privileged)
-garmr eval --input test-data/advanced-operators/foreach-fail.json -n advanced-operators
-```
-
-**curl:**
-```bash
-# Should DENY (violations)
-curl -X POST http://localhost:8080/v1/evaluate \
-  -H "Content-Type: application/json" \
-  -d @test-data/advanced-operators/foreach-fail.json \
-  | jq '.decision, .results[].message'
+# Container missing limits - forEach rules fail
+garmr eval -d '{"kind": "Pod", "spec": {"containers": [{"name": "app", "image": "registry.corp.example.com/app:v1"}]}}' -n advanced-operators
 ```
 
 ---
@@ -619,17 +572,13 @@ expr: match: {
 
 **Operators:** `equals`, `greaterThan`, `greaterThanOrEqual`, `lessThan`, `lessThanOrEqual`, `min`, `max`
 
-**Test Data:**
-- Pass: `test-data/advanced-operators/length-pass.json`
-- Fail: `test-data/advanced-operators/length-fail.json`
-
 **CLI:**
 ```bash
-# Should WARN (enforcement: warn) - passes with warnings
-garmr eval --input test-data/advanced-operators/length-pass.json -n advanced-operators
+# Name within limits, at least one tag - length rules pass
+garmr eval -d '{"kind": "test-length", "metadata": {"name": "web-api", "tags": ["prod"]}}' -n advanced-operators
 
-# Should WARN with violations (name too short, no tags)
-garmr eval --input test-data/advanced-operators/length-fail.json -n advanced-operators
+# Length violations (name too short, no tags)
+garmr eval -d '{"kind": "test-length", "metadata": {"name": "ab", "tags": []}}' -n advanced-operators
 ```
 
 ---
@@ -664,18 +613,16 @@ expr: match: {
 - `~1.2.0` - Same minor version (1.2.x)
 - `>=1.0.0,<2.0.0` - Range
 
-**Test Data:**
-- Pass: `test-data/advanced-operators/semver-pass.json` (version 2.1.5, apiVersion 2.3.0)
-- Fail: `test-data/advanced-operators/semver-fail.json` (version 0.9.0, apiVersion 1.5.0)
-
 **CLI:**
 ```bash
-# Should ALLOW
-garmr eval --input test-data/advanced-operators/semver-pass.json -n advanced-operators
+# Version 2.1.5 satisfies >= 2.0.0 - semver rules pass
+garmr eval -d '{"kind": "test-semver", "spec": {"version": "2.1.5"}}' -n advanced-operators
 
-# Should DENY (version < 1.0.0, apiVersion not 2.x)
-garmr eval --input test-data/advanced-operators/semver-fail.json -n advanced-operators
+# Version 0.9.0 fails >= 2.0.0 - semver rules fail
+garmr eval -d '{"kind": "test-semver", "spec": {"version": "0.9.0"}}' -n advanced-operators
 ```
+
+Invalid semver values fail the rule closed (with a diagnostic message) — a malformed version string never parses as `0.0.0`.
 
 ---
 
@@ -710,17 +657,15 @@ expr: match: {
 
 **Supported Formats:** RFC3339, ISO8601, date only (YYYY-MM-DD), `now`
 
-**Test Data:**
-- Pass: `test-data/advanced-operators/datetime-pass.json` (expires 2026)
-- Fail: `test-data/advanced-operators/datetime-fail.json` (expired 2024)
+Invalid datetime values fail the rule closed with a diagnostic message.
 
 **CLI:**
 ```bash
-# Should ALLOW (certificate valid until 2026)
-garmr eval --input test-data/advanced-operators/datetime-pass.json -n advanced-operators
+# Certificate not yet expired - datetime rules pass
+garmr eval -d '{"kind": "test-datetime", "spec": {"certificate": {"notAfter": "2030-01-01T00:00:00Z"}}}' -n advanced-operators
 
-# Should DENY (certificate expired)
-garmr eval --input test-data/advanced-operators/datetime-fail.json -n advanced-operators
+# Certificate expired - datetime rules fail
+garmr eval -d '{"kind": "test-datetime", "spec": {"certificate": {"notAfter": "2024-01-01T00:00:00Z"}}}' -n advanced-operators
 ```
 
 ---
@@ -756,17 +701,18 @@ expr: compare: {
 - Semver: `semverGt`, `semverGte`, `semverLt`, `semverLte`, `semverEq`
 - Datetime: `after`, `before`, `afterOrEqual`, `beforeOrEqual`
 
+Non-numeric operands to numeric comparisons, and unknown compare operators, fail the rule closed with a diagnostic message.
+
 **Test Data:**
-- Pass: `test-data/advanced-operators/compare-pass.json` (minReplicas < maxReplicas)
-- Fail: `test-data/advanced-operators/compare-fail.json` (minReplicas > maxReplicas)
+- Fail: `testdata/advanced-operators/compare-fail.yaml` (minReplicas > maxReplicas)
 
 **CLI:**
 ```bash
-# Should ALLOW (minReplicas=2, maxReplicas=10)
-garmr eval --input test-data/advanced-operators/compare-pass.json -n advanced-operators
+# maxReplicas > minReplicas - compare rule CMP-101 passes
+garmr eval -d '{"kind": "test-compare", "spec": {"autoscaling": {"minReplicas": 2, "maxReplicas": 10}}}' -n advanced-operators
 
-# Should DENY (minReplicas=10, maxReplicas=5)
-garmr eval --input test-data/advanced-operators/compare-fail.json -n advanced-operators
+# Failing input from the repo test data
+garmr eval --input testdata/advanced-operators/compare-fail.yaml -n advanced-operators
 ```
 
 **curl:**
@@ -826,15 +772,12 @@ myPolicy: {
 # Start server
 make run
 
-# Test all condition operators
-for f in test-data/condition-operators/*.json; do
-  echo "=== $f ==="
-  garmr eval --input "$f" -n condition-operators -o json | jq '{decision, violations: [.results[] | select(.passed==false) | .rule_id]}'
-done
-
-# Test all advanced operators
-for f in test-data/advanced-operators/*.json; do
+# Evaluate the provided operator test inputs
+for f in testdata/advanced-operators/*; do
   echo "=== $f ==="
   garmr eval --input "$f" -n advanced-operators -o json | jq '{decision, violations: [.results[] | select(.passed==false) | .rule_id]}'
 done
+
+# Or run the policies' own test suites locally (no server needed)
+garmr test ./example-policies --recursive
 ```

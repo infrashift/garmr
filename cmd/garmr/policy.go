@@ -62,7 +62,29 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	strict, _ := cmd.Flags().GetBool("strict")
 	hasErrors := false
 
-	for _, file := range args {
+	// Expand directory arguments into the .cue files they contain
+	var files []string
+	for _, arg := range args {
+		info, err := os.Stat(arg)
+		if err == nil && info.IsDir() {
+			expanded, err := expandPolicyPaths(arg, true)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error expanding %s: %v\n", arg, err)
+				hasErrors = true
+				continue
+			}
+			if len(expanded) == 0 {
+				fmt.Fprintf(os.Stderr, "No .cue files found in %s\n", arg)
+				hasErrors = true
+				continue
+			}
+			files = append(files, expanded...)
+			continue
+		}
+		files = append(files, arg)
+	}
+
+	for _, file := range files {
 		content, err := os.ReadFile(file)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", file, err)
@@ -144,24 +166,6 @@ Examples:
 	RunE: runPolicyGet,
 }
 
-var policyPushCmd = &cobra.Command{
-	Use:   "push [file]",
-	Short: "Push a policy to the server",
-	Long: `Push a policy file to the Garmr server.
-
-Examples:
-  # Push a policy
-  garmr policy push policy.cue
-
-  # Push with explicit name and namespace
-  garmr policy push policy.cue --name my-policy --namespace security
-
-  # Validate only (don't actually push)
-  garmr policy push policy.cue --dry-run`,
-	Args: cobra.ExactArgs(1),
-	RunE: runPolicyPush,
-}
-
 var policyDeleteCmd = &cobra.Command{
 	Use:   "delete [name]",
 	Short: "Delete a policy",
@@ -188,7 +192,6 @@ Examples:
 func init() {
 	policyCmd.AddCommand(policyListCmd)
 	policyCmd.AddCommand(policyGetCmd)
-	policyCmd.AddCommand(policyPushCmd)
 	policyCmd.AddCommand(policyDeleteCmd)
 	policyCmd.AddCommand(policyReloadCmd)
 	policyCmd.AddCommand(policyLockCmd)
@@ -201,11 +204,6 @@ func init() {
 
 	// Get flags
 	policyGetCmd.Flags().StringP("namespace", "n", "default", "policy namespace")
-
-	// Push flags
-	policyPushCmd.Flags().StringP("name", "", "", "policy name (default: from file)")
-	policyPushCmd.Flags().StringP("namespace", "n", "default", "policy namespace")
-	policyPushCmd.Flags().Bool("dry-run", false, "validate only")
 
 	// Delete flags
 	policyDeleteCmd.Flags().StringP("namespace", "n", "default", "policy namespace")
@@ -521,6 +519,14 @@ func validateLockFileCmd(policyPath string) error {
 }
 
 func expandPolicyPaths(path string, recursive bool) ([]string, error) {
+	// isPolicyFile reports whether a path is a policy source file: .cue,
+	// but not a lock file and not a *_test.cue test suite.
+	isPolicyFile := func(p string) bool {
+		return strings.HasSuffix(p, ".cue") &&
+			!strings.HasSuffix(p, ".lock") &&
+			!strings.HasSuffix(p, "_test.cue")
+	}
+
 	info, err := os.Stat(path)
 	if err != nil {
 		// Try as glob
@@ -528,7 +534,7 @@ func expandPolicyPaths(path string, recursive bool) ([]string, error) {
 		if len(matches) > 0 {
 			var result []string
 			for _, m := range matches {
-				if strings.HasSuffix(m, ".cue") && !strings.HasSuffix(m, ".lock") {
+				if isPolicyFile(m) {
 					result = append(result, m)
 				}
 			}
@@ -555,7 +561,7 @@ func expandPolicyPaths(path string, recursive bool) ([]string, error) {
 			}
 			return nil
 		}
-		if strings.HasSuffix(p, ".cue") && !strings.HasSuffix(p, ".lock") {
+		if isPolicyFile(p) {
 			files = append(files, p)
 		}
 		return nil
@@ -675,10 +681,6 @@ func runPolicyGet(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runPolicyPush(cmd *cobra.Command, args []string) error {
-	return fmt.Errorf("policy push requires a policy upload API endpoint (not yet available in server)")
-}
-
 func runPolicyDelete(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -751,7 +753,7 @@ func runPolicyReload(cmd *cobra.Command, args []string) error {
 	} else {
 		if result.Success {
 			fmt.Printf("✓ Reloaded %d policies in %dms\n", result.PoliciesLoaded, result.ReloadTimeMs)
-			fmt.Printf("  Policy directory: %s\n", result.PolicyDir)
+			fmt.Printf("  Storage: %s\n", result.StorageType)
 		} else {
 			fmt.Printf("✗ Reload failed: %s\n", result.Error)
 		}

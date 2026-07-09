@@ -144,13 +144,14 @@ func (h *Handler) LivenessHandler() http.HandlerFunc {
 			Version:   h.version,
 		}
 
+		// Headers must be set before WriteHeader or they are dropped
+		w.Header().Set("Content-Type", "application/json")
 		if status == StatusHealthy {
 			w.WriteHeader(http.StatusOK)
 		} else {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}
 }
@@ -164,13 +165,14 @@ func (h *Handler) ReadinessHandler() http.HandlerFunc {
 
 		resp := h.Check(ctx)
 
+		// Headers must be set before WriteHeader or they are dropped
+		w.Header().Set("Content-Type", "application/json")
 		if resp.Status == StatusHealthy {
 			w.WriteHeader(http.StatusOK)
 		} else {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}
 }
@@ -191,10 +193,16 @@ func (h *Handler) DeepHealthHandler() http.HandlerFunc {
 }
 
 // RegisterRoutes registers health endpoints on a mux.
+//
+// /healthz and /livez both serve the cheap cached liveness check — kubelet
+// probes hit these every few seconds, so they must never fan out to storage
+// backends. The comprehensive check (which runs every registered checker,
+// including storage) is served at /health/deep for debugging and monitoring.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/healthz", h.LivenessHandler())
+	mux.HandleFunc("/livez", h.LivenessHandler())
 	mux.HandleFunc("/readyz", h.ReadinessHandler())
-	mux.HandleFunc("/livez", h.DeepHealthHandler())
+	mux.HandleFunc("/health/deep", h.DeepHealthHandler())
 }
 
 // Common health checkers

@@ -602,15 +602,15 @@ func parseK8sQuantity(s string) (float64, error) {
 
 	// Decimal suffixes
 	decimalSuffixes := map[string]float64{
-		"n":  1e-9,
-		"u":  1e-6,
-		"m":  1e-3,
-		"k":  1e3,
-		"M":  1e6,
-		"G":  1e9,
-		"T":  1e12,
-		"P":  1e15,
-		"E":  1e18,
+		"n": 1e-9,
+		"u": 1e-6,
+		"m": 1e-3,
+		"k": 1e3,
+		"M": 1e6,
+		"G": 1e9,
+		"T": 1e12,
+		"P": 1e15,
+		"E": 1e18,
 	}
 
 	// Try binary suffixes first (2-char)
@@ -833,56 +833,11 @@ func builtinSemverCompare(_ context.Context, args ...any) (any, error) {
 		return nil, fmt.Errorf("semver: second argument must be a version string")
 	}
 
-	cmp, err := compareSemverVersions(v1, v2)
+	cmp, err := compareSemver(v1, v2)
 	if err != nil {
 		return nil, err
 	}
 	return int64(cmp), nil
-}
-
-// compareSemver compares two semver strings. Returns -1, 0, or 1.
-func compareSemverVersions(v1, v2 string) (int, error) {
-	p1, err := parseSemverParts(v1)
-	if err != nil {
-		return 0, fmt.Errorf("semver: %w", err)
-	}
-	p2, err := parseSemverParts(v2)
-	if err != nil {
-		return 0, fmt.Errorf("semver: %w", err)
-	}
-
-	for i := 0; i < 3; i++ {
-		if p1[i] < p2[i] {
-			return -1, nil
-		}
-		if p1[i] > p2[i] {
-			return 1, nil
-		}
-	}
-	return 0, nil
-}
-
-func parseSemverParts(v string) ([3]int, error) {
-	v = strings.TrimPrefix(v, "v")
-	// Strip pre-release suffix
-	if idx := strings.IndexByte(v, '-'); idx >= 0 {
-		v = v[:idx]
-	}
-	// Strip build metadata
-	if idx := strings.IndexByte(v, '+'); idx >= 0 {
-		v = v[:idx]
-	}
-
-	parts := strings.Split(v, ".")
-	var result [3]int
-	for i := 0; i < 3 && i < len(parts); i++ {
-		n, err := strconv.Atoi(parts[i])
-		if err != nil {
-			return result, fmt.Errorf("invalid semver: %s", v)
-		}
-		result[i] = n
-	}
-	return result, nil
 }
 
 // ============================================

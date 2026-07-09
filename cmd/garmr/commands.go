@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -12,72 +13,6 @@ import (
 
 	"github.com/infrashift/garmr/internal/client"
 )
-
-// dataCmd manages external data
-var dataCmd = &cobra.Command{
-	Use:   "data",
-	Short: "Manage external data",
-	Long:  `Commands for managing external data used in policy evaluation.`,
-}
-
-var dataPutCmd = &cobra.Command{
-	Use:   "put [path]",
-	Short: "Put data at a path",
-	Long: `Put JSON data at a specified path for use in policy evaluation.
-
-Examples:
-  # Put inline data
-  garmr data put allowed-registries --data '["gcr.io", "docker.io"]'
-
-  # Put data from file
-  garmr data put config/limits --file limits.json`,
-	Args: cobra.ExactArgs(1),
-	RunE: runDataPut,
-}
-
-var dataGetCmd = &cobra.Command{
-	Use:   "get [path]",
-	Short: "Get data at a path",
-	Long: `Get data stored at a specified path.
-
-Examples:
-  garmr data get allowed-registries
-  garmr data get config/limits -o json`,
-	Args: cobra.ExactArgs(1),
-	RunE: runDataGet,
-}
-
-var dataDeleteCmd = &cobra.Command{
-	Use:   "delete [path]",
-	Short: "Delete data at a path",
-	Long: `Delete data at a specified path.
-
-Examples:
-  garmr data delete allowed-registries`,
-	Args: cobra.ExactArgs(1),
-	RunE: runDataDelete,
-}
-
-func init() {
-	dataCmd.AddCommand(dataPutCmd)
-	dataCmd.AddCommand(dataGetCmd)
-	dataCmd.AddCommand(dataDeleteCmd)
-
-	dataPutCmd.Flags().StringP("data", "d", "", "inline JSON data")
-	dataPutCmd.Flags().StringP("file", "f", "", "JSON file")
-}
-
-func runDataPut(cmd *cobra.Command, args []string) error {
-	return fmt.Errorf("data put requires a data storage API endpoint (not yet available in server)")
-}
-
-func runDataGet(cmd *cobra.Command, args []string) error {
-	return fmt.Errorf("data get requires a data storage API endpoint (not yet available in server)")
-}
-
-func runDataDelete(cmd *cobra.Command, args []string) error {
-	return fmt.Errorf("data delete requires a data storage API endpoint (not yet available in server)")
-}
 
 // healthCmd checks server health
 var healthCmd = &cobra.Command{
@@ -179,8 +114,8 @@ var versionCmd = &cobra.Command{
 
 		info := map[string]string{
 			"version":    version,
-			"go_version": "go1.22",
-			"platform":   "linux/amd64",
+			"go_version": runtime.Version(),
+			"platform":   runtime.GOOS + "/" + runtime.GOARCH,
 		}
 
 		if format == "json" {

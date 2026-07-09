@@ -124,18 +124,12 @@ func TestWaitForHealth_EventuallyHealthy(t *testing.T) {
 	})
 }
 
-// --- data stubs (not implemented on server) ---
+// --- removed stub commands stay removed ---
 
-func TestDataCommands_NotImplemented(t *testing.T) {
-	cases := map[string]func(*cobraCmd, []string) error{
-		"put":    runDataPut,
-		"get":    runDataGet,
-		"delete": runDataDelete,
-	}
-	for name, fn := range cases {
-		err := fn(nil, nil)
-		if err == nil || !strings.Contains(err.Error(), "not yet available") {
-			t.Errorf("%s: expected not-available error, got %v", name, err)
+func TestDataCommandRemoved(t *testing.T) {
+	for _, c := range rootCmd.Commands() {
+		if c.Name() == "data" {
+			t.Error("stub 'data' command should not be registered")
 		}
 	}
 }

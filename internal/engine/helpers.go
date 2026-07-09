@@ -80,27 +80,6 @@ func toFloatOk(v any) (float64, bool) {
 	}
 }
 
-// toFloat converts a value to float64 for numeric comparison
-func toFloat(v any) float64 {
-	switch val := v.(type) {
-	case float64:
-		return val
-	case float32:
-		return float64(val)
-	case int:
-		return float64(val)
-	case int64:
-		return float64(val)
-	case int32:
-		return float64(val)
-	case string:
-		f, _ := strconv.ParseFloat(val, 64)
-		return f
-	default:
-		return 0
-	}
-}
-
 // getCompiledRegex returns a compiled regex from the cache, compiling and caching it if needed.
 func (e *Engine) getCompiledRegex(pattern string) (*regexp.Regexp, error) {
 	if cached, ok := e.regexCache.Load(pattern); ok {
@@ -114,34 +93,8 @@ func (e *Engine) getCompiledRegex(pattern string) (*regexp.Regexp, error) {
 	return re, nil
 }
 
-// matchesPattern checks if a value matches a pattern (supports * wildcard).
-// This is a package-level function that does not use the regex cache.
-// Prefer (e *Engine).matchesPatternCached when an engine instance is available.
-func matchesPattern(pattern, value string) bool {
-	// Case-insensitive comparison
-	pattern = strings.ToLower(pattern)
-	value = strings.ToLower(value)
-
-	// Exact match
-	if pattern == value {
-		return true
-	}
-
-	// Wildcard matching
-	if strings.Contains(pattern, "*") {
-		// Convert glob pattern to regex
-		regexPattern := "^" + strings.ReplaceAll(regexp.QuoteMeta(pattern), "\\*", ".*") + "$"
-		re, err := regexp.Compile(regexPattern)
-		if err != nil {
-			return false
-		}
-		return re.MatchString(value)
-	}
-
-	return false
-}
-
-// matchesPatternCached checks if a value matches a pattern using the engine's regex cache.
+// matchesPatternCached checks if a value matches a pattern (supports * wildcard)
+// using the engine's regex cache.
 func (e *Engine) matchesPatternCached(pattern, value string) bool {
 	// Case-insensitive comparison
 	pattern = strings.ToLower(pattern)

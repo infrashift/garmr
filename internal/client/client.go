@@ -306,7 +306,7 @@ type ReloadResult struct {
 	Success        bool   `json:"success"`
 	PoliciesLoaded int    `json:"policies_loaded"`
 	ReloadTimeMs   int64  `json:"reload_time_ms"`
-	PolicyDir      string `json:"policy_dir"`
+	StorageType    string `json:"storage_type"`
 	Error          string `json:"error,omitempty"`
 }
 

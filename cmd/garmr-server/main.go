@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -60,7 +61,6 @@ func init() {
 	// Server flags
 	rootCmd.Flags().String("http-addr", ":8080", "HTTP listen address")
 	rootCmd.Flags().String("policy-dir", "", "directory containing policies")
-	rootCmd.Flags().String("data-dir", "", "directory containing data files")
 
 	// TLS flags
 	rootCmd.Flags().Bool("tls", false, "enable TLS")
@@ -86,7 +86,6 @@ func init() {
 	// Bind to viper
 	viper.BindPFlag("http_addr", rootCmd.Flags().Lookup("http-addr"))
 	viper.BindPFlag("policy_dir", rootCmd.Flags().Lookup("policy-dir"))
-	viper.BindPFlag("data_dir", rootCmd.Flags().Lookup("data-dir"))
 	viper.BindPFlag("tls.enabled", rootCmd.Flags().Lookup("tls"))
 	viper.BindPFlag("tls.cert", rootCmd.Flags().Lookup("tls-cert"))
 	viper.BindPFlag("tls.key", rootCmd.Flags().Lookup("tls-key"))
@@ -159,6 +158,11 @@ func initConfig() {
 	}
 
 	viper.SetEnvPrefix("GARMR")
+	// Map nested config keys to underscore-delimited env vars, e.g.
+	// audit.enabled -> GARMR_AUDIT_ENABLED. Without this replacer the
+	// documented env vars never resolve (audit.enabled would only match
+	// the impossible variable "GARMR_AUDIT.ENABLED").
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	viper.AutomaticEnv()
 
 	if err := viper.ReadInConfig(); err == nil {

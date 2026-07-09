@@ -62,40 +62,24 @@ curl http://localhost:8080/health
 # Evaluate a file
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
-  -d '{"input": '"$(cat testdata/release-input.json)"'}'
+  -d '{"input": '"$(cat testdata/real-world/release-pass.json)"'}'
 
 # Evaluate with namespace filter
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
-  -d '{"input": '"$(cat testdata/release-input.json)"', "namespace": "release"}'
+  -d '{"input": '"$(cat testdata/real-world/release-pass.json)"', "namespace": "release"}'
 
 # Pretty print with jq
 curl -s -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
-  -d '{"input": '"$(cat testdata/release-input.json)"'}' | jq .
-```
-
-### Using the garmr-eval Script
-
-A convenience script is provided:
-
-```bash
-# Make executable
-chmod +x scripts/garmr-eval
-
-# Evaluate
-./scripts/garmr-eval testdata/release-input.json
-
-# With namespace
-./scripts/garmr-eval testdata/release-input.json release
-
-# Custom server
-GARMR_SERVER=http://localhost:8080 ./scripts/garmr-eval testdata/release-input.json
+  -d '{"input": '"$(cat testdata/real-world/release-pass.json)"'}' | jq .
 ```
 
 ### Using the CLI
 
-The `garmr` CLI talks to the server over the REST API. By default it targets `http://localhost:8080`; override with `--server` or the `GARMR_SERVER` environment variable.
+The `garmr` CLI is a thin client over the same REST API — `garmr eval`, `garmr validate`, and the `garmr policy` management subcommands all require a running server. By default the CLI targets `http://localhost:8080`; override with `--server` or the `GARMR_SERVER` environment variable.
+
+Only a few commands run entirely locally without a server: `garmr test`, `garmr docs generate`, and `garmr policy lock`/`validate-lock`/`diff`.
 
 ## Example Test Data
 
@@ -103,7 +87,7 @@ The `release-gate` policy (`example-policies/real-world/release-gate.cue`) targe
 `kind: "Release"` and reads nested fields like `quality.tests.*.passed`,
 `quality.coverage.percentage`, `security.vulnerabilities.*`, `provenance.*`,
 `targetEnvironment`, and `approvals.count`/`approvals.leadApproved`. A passing
-input looks like this — save as `testdata/release-input.json`:
+input is provided at `testdata/real-world/release-pass.json`:
 
 ```json
 {
@@ -161,7 +145,7 @@ Rules within each policy evaluate in priority order:
 
 ```bash
 ./bin/garmr eval --verbose \
-  --input testdata/release-input.json \
+  --input testdata/real-world/release-pass.json \
   --namespace release
 
 # Expected output:
@@ -181,10 +165,10 @@ Rules within each policy evaluate in priority order:
 ### Example: Advisory-only failure → WARN
 
 Coverage below 80% is a quality signal, not a blocker. The input at
-`testdata/release-input-fail-1.yml` only trips `REL-003`:
+`testdata/real-world/release-fail-1.yml` only trips `REL-003`:
 
 ```bash
-./bin/garmr eval --input testdata/release-input-fail-1.yml --namespace release
+./bin/garmr eval --input testdata/real-world/release-fail-1.yml --namespace release
 
 # Decision: ⚠ WARN
 #
@@ -194,7 +178,7 @@ Coverage below 80% is a quality signal, not a blocker. The input at
 ### Example: Critical failure → DENY (all violations reported)
 
 ```bash
-./bin/garmr eval --input testdata/release-input-fail-3.json --namespace release
+./bin/garmr eval --input testdata/real-world/release-fail-3.json --namespace release
 
 # Decision: ✗ DENY
 #
@@ -248,7 +232,7 @@ curl http://localhost:8080/health
 
 ## CI/CD Integration
 
-For more details, see the [CI/CD Integration guide](/garmr/docs/guides/ci-cd-pipeline-integration/).
+For more details, see the [CI/CD Integration guide](/garmr/docs/guides/cicd/).
 
 ### GitHub Actions
 
@@ -258,7 +242,7 @@ For more details, see the [CI/CD Integration guide](/garmr/docs/guides/ci-cd-pip
     ./bin/garmr eval --input deployment.json -o json > result.json
     if [ "$(jq -r '.decision' result.json)" = "deny" ]; then
       echo "Policy violations found:"
-      jq -r '.results[] | select(.passed == false) | "  - [\(.severity)] \(.ruleId): \(.message)"' result.json
+      jq -r '.results[] | select(.passed == false) | "  - [\(.severity)] \(.rule_id): \(.message)"' result.json
       exit 1
     fi
     echo "All policies passed"
@@ -275,26 +259,52 @@ policy-check:
 
 ## Policy Testing
 
-Run policy tests with the `test` command:
+The `garmr test` command (local, no server needed) runs CUE test suites in
+`*_test.cue` files using the same evaluation engine as the server. A suite
+names the policy under test and asserts decisions and violations per input:
+
+```cue
+// my-policy_test.cue (no package clause — the server's policy loader
+// ignores test files)
+policy: "release/release-gate"
+
+tests: [{
+	name: "unapproved production release is denied"
+	input: {
+		kind:              "Release"
+		version:           "v1.2.3"
+		targetEnvironment: "production"
+		// ...
+		approvals: count: 1
+	}
+	expect: {
+		decision: "deny"
+		violations: [{id: "REL-007"}]
+	}
+}]
+```
 
 ```bash
-# Test all policies
-./bin/garmr test --policy-dir ./example-policies
+# Run the repo's example suite
+./bin/garmr test example-policies/real-world/release-gate.cue
 
-# Test specific policy
-./bin/garmr test --policy ./example-policies/real-world/release-gate.cue
+# Discover and run every *_test.cue under a directory
+./bin/garmr test ./example-policies --recursive
 ```
+
+See `example-policies/real-world/release-gate_test.cue` for a complete
+suite, including template inputs and target-mismatch assertions.
 
 ## Generate Documentation
 
-Generate markdown documentation from policies:
+Generate markdown documentation from policies (runs locally, no server needed):
 
 ```bash
-# Generate docs for all policies
-./bin/garmr docs --policy-dir ./example-policies --output-dir ./docs/policies
+# Generate docs for all policies (recursive by default)
+./bin/garmr docs generate ./example-policies --output ./docs/policies
 
-# Generate for specific format
-./bin/garmr docs --policy-dir ./example-policies --format docusaurus --output-dir ./docs
+# Explicit format (only generic-markdown is currently supported)
+./bin/garmr docs generate ./example-policies --format generic-markdown --output ./docs/policies
 ```
 
 ## Configuration File Reference
@@ -307,7 +317,6 @@ http_addr: ":8080"
 
 # Policy loading
 policy_dir: "/policies"
-data_dir: "/data"
 
 # TLS (optional)
 tls:
@@ -340,8 +349,8 @@ lsof -i :8080
 ### Policies not loading
 
 ```bash
-# Check policy syntax
-./bin/garmr validate --policy-dir ./example-policies
+# Check policy syntax (requires a running server; accepts files or directories)
+./bin/garmr validate ./example-policies
 
 # Enable debug logging
 ./bin/garmr-server --log-level debug --log-format console

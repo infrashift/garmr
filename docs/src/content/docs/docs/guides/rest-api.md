@@ -21,25 +21,82 @@ Interactive API documentation is available at:
 - **Swagger UI**: [http://localhost:8080/swagger-ui](http://localhost:8080/swagger-ui)
 - **OpenAPI Spec**: [http://localhost:8080/openapi.json](http://localhost:8080/openapi.json)
 
-The OpenAPI 3.0 specification is embedded in the server binary and also available at:
-- `api/openapi.json` - For external tools and code generation
-- `internal/server/openapi.json` - Source file (embedded at compile time)
+The OpenAPI 3.0 specification is embedded in the server binary (source: `internal/server/openapi.json`) and served at `/openapi.json` — there is no separate spec file to fetch from the repository.
 
 ## Authentication
 
-Currently, no authentication is required. See [Roadmap](/garmr/docs/project/roadmap/) for planned authentication features.
+The server supports optional API-key authentication. It is disabled by default; enable it by starting the server with `--api-key <key>` (config: `auth.api_key`).
+
+When an API key is configured, clients must send it on every request, either:
+
+- In the API key header (default `X-API-Key`, configurable via `--api-key-header` / `auth.api_key_header`):
+
+  ```bash
+  curl -H "X-API-Key: $GARMR_API_KEY" http://localhost:8080/v1/policies
+  ```
+
+- Or as a bearer token:
+
+  ```bash
+  curl -H "Authorization: Bearer $GARMR_API_KEY" http://localhost:8080/v1/policies
+  ```
+
+Requests with a missing or invalid key receive `401 Unauthorized`. Health endpoints (`/health`, `/ready`, `/healthz`, `/readyz`, `/livez`) and `/metrics` are exempt from authentication so probes and scrapers keep working.
+
+Note: the `garmr` CLI does not yet support sending an API key — use the REST API directly against authenticated servers.
 
 ---
 
 ## Endpoints
 
-### Health Check
+### Health Checks
 
-#### GET /health
+#### GET /healthz and GET /livez
 
-Check server health status.
+Cheap liveness probes (cached status, no dependency checks). Use these for Kubernetes liveness probes.
 
 **Response:**
+
+- `200 OK` - Server process is live
+- `503 Service Unavailable` - Server is unhealthy
+
+```bash
+curl http://localhost:8080/healthz
+curl http://localhost:8080/livez
+```
+
+---
+
+#### GET /readyz
+
+Readiness probe — runs the health checks (with a short timeout) to determine whether the server can serve traffic.
+
+**Response:**
+
+- `200 OK` - Server is ready
+- `503 Service Unavailable` - Server is not ready
+
+```bash
+curl http://localhost:8080/readyz
+```
+
+---
+
+#### GET /health/deep
+
+Comprehensive health check, including dependency checks such as the storage backend. Intended for debugging and monitoring, not for probes.
+
+```bash
+curl http://localhost:8080/health/deep
+```
+
+---
+
+#### GET /health and GET /ready (legacy)
+
+Legacy endpoints kept for backwards compatibility.
+
+**GET /health response:**
 
 ```json
 {
@@ -49,27 +106,23 @@ Check server health status.
 }
 ```
 
-**Example:**
+**GET /ready** returns `{"ready": ..., "checks": ...}` with `200 OK` when ready, `503 Service Unavailable` otherwise.
 
 ```bash
 curl http://localhost:8080/health
+curl http://localhost:8080/ready
 ```
 
 ---
 
-#### GET /ready
+### Metrics
 
-Kubernetes-style readiness probe.
+#### GET /metrics
 
-**Response:**
-
-- `200 OK` - Server is ready
-- `503 Service Unavailable` - Server is not ready
-
-**Example:**
+Prometheus metrics endpoint (exempt from authentication).
 
 ```bash
-curl http://localhost:8080/ready
+curl http://localhost:8080/metrics
 ```
 
 ---
@@ -222,15 +275,9 @@ List loaded policies.
     {
       "name": "container-security",
       "namespace": "security",
-      "description": "Container security best practices",
-      "rules_count": 5,
-      "enforcement": "deny",
-      "target": {
-        "resources": ["pod", "deployment"]
-      }
+      "rule_count": 5
     }
-  ],
-  "total": 14
+  ]
 }
 ```
 
@@ -246,6 +293,25 @@ curl http://localhost:8080/v1/policies?namespace=security
 
 ---
 
+#### DELETE /v1/policies
+
+Delete a loaded policy by name and namespace.
+
+**Query Parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `name` | Policy name (required) |
+| `namespace` | Policy namespace |
+
+**Example:**
+
+```bash
+curl -X DELETE "http://localhost:8080/v1/policies?name=container-security&namespace=security"
+```
+
+---
+
 #### POST /v1/policies/reload
 
 Reload policies from disk (hot reload).
@@ -257,7 +323,7 @@ Reload policies from disk (hot reload).
   "success": true,
   "policies_loaded": 14,
   "reload_time_ms": 16,
-  "policy_dir": "./examples"
+  "storage_type": "filesystem"
 }
 ```
 
@@ -299,14 +365,16 @@ Validate a policy without loading it.
   "valid": false,
   "errors": [
     {
-      "line": 5,
-      "column": 10,
-      "message": "undefined field: spec.rulz"
+      "message": "undefined field: spec.rulz",
+      "code": "SCHEMA_ERROR"
     }
   ],
   "warnings": []
 }
 ```
+
+Error objects carry `message` and `code`, plus `line`, `column`, and
+`filename` when position information is available.
 
 **Example:**
 
@@ -350,12 +418,7 @@ All errors return a JSON response:
 ```bash
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
-  -d @testdata/k8s-pod-secure.json
-
-# With wrapper
-curl -X POST http://localhost:8080/v1/evaluate \
-  -H "Content-Type: application/json" \
-  -d "{\"input\": $(cat testdata/k8s-pod-secure.json)}"
+  -d "{\"input\": $(cat testdata/real-world/k8s-pod-security-context-pass.json)}"
 ```
 
 ### Evaluate Insecure Pod
@@ -363,7 +426,7 @@ curl -X POST http://localhost:8080/v1/evaluate \
 ```bash
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
-  -d "{\"input\": $(cat testdata/k8s-pod-insecure.json), \"namespace\": \"security\"}"
+  -d "{\"input\": $(cat testdata/real-world/k8s-pod-security-context-fail.yml | yq -o json), \"namespace\": \"security\"}"
 ```
 
 ### Evaluate Release Artifact
@@ -372,29 +435,7 @@ curl -X POST http://localhost:8080/v1/evaluate \
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
   -H "X-Request-Id: release-v1.2.3" \
-  -d "{\"input\": $(cat testdata/release-input.json), \"namespace\": \"release\"}"
-```
-
-### Evaluate with Semver Policy
-
-```bash
-curl -X POST http://localhost:8080/v1/evaluate \
-  -H "Content-Type: application/json" \
-  -d "{\"input\": $(cat testdata/semver-valid.json), \"namespace\": \"advanced\"}"
-```
-
-### Evaluate Autoscaler (Cross-field)
-
-```bash
-# Valid autoscaler
-curl -X POST http://localhost:8080/v1/evaluate \
-  -H "Content-Type: application/json" \
-  -d "{\"input\": $(cat testdata/autoscaler-valid.json), \"namespace\": \"advanced\"}"
-
-# Invalid autoscaler (minReplicas > maxReplicas)
-curl -X POST http://localhost:8080/v1/evaluate \
-  -H "Content-Type: application/json" \
-  -d "{\"input\": $(cat testdata/autoscaler-invalid.json), \"namespace\": \"advanced\"}"
+  -d "{\"input\": $(cat testdata/real-world/release-pass.json), \"namespace\": \"release\"}"
 ```
 
 ---

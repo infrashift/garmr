@@ -12,7 +12,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// LoadPolicy loads and compiles a policy from CUE source.
+// LoadPolicy loads and compiles a policy from CUE source. The source is
+// compiled into every replica so each replica's context stays self-contained.
 func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -28,53 +29,66 @@ func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string)
 		return fmt.Errorf("%w: namespace %q is reserved for internal use", ErrInvalidPolicy, namespace)
 	}
 
-	// Compile the source
-	val := e.ctx.CompileString(source)
-	if val.Err() != nil {
-		e.obs.Metrics().RecordPolicyLoadError(name, namespace, "compilation")
-		return fmt.Errorf("%w: %v", ErrInvalidPolicy, val.Err())
-	}
+	key := policyKey(namespace, name)
+	hash := sha256.Sum256([]byte(source))
 
-	// Unify with schema to validate
-	unified := val.Unify(e.schema.LookupPath(cue.ParsePath("#Policy")))
-	if unified.Err() != nil {
-		e.obs.Metrics().RecordPolicyLoadError(name, namespace, "compilation")
-		return fmt.Errorf("%w: schema validation failed: %v", ErrInvalidPolicy, unified.Err())
-	}
+	var ruleCount, nsCount int
+	err := e.set.forEachExclusive(func(i int, r *policyReplica) error {
+		compiled, err := e.compilePolicySource(r, name, namespace, source)
+		if err != nil {
+			return err
+		}
+		compiled.LoadedAt = time.Now()
+		compiled.Hash = hex.EncodeToString(hash[:])
+		r.policies[key] = compiled
 
-	// Extract compiled policy
-	compiled, err := e.compilePolicy(unified, name, namespace)
+		if i == 0 {
+			ruleCount = len(compiled.Rules)
+			for _, p := range r.policies {
+				if p.Namespace == namespace {
+					nsCount++
+				}
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		e.obs.Metrics().RecordPolicyLoadError(name, namespace, "compilation")
-		return fmt.Errorf("compiling policy: %w", err)
+		return err
 	}
-
-	compiled.LoadedAt = time.Now()
-
-	// Compute hash
-	h := sha256.Sum256([]byte(source))
-	compiled.Hash = hex.EncodeToString(h[:])
-
-	key := policyKey(namespace, name)
-	e.policies[key] = compiled
 
 	e.logger.Info("policy loaded",
 		zap.String("name", name),
 		zap.String("namespace", namespace),
-		zap.Int("rules", len(compiled.Rules)),
+		zap.Int("rules", ruleCount),
 		zap.Duration("compile_time", time.Since(start)),
 	)
 
 	// Record successful policy load count for this namespace
-	count := 0
-	for _, p := range e.policies {
-		if p.Namespace == namespace {
-			count++
-		}
-	}
-	e.obs.Metrics().SetPoliciesLoaded(namespace, count)
+	e.obs.Metrics().SetPoliciesLoaded(namespace, nsCount)
 
 	return nil
+}
+
+// compilePolicySource compiles and schema-validates CUE source in a replica's
+// context and extracts the compiled policy.
+func (e *Engine) compilePolicySource(r *policyReplica, name, namespace, source string) (*CompiledPolicy, error) {
+	val := r.ctx.CompileString(source)
+	if val.Err() != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidPolicy, val.Err())
+	}
+
+	// Unify with schema to validate
+	unified := val.Unify(r.schema.LookupPath(cue.ParsePath("#Policy")))
+	if unified.Err() != nil {
+		return nil, fmt.Errorf("%w: schema validation failed: %v", ErrInvalidPolicy, unified.Err())
+	}
+
+	compiled, err := e.compilePolicy(unified, name, namespace)
+	if err != nil {
+		return nil, fmt.Errorf("compiling policy: %w", err)
+	}
+	return compiled, nil
 }
 
 // compilePolicy extracts a CompiledPolicy from a validated CUE value.
@@ -82,7 +96,6 @@ func (e *Engine) compilePolicy(val cue.Value, name, namespace string) (*Compiled
 	cp := &CompiledPolicy{
 		Name:      name,
 		Namespace: namespace,
-		Value:     val,
 		// Default evaluation config
 		Evaluation: EvaluationConfig{
 			Order:    EvalOrderPriority, // Default to priority-based ordering
@@ -374,12 +387,29 @@ func (e *Engine) extractResourceSelector(val cue.Value) (ResourceSelector, error
 		}
 	}
 
+	if v := val.LookupPath(cue.ParsePath("namespaces")); v.Exists() {
+		iter, _ := v.List()
+		for iter.Next() {
+			s, _ := iter.Value().String()
+			rs.Namespaces = append(rs.Namespaces, s)
+		}
+	}
+
 	if v := val.LookupPath(cue.ParsePath("labels")); v.Exists() {
 		rs.Labels = make(map[string]string)
 		iter, _ := v.Fields()
 		for iter.Next() {
 			s, _ := iter.Value().String()
 			rs.Labels[iter.Selector().String()] = s
+		}
+	}
+
+	if v := val.LookupPath(cue.ParsePath("annotations")); v.Exists() {
+		rs.Annotations = make(map[string]string)
+		iter, _ := v.Fields()
+		for iter.Next() {
+			s, _ := iter.Value().String()
+			rs.Annotations[iter.Selector().String()] = s
 		}
 	}
 
@@ -444,6 +474,13 @@ func (e *Engine) extractRule(val cue.Value) (CompiledRule, error) {
 	}
 
 	rule.Expression = val.LookupPath(cue.ParsePath("expr"))
+
+	// 'ref' was removed from the policy schema without ever being
+	// implemented. Reject it at compile time so authors find out
+	// immediately instead of via an always-failing rule.
+	if rule.Expression.Exists() && rule.Expression.LookupPath(cue.ParsePath("ref")).Exists() {
+		return rule, fmt.Errorf("rule %s: expr 'ref' is not supported", rule.ID)
+	}
 
 	return rule, nil
 }

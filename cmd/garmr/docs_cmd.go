@@ -33,15 +33,12 @@ var docsGenerateCmd = &cobra.Command{
 Supported output formats:
   - generic-markdown: Standard markdown (default)
 
-Future formats (see ROADMAP.md):
-  - hugo-markdown, astro-markdown, github-markdown, gitlab-markdown, docusaurus-markdown
-
 Examples:
   # Generate docs for all policies in a directory
-  garmr docs generate ./examples --output ./out/docs
+  garmr docs generate ./example-policies --output ./out/docs
 
   # Generate docs with specific format
-  garmr docs generate ./examples --format generic-markdown --output ./docs/policies
+  garmr docs generate ./example-policies --format generic-markdown --output ./out/docs
 
   # Generate recursively
   garmr docs generate ./policies --recursive --output ./docs
@@ -60,7 +57,7 @@ var (
 
 func init() {
 	docsGenerateCmd.Flags().StringVarP(&docsFormat, "format", "f", "generic-markdown",
-		"Output format: generic-markdown, github, hugo, docusaurus")
+		"Output format (only generic-markdown is supported)")
 	docsGenerateCmd.Flags().StringVarP(&docsOutput, "output", "o", "./docs/policies",
 		"Output directory for generated docs")
 	docsGenerateCmd.Flags().BoolVarP(&docsRecursive, "recursive", "r", true,
@@ -100,9 +97,8 @@ type RuleDoc struct {
 func runDocsGenerate(cmd *cobra.Command, args []string) error {
 	inputPath := args[0]
 
-	// Validate format (v1 only supports generic-markdown)
 	if docsFormat != "generic-markdown" {
-		return fmt.Errorf("invalid format: %s (v1 only supports: generic-markdown). See ROADMAP.md for planned formats", docsFormat)
+		return fmt.Errorf("invalid format: %s (supported: generic-markdown)", docsFormat)
 	}
 
 	// Find policy files

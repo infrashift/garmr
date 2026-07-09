@@ -8,27 +8,30 @@ import (
 	"sync"
 
 	"cuelang.org/go/cue"
-	"cuelang.org/go/cue/cuecontext"
 	"go.uber.org/zap"
 
 	"github.com/infrashift/garmr/internal/observability"
 )
 
-// cueCtxKey is a context key for passing pooled CUE contexts through the evaluation chain.
+// cueCtxKey is a context key for passing the checked-out replica's CUE
+// context through the evaluation chain.
 type cueCtxKey struct{}
 
-// withCueContext stores a pooled CUE context in a Go context for use during evaluation.
+// withCueContext stores a replica's CUE context in a Go context for use during evaluation.
 func withCueContext(ctx context.Context, cueCtx *cue.Context) context.Context {
 	return context.WithValue(ctx, cueCtxKey{}, cueCtx)
 }
 
-// getCueContext retrieves the pooled CUE context from a Go context.
-// Falls back to the engine's shared context if not set (for backwards compatibility).
+// getCueContext retrieves the replica's CUE context from a Go context.
+// Evaluate always installs it via withCueContext; any other entry point
+// would mix values across CUE contexts, so fail loudly rather than
+// silently producing wrong decisions.
 func (e *Engine) getCueContext(ctx context.Context) *cue.Context {
-	if cc, ok := ctx.Value(cueCtxKey{}).(*cue.Context); ok {
-		return cc
+	cc, ok := ctx.Value(cueCtxKey{}).(*cue.Context)
+	if !ok {
+		panic("engine: no CUE context on context.Context; evaluation must go through Engine.Evaluate")
 	}
-	return e.ctx
+	return cc
 }
 
 // Reserved identifiers used for the synthetic "no policy matched" result
@@ -41,13 +44,16 @@ const (
 
 // Engine is the core policy evaluation engine.
 type Engine struct {
-	mu       sync.RWMutex
-	ctx      *cue.Context // used only for schema/init operations under write lock
-	ctxPool  *cueContextPool
-	policies map[string]*CompiledPolicy
-	data     cue.Value
-	schema   cue.Value
-	logger   *zap.Logger
+	// mu guards set and requireMatch. Policy mutations additionally
+	// serialize on it so replica sets are never modified concurrently.
+	mu sync.RWMutex
+
+	// set holds the replicated compiled policy state. Each replica owns a
+	// cue.Context and every value compiled in it; evaluations check out a
+	// whole replica so values from different contexts are never mixed.
+	set *policySet
+
+	logger *zap.Logger
 
 	// Builtins for function evaluation
 	builtins map[string]BuiltinFunc
@@ -64,46 +70,19 @@ type Engine struct {
 	requireMatch bool
 }
 
-// cueContextPool provides a pool of CUE contexts for concurrent use.
-// cue.Context is not documented as thread-safe, so each concurrent evaluation
-// borrows its own context from the pool and returns it when done.
-type cueContextPool struct {
-	pool sync.Pool
-}
-
-// newCueContextPool creates a new CUE context pool.
-func newCueContextPool() *cueContextPool {
-	return &cueContextPool{
-		pool: sync.Pool{
-			New: func() any {
-				return cuecontext.New()
-			},
-		},
-	}
-}
-
-// get borrows a CUE context from the pool. Callers must call put() when done.
-func (p *cueContextPool) get() *cue.Context {
-	return p.pool.Get().(*cue.Context)
-}
-
-// put returns a CUE context to the pool for reuse.
-func (p *cueContextPool) put(ctx *cue.Context) {
-	p.pool.Put(ctx)
-}
-
 // NewEngine creates a new policy engine.
 func NewEngine(logger *zap.Logger) (*Engine, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 
-	ctx := cuecontext.New()
+	set, err := newPolicySet(defaultReplicaCount())
+	if err != nil {
+		return nil, fmt.Errorf("loading schema: %w", err)
+	}
 
 	e := &Engine{
-		ctx:          ctx,
-		ctxPool:      newCueContextPool(),
-		policies:     make(map[string]*CompiledPolicy),
+		set:          set,
 		logger:       logger,
 		builtins:     make(map[string]BuiltinFunc),
 		obs:          observability.NewProvider(),
@@ -113,12 +92,14 @@ func NewEngine(logger *zap.Logger) (*Engine, error) {
 	// Register built-in functions
 	e.registerBuiltins()
 
-	// Load the policy schema
-	if err := e.loadSchema(); err != nil {
-		return nil, fmt.Errorf("loading schema: %w", err)
-	}
-
 	return e, nil
+}
+
+// currentSet returns the engine's active policy set.
+func (e *Engine) currentSet() *policySet {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.set
 }
 
 // SetObservability sets the observability provider for the engine.
@@ -136,10 +117,9 @@ func (e *Engine) SetRequireMatch(v bool) {
 	e.requireMatch = v
 }
 
-// loadSchema loads the embedded policy schema.
-func (e *Engine) loadSchema() error {
-	// Schema is embedded or loaded from filesystem
-	schemaSource := `
+// policySchemaSource is the embedded policy schema. Each policy replica
+// compiles its own copy so schema values never cross context boundaries.
+const policySchemaSource = `
 package policy
 
 #Policy: {
@@ -162,7 +142,6 @@ package policy
 	target: #Target
 	rules: [#Rule, ...#Rule]
 	enforcement: #Enforcement
-	requires?: [..._]
 	evaluation?: #EvaluationConfig
 }
 
@@ -178,7 +157,8 @@ package policy
 }
 
 #Target: {
-	resources: [...#ResourceSelector]
+	// A resource is either a kind shorthand ("pod", "*") or a full selector.
+	resources: [...(string | #ResourceSelector)]
 	conditions?: [..._]
 }
 
@@ -221,13 +201,6 @@ package policy
 	ticket?: string
 }
 `
-	e.schema = e.ctx.CompileString(schemaSource)
-	if e.schema.Err() != nil {
-		return fmt.Errorf("compiling schema: %w", e.schema.Err())
-	}
-
-	return nil
-}
 
 // registerBuiltins registers built-in functions.
 func (e *Engine) registerBuiltins() {

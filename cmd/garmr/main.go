@@ -10,7 +10,8 @@ import (
 )
 
 var (
-	version = "0.1.0"
+	// version is injected at build time via -ldflags (see Makefile).
+	version = "dev"
 	cfgFile string
 	osExit  = os.Exit
 )
@@ -46,23 +47,18 @@ func init() {
 	// Global flags
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.garmr.yaml)")
 	rootCmd.PersistentFlags().String("server", "http://localhost:8080", "Garmr server URL")
-	rootCmd.PersistentFlags().Bool("insecure", false, "disable TLS")
-	rootCmd.PersistentFlags().String("tls-cert", "", "TLS certificate file")
 	rootCmd.PersistentFlags().StringP("output", "o", "table", "output format (table, json, yaml)")
 	rootCmd.PersistentFlags().BoolP("quiet", "q", false, "suppress non-essential output")
 	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "show rule details (default: show on fail, hide on pass; use --verbose=false to always hide)")
 
 	// Bind flags to viper
 	viper.BindPFlag("server", rootCmd.PersistentFlags().Lookup("server"))
-	viper.BindPFlag("insecure", rootCmd.PersistentFlags().Lookup("insecure"))
-	viper.BindPFlag("tls-cert", rootCmd.PersistentFlags().Lookup("tls-cert"))
 	viper.BindPFlag("output", rootCmd.PersistentFlags().Lookup("output"))
 
 	// Add subcommands
 	rootCmd.AddCommand(evalCmd)
 	rootCmd.AddCommand(validateCmd)
 	rootCmd.AddCommand(policyCmd)
-	rootCmd.AddCommand(dataCmd)
 	rootCmd.AddCommand(healthCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(docsCmd)

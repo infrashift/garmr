@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"path"
 	"strings"
 	"sync"
@@ -338,6 +339,7 @@ func (b *S3Backend) scanForChanges(ctx context.Context, events chan<- Event, ini
 				select {
 				case events <- Event{Type: EventCreate, Path: file.Path, Timestamp: time.Now()}:
 				default:
+					log.Printf("garmr/storage: s3 event channel full, dropping create event for %s", file.Path)
 				}
 			}
 		} else if oldEtag != file.Checksum {
@@ -345,6 +347,7 @@ func (b *S3Backend) scanForChanges(ctx context.Context, events chan<- Event, ini
 			select {
 			case events <- Event{Type: EventModify, Path: file.Path, Timestamp: time.Now()}:
 			default:
+				log.Printf("garmr/storage: s3 event channel full, dropping modify event for %s", file.Path)
 			}
 		}
 	}
@@ -357,6 +360,7 @@ func (b *S3Backend) scanForChanges(ctx context.Context, events chan<- Event, ini
 				select {
 				case events <- Event{Type: EventDelete, Path: filePath, Timestamp: time.Now()}:
 				default:
+					log.Printf("garmr/storage: s3 event channel full, dropping delete event for %s", filePath)
 				}
 			}
 		}
@@ -427,7 +431,12 @@ func matchS3Pattern(pattern, filePath string) bool {
 				hasSuffix = true
 			} else if !strings.Contains(suffix, "/") {
 				// Simple glob suffix like *.cue — match against filename
-				hasSuffix, _ = path.Match(suffix, path.Base(filePath))
+				var err error
+				hasSuffix, err = path.Match(suffix, path.Base(filePath))
+				if err != nil {
+					log.Printf("garmr/storage: malformed glob pattern %q: %v", pattern, err)
+					return false
+				}
 			} else {
 				hasSuffix = strings.HasSuffix(filePath, suffix)
 			}
@@ -437,7 +446,11 @@ func matchS3Pattern(pattern, filePath string) bool {
 	}
 
 	// Standard glob matching
-	matched, _ := path.Match(pattern, filePath)
+	matched, err := path.Match(pattern, filePath)
+	if err != nil {
+		log.Printf("garmr/storage: malformed glob pattern %q: %v", pattern, err)
+		return false
+	}
 	return matched
 }
 

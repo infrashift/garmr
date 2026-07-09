@@ -12,7 +12,7 @@ This document describes what Garmr can do today and where it's headed.
 
 ### Core Engine
 
-- CUE-based policy engine with 30+ condition operators and built-in functions
+- CUE-based policy engine with 20+ condition operators and built-in functions
 - Three-outcome decisions: pass, fail, warn
 - Fail-fast evaluation, category/tag filtering, exception handling
 - Timeout enforcement and dry-run mode
@@ -49,9 +49,9 @@ This document describes what Garmr can do today and where it's headed.
 
 ### CLI
 
-- Local policy evaluation with `garmr eval`
-- Policy testing framework with `garmr test` (CUE-based test files, TAP/JSON output)
-- Documentation generation with `garmr docs generate` (JSON output)
+- Policy evaluation against a running server with `garmr eval`
+- Policy testing framework with `garmr test` (CUE-based test files, TAP/JSON output; runs locally)
+- Documentation generation with `garmr docs generate` (markdown output; runs locally)
 - Policy reload, listing, and management commands
 
 ### Security & Networking
@@ -66,7 +66,7 @@ This document describes what Garmr can do today and where it's headed.
 
 ### Policy Management
 
-- Target-based policy filtering (kind, apiGroup, labels, namespaces)
+- Target-based policy filtering (kind, apiGroup, names, labels, annotations, namespaces)
 - Namespace-based policy organization
 - Hot reload via API and CLI
 - Lock file support for GitOps workflows

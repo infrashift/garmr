@@ -40,6 +40,16 @@ func makePolicy(name, namespace, description, rules, action, extra string) strin
 	return makePolicyFull(name, namespace, description, rules, action, "", extra)
 }
 
+// newTestEngine creates a fresh engine with a no-op logger.
+func newTestEngine(t *testing.T) *Engine {
+	t.Helper()
+	eng, err := NewEngine(zap.NewNop())
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+	return eng
+}
+
 // loadTestPolicy creates a fresh engine, loads a CUE policy string, and returns the engine.
 func loadTestPolicy(t *testing.T, name, namespace, source string) *Engine {
 	t.Helper()

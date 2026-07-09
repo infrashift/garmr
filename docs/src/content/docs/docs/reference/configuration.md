@@ -8,6 +8,8 @@ sidebar:
 
 Garmr is configured via a YAML configuration file. Copy the example configuration to `config.yaml` and customize it for your environment.
 
+Every setting can also be provided as an environment variable with the `GARMR_` prefix, replacing dots with underscores — for example `GARMR_HTTP_ADDR`, `GARMR_POLICY_DIR`, `GARMR_AUDIT_ENABLED`, `GARMR_AUDIT_PATH`, `GARMR_LOG_LEVEL`.
+
 ## Server Address
 
 The server exposes a REST API on port 8080 by default.
@@ -22,30 +24,25 @@ http_addr: ":8080"
 
 ## Policy Configuration
 
-Specify the directory where Garmr loads policy files (CUE format). An optional data directory can provide external data files for policy evaluation.
+Specify the directory where Garmr loads policy files (CUE format).
 
 ```yaml
 policy_dir: "/etc/garmr/policies"
-# data_dir: "/etc/garmr/data"  # Optional: external data files
 ```
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `policy_dir` | `/etc/garmr/policies` | Root directory for CUE policy files |
-| `data_dir` | _(none)_ | Optional directory for external data files |
+| `policy_dir` | _(none)_ | Root directory for CUE policy files |
 
 ## TLS Configuration
 
-Enable TLS to encrypt traffic between clients and the Garmr server. For mutual TLS (mTLS), provide a CA certificate and set the client authentication mode.
+Enable TLS to encrypt traffic between clients and the Garmr server. Mutual TLS (client certificate authentication) is not currently implemented.
 
 ```yaml
 tls:
   enabled: false
   cert: "/etc/garmr/tls/server.crt"
   key: "/etc/garmr/tls/server.key"
-  # For mTLS (optional)
-  # ca: "/etc/garmr/tls/ca.crt"
-  # client_auth: "require"  # none, request, require
 ```
 
 | Setting | Default | Description |
@@ -53,8 +50,21 @@ tls:
 | `tls.enabled` | `false` | Enable TLS encryption |
 | `tls.cert` | _(none)_ | Path to TLS certificate file |
 | `tls.key` | _(none)_ | Path to TLS private key file |
-| `tls.ca` | _(none)_ | Path to CA certificate for mTLS |
-| `tls.client_auth` | `none` | Client auth mode: `none`, `request`, or `require` |
+
+## Authentication
+
+Optional API-key authentication for the REST API. When `auth.api_key` is set, all requests (except health endpoints and `/metrics`) must present the key in the configured header or as `Authorization: Bearer <key>`.
+
+```yaml
+auth:
+  api_key: ""              # empty = authentication disabled
+  api_key_header: "X-API-Key"
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `auth.api_key` | _(empty — auth disabled)_ | API key clients must present |
+| `auth.api_key_header` | `X-API-Key` | Header name used to read the API key |
 
 ## Logging
 
@@ -112,6 +122,8 @@ audit:
 ## Storage Backend
 
 By default, Garmr uses the filesystem backend powered by the `policy_dir` setting. For shared or cloud-native deployments, you can configure S3 or MinIO as the storage backend.
+
+A misconfigured storage backend is fatal at startup: the server refuses to start rather than silently running without policies.
 
 ### Filesystem (Default)
 
@@ -173,15 +185,17 @@ http_addr: ":8080"
 
 # Policy configuration
 policy_dir: "/etc/garmr/policies"
-# data_dir: "/etc/garmr/data"
 
 # TLS configuration (optional)
 tls:
   enabled: false
   cert: "/etc/garmr/tls/server.crt"
   key: "/etc/garmr/tls/server.key"
-  # ca: "/etc/garmr/tls/ca.crt"
-  # client_auth: "require"
+
+# Authentication (optional)
+# auth:
+#   api_key: "change-me"
+#   api_key_header: "X-API-Key"
 
 # Logging configuration
 log:

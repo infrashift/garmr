@@ -62,8 +62,9 @@ VIOLATIONS=$(echo "$RESULT" | jq -r '.results | length')
 # Evaluate only security policies
 garmr eval --input deployment.json -n security
 
-# Evaluate multiple namespaces
-garmr eval --input deployment.json -n security -n compliance
+# Evaluate multiple namespaces (one invocation per namespace)
+garmr eval --input deployment.json -n security
+garmr eval --input deployment.json -n compliance
 ```
 
 ---
@@ -565,8 +566,8 @@ Generate lock files for change tracking:
 # Generate lock file for a policy
 garmr policy lock policies/security/container-security.cue --version 1.0.0
 
-# Validate lock files in CI
-garmr policy validate-lock --recursive policies/
+# Validate lock files in CI (directories are expanded recursively)
+garmr policy validate-lock policies/
 
 # Check diff
 garmr policy diff policies/security/container-security.cue
@@ -589,13 +590,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Validate lock files
-        run: garmr policy validate-lock --recursive policies/
+        run: garmr policy validate-lock policies/
 
+      # garmr validate is a server-side check: it needs a reachable
+      # Garmr server (set GARMR_SERVER or --server). It accepts
+      # directories directly and expands them recursively.
       - name: Validate policy syntax
-        run: |
-          for file in $(find policies -name "*.cue" ! -name "*.lock"); do
-            garmr validate "$file"
-          done
+        env:
+          GARMR_SERVER: ${{ vars.GARMR_SERVER_URL }}
+        run: garmr validate policies/
 
   deploy:
     needs: validate
@@ -662,17 +665,6 @@ if [ $EXIT_CODE -eq 1 ]; then
     echo "$RESULT" | jq '.results[] | select(.passed == false)'
     # Optionally fail or continue based on severity
 fi
-```
-
-### Timeout Configuration
-
-```bash
-# Set evaluation timeout
-garmr eval --input resource.json --timeout 30s
-
-# Or via environment
-export GARMR_TIMEOUT=30s
-garmr eval --input resource.json
 ```
 
 ### Retry Logic

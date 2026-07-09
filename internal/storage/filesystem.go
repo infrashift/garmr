@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,11 +125,20 @@ func (b *FilesystemBackend) List(ctx context.Context, pattern string) ([]FileInf
 	return files, err
 }
 
+// withinRoot reports whether fullPath is the backend root or inside it.
+// A bare prefix check is not enough: "/policiesX" has "/policies" as a
+// string prefix without being inside it.
+func (b *FilesystemBackend) withinRoot(fullPath string) bool {
+	root := filepath.Clean(b.root)
+	cleaned := filepath.Clean(fullPath)
+	return cleaned == root || strings.HasPrefix(cleaned, root+string(os.PathSeparator))
+}
+
 func (b *FilesystemBackend) Get(ctx context.Context, path string) ([]byte, error) {
 	fullPath := filepath.Join(b.root, path)
 
 	// Security: ensure path doesn't escape root
-	if !strings.HasPrefix(filepath.Clean(fullPath), filepath.Clean(b.root)) {
+	if !b.withinRoot(fullPath) {
 		return nil, &ErrAccessDenied{Path: path, Reason: "path traversal attempt"}
 	}
 
@@ -145,7 +155,7 @@ func (b *FilesystemBackend) Get(ctx context.Context, path string) ([]byte, error
 func (b *FilesystemBackend) GetReader(ctx context.Context, path string) (io.ReadCloser, error) {
 	fullPath := filepath.Join(b.root, path)
 
-	if !strings.HasPrefix(filepath.Clean(fullPath), filepath.Clean(b.root)) {
+	if !b.withinRoot(fullPath) {
 		return nil, &ErrAccessDenied{Path: path, Reason: "path traversal attempt"}
 	}
 
@@ -162,7 +172,7 @@ func (b *FilesystemBackend) GetReader(ctx context.Context, path string) (io.Read
 func (b *FilesystemBackend) Stat(ctx context.Context, path string) (*FileInfo, error) {
 	fullPath := filepath.Join(b.root, path)
 
-	if !strings.HasPrefix(filepath.Clean(fullPath), filepath.Clean(b.root)) {
+	if !b.withinRoot(fullPath) {
 		return nil, &ErrAccessDenied{Path: path, Reason: "path traversal attempt"}
 	}
 
@@ -269,7 +279,9 @@ func (b *FilesystemBackend) watchLoop(ctx context.Context, watcher *fsnotify.Wat
 			select {
 			case events <- Event{Type: eventType, Path: relPath}:
 			default:
-				// Channel full, skip event
+				// Channel full: the event is dropped, but say so — a lost
+				// change notification means a missed reload.
+				log.Printf("garmr/storage: watch event channel full, dropping %s event for %s", eventType, relPath)
 			}
 
 		case err, ok := <-watcher.Errors:
@@ -335,7 +347,12 @@ func matchGlobPattern(pattern, path string) bool {
 				hasSuffix = true
 			} else if !strings.Contains(suffix, "/") {
 				// Simple glob suffix like *.cue — match against filename
-				hasSuffix, _ = filepath.Match(suffix, filepath.Base(path))
+				var err error
+				hasSuffix, err = filepath.Match(suffix, filepath.Base(path))
+				if err != nil {
+					log.Printf("garmr/storage: malformed glob pattern %q: %v", pattern, err)
+					return false
+				}
 			} else {
 				hasSuffix = strings.HasSuffix(path, suffix)
 			}
@@ -345,6 +362,10 @@ func matchGlobPattern(pattern, path string) bool {
 	}
 
 	// Standard glob matching
-	matched, _ := filepath.Match(pattern, path)
+	matched, err := filepath.Match(pattern, path)
+	if err != nil {
+		log.Printf("garmr/storage: malformed glob pattern %q: %v", pattern, err)
+		return false
+	}
 	return matched
 }

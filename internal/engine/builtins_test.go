@@ -675,6 +675,12 @@ func TestBuiltinSemverCompare(t *testing.T) {
 		{"1.2.0", "1.1.0", 1},
 		{"1.0.1", "1.0.0", 1},
 		{"v1.0.0", "1.0.0", 0},
+		// Prerelease precedence (semver spec): a prerelease sorts before
+		// the release. The old duplicate parser stripped prereleases and
+		// treated these as equal.
+		{"1.0.0-rc.1", "1.0.0", -1},
+		{"1.0.0", "1.0.0-rc.1", 1},
+		{"1.0.0-alpha", "1.0.0-beta", -1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.v1+"_vs_"+tt.v2, func(t *testing.T) {
@@ -686,6 +692,10 @@ func TestBuiltinSemverCompare(t *testing.T) {
 				t.Errorf("semver(%s, %s) = %v, want %v", tt.v1, tt.v2, result, tt.want)
 			}
 		})
+	}
+
+	if _, err := builtinSemverCompare(ctx, "garbage", "1.0.0"); err == nil {
+		t.Error("expected error for invalid semver operand")
 	}
 }
 

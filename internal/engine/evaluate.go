@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,21 +14,24 @@ import (
 // Evaluate evaluates input against loaded policies.
 func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateResponse, error) {
 	e.mu.RLock()
-	defer e.mu.RUnlock()
+	set := e.set
+	requireMatch := e.requireMatch
+	e.mu.RUnlock()
 
 	// Track active evaluations for metrics
 	e.obs.Metrics().IncActiveEvaluations()
 	defer e.obs.Metrics().DecActiveEvaluations()
 
-	// Borrow a CUE context from the pool for this evaluation.
-	// This ensures each concurrent evaluation has its own context,
-	// avoiding thread-safety issues with shared cue.Context usage.
-	cueCtx := e.ctxPool.get()
-	defer e.ctxPool.put(cueCtx)
+	// Check out a policy replica for the duration of this evaluation. The
+	// replica's CUE context and every compiled policy value in it form a
+	// single unit, so the input and the policy expressions it unifies with
+	// always share one context, and no two goroutines ever share one.
+	rep := set.get()
+	defer set.put(rep)
 
-	// Store the pooled CUE context in the Go context so all downstream
+	// Store the replica's CUE context in the Go context so all downstream
 	// evaluation methods can access it without signature changes.
-	ctx = withCueContext(ctx, cueCtx)
+	ctx = withCueContext(ctx, rep.ctx)
 
 	start := time.Now()
 	resp := &EvaluateResponse{
@@ -39,14 +43,14 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 		resp.Trace = []TraceEvent{}
 	}
 
-	// Convert input to CUE value using pooled context
-	inputVal := cueCtx.Encode(req.Input)
+	// Convert input to CUE value using the replica's context
+	inputVal := rep.ctx.Encode(req.Input)
 	if inputVal.Err() != nil {
 		return nil, fmt.Errorf("%w: encoding input: %v", ErrInvalidInput, inputVal.Err())
 	}
 
 	// Find applicable policies
-	policies := e.findApplicablePolicies(req)
+	policies := e.findApplicablePolicies(rep, req)
 	resp.Metrics.PoliciesEvaluated = len(policies)
 
 	// Fail-closed on no match. Returning DecisionAllow with zero rules
@@ -55,9 +59,9 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 	// is set we emit DecisionDeny with a synthetic RuleResult explaining
 	// which of the four failure modes (no policies loaded, named policy
 	// missing, empty namespace, or no target match) applied.
-	if len(policies) == 0 && e.requireMatch {
+	if len(policies) == 0 && requireMatch {
 		resp.Decision = DecisionDeny
-		resp.Results = append(resp.Results, e.buildNoMatchResult(req))
+		resp.Results = append(resp.Results, e.buildNoMatchResult(rep, req))
 		resp.Metrics.EvaluationTimeNs = time.Since(start).Nanoseconds()
 		e.obs.Metrics().RecordEvaluation(
 			"",
@@ -84,12 +88,14 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 		defer cancel()
 	}
 
-	// Count total rules in scope for fail-fast metadata
+	// Count rules actually in scope (after category/tag filters, exceptions,
+	// and maxRules caps) so fail-fast skip counts and the summary are accurate.
 	totalRulesInScope := 0
 	for _, p := range policies {
-		totalRulesInScope += len(p.Rules)
+		totalRulesInScope += e.countRulesInScope(p, req)
 	}
 	rulesEvaluated := 0
+	resp.Summary.TotalRules = totalRulesInScope
 
 	// Evaluate each policy
 	for _, policy := range policies {
@@ -113,26 +119,27 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 			isDryRun = policy.Enforcement.DryRun
 		}
 
+		// Compute this policy's effective decision in isolation, then merge.
+		// A dry-run policy is capped at Warn but must never lower a Deny
+		// that another (enforcing) policy has already produced.
+		policyDecision := DecisionAllow
+
 		for _, result := range results {
+			e.recordSummary(&resp.Summary, policy, result)
+
 			if !result.Passed {
 				// Record violation metric
 				e.obs.Metrics().RecordViolation(policy.Name, policy.Namespace, result.RuleID, string(result.Severity))
 
-				// Update decision based on severity and enforcement
+				// Update decision based on enforcement action
 				switch policy.Enforcement.Action {
 				case "deny":
-					resp.Decision = DecisionDeny
+					policyDecision = maxDecision(policyDecision, DecisionDeny)
 				case "warn":
-					if resp.Decision != DecisionDeny {
-						resp.Decision = DecisionWarn
-					}
+					policyDecision = maxDecision(policyDecision, DecisionWarn)
 				}
 
-				// Dry run: downgrade deny to warn and annotate the message
 				if isDryRun {
-					if resp.Decision == DecisionDeny {
-						resp.Decision = DecisionWarn
-					}
 					result.Message = "[DRY RUN] " + result.Message
 				}
 			}
@@ -142,6 +149,12 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 				resp.Results = append(resp.Results, result)
 			}
 		}
+
+		// Dry run: this policy's deny becomes a warn
+		if isDryRun && policyDecision == DecisionDeny {
+			policyDecision = DecisionWarn
+		}
+		resp.Decision = maxDecision(resp.Decision, policyDecision)
 
 		// Set dry run mode info
 		if isDryRun {
@@ -172,22 +185,24 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 		}
 	}
 
+	resp.Summary.Skipped = totalRulesInScope - rulesEvaluated
+
 	resp.Metrics.EvaluationTimeNs = time.Since(start).Nanoseconds()
 
 	// Record evaluation metric
 	e.obs.Metrics().RecordEvaluation(
-		"",                       // policy name (we evaluate multiple)
-		req.Namespace,            // namespace
-		string(resp.Decision),    // decision
-		"",                       // environment
-		time.Since(start),        // duration
+		"",                    // policy name (we evaluate multiple)
+		req.Namespace,         // namespace
+		string(resp.Decision), // decision
+		"",                    // environment
+		time.Since(start),     // duration
 	)
 
 	return resp, nil
 }
 
-// findApplicablePolicies returns policies that match the request.
-func (e *Engine) findApplicablePolicies(req *EvaluateRequest) []*CompiledPolicy {
+// findApplicablePolicies returns policies from the replica that match the request.
+func (e *Engine) findApplicablePolicies(rep *policyReplica, req *EvaluateRequest) []*CompiledPolicy {
 	var result []*CompiledPolicy
 
 	// If specific policies requested, return only those
@@ -198,7 +213,7 @@ func (e *Engine) findApplicablePolicies(req *EvaluateRequest) []*CompiledPolicy 
 				ns = "default"
 			}
 			key := policyKey(ns, name)
-			if p, ok := e.policies[key]; ok {
+			if p, ok := rep.policies[key]; ok {
 				if e.policyMatchesInput(p, req.Input) {
 					result = append(result, p)
 				}
@@ -208,7 +223,7 @@ func (e *Engine) findApplicablePolicies(req *EvaluateRequest) []*CompiledPolicy 
 	}
 
 	// Otherwise, return all policies in namespace that match the input
-	for _, p := range e.policies {
+	for _, p := range rep.policies {
 		if req.Namespace == "" || p.Namespace == req.Namespace {
 			if e.policyMatchesInput(p, req.Input) {
 				result = append(result, p)
@@ -216,7 +231,59 @@ func (e *Engine) findApplicablePolicies(req *EvaluateRequest) []*CompiledPolicy 
 		}
 	}
 
+	// Map iteration order is random; sort so results ordering, fail-fast
+	// winners, and timeout tie-breaks are reproducible across runs.
+	sort.Slice(result, func(i, j int) bool {
+		return policyKey(result[i].Namespace, result[i].Name) < policyKey(result[j].Namespace, result[j].Name)
+	})
+
 	return result
+}
+
+// countRulesInScope returns the number of rules of a policy that would be
+// evaluated for this request: rules surviving category/tag filters, zero when
+// an exception matches, capped by the policy's maxRules setting.
+func (e *Engine) countRulesInScope(policy *CompiledPolicy, req *EvaluateRequest) int {
+	if len(policy.Enforcement.Exceptions) > 0 && e.matchesException(policy.Enforcement.Exceptions, req.Input) {
+		return 0
+	}
+	n := 0
+	for _, rule := range policy.Rules {
+		if e.shouldEvaluateRule(rule, policy.Evaluation, req.Options) {
+			n++
+		}
+	}
+	if policy.Evaluation.MaxRules > 0 && n > policy.Evaluation.MaxRules {
+		n = policy.Evaluation.MaxRules
+	}
+	return n
+}
+
+// recordSummary updates the response summary counts for a single rule result.
+func (e *Engine) recordSummary(s *ResultSummary, policy *CompiledPolicy, result RuleResult) {
+	if s.BySeverity == nil {
+		s.BySeverity = make(map[Severity]SeverityCounts)
+		s.ByCategory = make(map[string]CategoryCounts)
+		s.ByNamespace = make(map[string]NamespaceCounts)
+	}
+
+	sev := s.BySeverity[result.Severity]
+	cat := s.ByCategory[result.Category]
+	ns := s.ByNamespace[policy.Namespace]
+	if result.Passed {
+		s.Passed++
+		sev.Passed++
+		cat.Passed++
+		ns.Passed++
+	} else {
+		s.Failed++
+		sev.Failed++
+		cat.Failed++
+		ns.Failed++
+	}
+	s.BySeverity[result.Severity] = sev
+	s.ByCategory[result.Category] = cat
+	s.ByNamespace[policy.Namespace] = ns
 }
 
 // policyMatchesInput checks if a policy's target matches the input resource.
@@ -232,10 +299,11 @@ func (e *Engine) policyMatchesInput(policy *CompiledPolicy, input map[string]any
 	inputName := getStringField(input, "metadata", "name")
 	inputNamespace := getStringField(input, "metadata", "namespace")
 	inputLabels := getMapField(input, "metadata", "labels")
+	inputAnnotations := getMapField(input, "metadata", "annotations")
 
 	// Check if any target selector matches
 	for _, selector := range policy.Target.Resources {
-		if e.selectorMatchesInput(selector, inputKind, inputAPIGroup, inputName, inputNamespace, inputLabels) {
+		if e.selectorMatchesInput(selector, inputKind, inputAPIGroup, inputName, inputNamespace, inputLabels, inputAnnotations) {
 			return true
 		}
 	}
@@ -244,7 +312,7 @@ func (e *Engine) policyMatchesInput(policy *CompiledPolicy, input map[string]any
 }
 
 // selectorMatchesInput checks if a resource selector matches the input.
-func (e *Engine) selectorMatchesInput(selector ResourceSelector, kind, apiGroup, name, namespace string, labels map[string]string) bool {
+func (e *Engine) selectorMatchesInput(selector ResourceSelector, kind, apiGroup, name, namespace string, labels, annotations map[string]string) bool {
 	// Check Kind (supports wildcards)
 	if selector.Kind != "" && selector.Kind != "*" {
 		if !e.matchesPatternCached(selector.Kind, kind) {
@@ -296,6 +364,15 @@ func (e *Engine) selectorMatchesInput(selector ResourceSelector, kind, apiGroup,
 		}
 	}
 
+	// Check Annotations (all specified annotations must match)
+	if len(selector.Annotations) > 0 {
+		for k, v := range selector.Annotations {
+			if annVal, ok := annotations[k]; !ok || !e.matchesPatternCached(v, annVal) {
+				return false
+			}
+		}
+	}
+
 	return true
 }
 
@@ -341,6 +418,11 @@ func (e *Engine) evaluatePolicy(ctx context.Context, policy *CompiledPolicy, inp
 		if policy.Evaluation.FailFast && !result.Passed {
 			return results, true, nil
 		}
+
+		// maxRules: stop once the configured evaluation cap is reached
+		if policy.Evaluation.MaxRules > 0 && len(results) >= policy.Evaluation.MaxRules {
+			break
+		}
 	}
 
 	return results, false, nil
@@ -355,6 +437,9 @@ func (e *Engine) evaluateRule(ctx context.Context, policy *CompiledPolicy, rule 
 		RuleDescription: rule.Description,
 		Severity:        rule.Severity,
 		Remediation:     rule.Remediation,
+		Priority:        rule.Priority,
+		Category:        rule.Category,
+		Tags:            rule.Tags,
 		Passed:          true,
 		Bindings:        make(map[string]any),
 	}
@@ -445,6 +530,7 @@ func (e *Engine) matchesException(exceptions []ExceptionSpec, input map[string]a
 	inputName := getStringField(input, "metadata", "name")
 	inputNamespace := getStringField(input, "metadata", "namespace")
 	inputLabels := getMapField(input, "metadata", "labels")
+	inputAnnotations := getMapField(input, "metadata", "annotations")
 
 	for _, exc := range exceptions {
 		// Check if exception has expired
@@ -453,7 +539,7 @@ func (e *Engine) matchesException(exceptions []ExceptionSpec, input map[string]a
 		}
 
 		// Check if the exception's match selector applies to this input
-		if e.selectorMatchesInput(exc.Match, inputKind, inputAPIGroup, inputName, inputNamespace, inputLabels) {
+		if e.selectorMatchesInput(exc.Match, inputKind, inputAPIGroup, inputName, inputNamespace, inputLabels, inputAnnotations) {
 			return true
 		}
 	}
@@ -477,12 +563,12 @@ func (e *Engine) interpolateMessage(msg string, bindings map[string]any) string 
 // request and the current policy set, so users get actionable remediation
 // (typo'd namespace, missing policy name, or target-selector mismatch)
 // instead of a generic deny.
-func (e *Engine) buildNoMatchResult(req *EvaluateRequest) RuleResult {
+func (e *Engine) buildNoMatchResult(rep *policyReplica, req *EvaluateRequest) RuleResult {
 	const remediation = "Verify the namespace and policy names in your request, and run `garmr policy list` to inspect loaded policies."
 
 	var message string
 	switch {
-	case len(e.policies) == 0:
+	case len(rep.policies) == 0:
 		message = "No policies are loaded on the server. Check the server's policy directory and ensure policies compiled successfully."
 	case len(req.Policies) > 0:
 		ns := req.Namespace
@@ -491,7 +577,7 @@ func (e *Engine) buildNoMatchResult(req *EvaluateRequest) RuleResult {
 		}
 		var missing []string
 		for _, name := range req.Policies {
-			if _, ok := e.policies[policyKey(ns, name)]; !ok {
+			if _, ok := rep.policies[policyKey(ns, name)]; !ok {
 				missing = append(missing, fmt.Sprintf("%s/%s", ns, name))
 			}
 		}
@@ -504,7 +590,7 @@ func (e *Engine) buildNoMatchResult(req *EvaluateRequest) RuleResult {
 				strings.Join(req.Policies, ", "),
 			)
 		}
-	case req.Namespace != "" && !e.namespaceHasPolicies(req.Namespace):
+	case req.Namespace != "" && !namespaceHasPolicies(rep, req.Namespace):
 		message = fmt.Sprintf("No policies found in namespace %q. Run `garmr policy list` to see available namespaces.", req.Namespace)
 	default:
 		message = fmt.Sprintf("No policy targets this input (kind=%q apiVersion=%q). Check resource selectors on your policies or the `kind` field of your input.",
@@ -526,9 +612,9 @@ func (e *Engine) buildNoMatchResult(req *EvaluateRequest) RuleResult {
 	}
 }
 
-// namespaceHasPolicies reports whether any loaded policy belongs to ns.
-func (e *Engine) namespaceHasPolicies(ns string) bool {
-	for _, p := range e.policies {
+// namespaceHasPolicies reports whether any policy in the replica belongs to ns.
+func namespaceHasPolicies(rep *policyReplica, ns string) bool {
+	for _, p := range rep.policies {
 		if p.Namespace == ns {
 			return true
 		}

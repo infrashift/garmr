@@ -72,7 +72,9 @@ spec: {
             {
                 kind: "pod"
                 namespaces: ["production"]
-                excludeNames: ["debug-*", "test-*"]
+                annotations: {
+                    "garmr.io/enforce": "true"
+                }
             }
         ]
     }
@@ -83,17 +85,18 @@ spec: {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `kind` | string | Resource kind (required) |
-| `apiGroup` | string | API group (e.g., "apps/v1") |
-| `namespaces` | []string | Resource must be in one of these namespaces |
-| `excludeNamespaces` | []string | Resource must NOT be in these namespaces |
-| `names` | []string | Resource name must match (supports wildcards) |
-| `excludeNames` | []string | Resource name must NOT match |
-| `labels` | map | Resource must have these labels |
+| `kind` | string | Resource kind (supports wildcards) |
+| `apiGroup` | string | API group (matched against the input's `apiVersion`, supports wildcards) |
+| `names` | []string | Resource name (`metadata.name`) must match one entry (supports wildcards) |
+| `namespaces` | []string | Resource namespace (`metadata.namespace`) must match one entry (supports wildcards) |
+| `labels` | map | All specified labels must be present on `metadata.labels`; values support wildcards |
+| `annotations` | map | All specified annotations must be present on `metadata.annotations`; values support wildcards |
+
+All selector fields are enforced during evaluation. There are no `excludeNames`/`excludeNamespaces` fields.
 
 ### Wildcard Matching
 
-Names support glob-style wildcards:
+Selector values support glob-style `*` wildcards (matching is case-insensitive):
 
 ```cue
 target: {
@@ -101,7 +104,8 @@ target: {
         {
             kind: "deployment"
             names: ["prod-*", "*-api"]        // Matches prod-web, user-api
-            excludeNames: ["*-canary"]        // Excludes prod-canary
+            namespaces: ["prod-*"]            // Matches prod-us, prod-eu
+            annotations: {"team": "platform-*"}
         }
     ]
 }
@@ -161,10 +165,9 @@ garmr eval --input pod.json
 
 # Evaluate only security policies
 garmr eval --input pod.json -n security
-
-# Evaluate security and compliance policies
-garmr eval --input pod.json -n security -n compliance
 ```
+
+The `-n`/`--namespace` flag takes a single namespace per invocation. To cover multiple namespaces, run `garmr eval` once per namespace (or omit the flag to evaluate all).
 
 ### API Namespace Filter
 
@@ -249,8 +252,9 @@ Usage:
 # Security review
 garmr eval --input deployment.json -n security
 
-# Full compliance check
-garmr eval --input deployment.json -n security -n compliance
+# Full compliance check (one namespace per invocation)
+garmr eval --input deployment.json -n security
+garmr eval --input deployment.json -n compliance
 ```
 
 ### Strategy 2: Environment-Based Namespaces
@@ -377,8 +381,8 @@ Create a README in your policies directory:
 - `platform/` - Platform standards, owned by SRE
 
 ## CI/CD Usage
-- PR checks: `-n security -n platform`
-- Production deploy: `-n security -n compliance -n platform`
+- PR checks: run eval with `-n security`, then `-n platform`
+- Production deploy: run eval for each of `security`, `compliance`, `platform`
 ```
 
 ---

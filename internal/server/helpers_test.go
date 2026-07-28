@@ -26,11 +26,11 @@ func TestDecisionToString(t *testing.T) {
 
 func TestSeverityToString(t *testing.T) {
 	cases := map[engine.Severity]string{
-		engine.SeverityCritical: "critical",
-		engine.SeverityHigh:     "high",
-		engine.SeverityMedium:   "medium",
-		engine.SeverityLow:      "low",
-		engine.SeverityInfo:     "info",
+		engine.SeverityCritical:  "critical",
+		engine.SeverityHigh:      "high",
+		engine.SeverityMedium:    "medium",
+		engine.SeverityLow:       "low",
+		engine.SeverityInfo:      "info",
 		engine.Severity("bogus"): "unknown",
 	}
 	for s, want := range cases {

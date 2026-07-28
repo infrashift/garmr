@@ -10,7 +10,7 @@
 #   - cmd/garmr/docs_cmd.go   (static documentation generator)
 #   - cmd/garmr/test_cmd.go   (policy test-harness command)
 #
-# Fails if total coverage drops below MIN_COVERAGE (default 83, target 90).
+# Fails if total coverage drops below MIN_COVERAGE (default 90).
 
 set -euo pipefail
 

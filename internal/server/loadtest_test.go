@@ -36,21 +36,21 @@ type loadTestConfig struct {
 
 // stepResult captures aggregate metrics for a single ramp step.
 type stepResult struct {
-	TargetRPS   int
-	ActualRPS   float64
-	TotalReqs   int64
-	Successes   int64
-	Failures    int64
-	ErrorPct    float64
-	AllowCount  int64
-	DenyCount   int64
-	Min         time.Duration
-	Max         time.Duration
-	Mean        time.Duration
-	P50         time.Duration
-	P95         time.Duration
-	P99         time.Duration
-	WallTime    time.Duration
+	TargetRPS  int
+	ActualRPS  float64
+	TotalReqs  int64
+	Successes  int64
+	Failures   int64
+	ErrorPct   float64
+	AllowCount int64
+	DenyCount  int64
+	Min        time.Duration
+	Max        time.Duration
+	Mean       time.Duration
+	P50        time.Duration
+	P95        time.Duration
+	P99        time.Duration
+	WallTime   time.Duration
 }
 
 // setupLoadTestServer creates a lightweight httptest.Server wired to a real
@@ -418,9 +418,9 @@ func TestLoadTest_Sustained(t *testing.T) {
 	}
 
 	const (
-		targetRPS    = 5000
-		duration     = 30 * time.Second
-		sampleEvery  = 5 * time.Second
+		targetRPS   = 5000
+		duration    = 30 * time.Second
+		sampleEvery = 5 * time.Second
 	)
 
 	interval := time.Second / time.Duration(targetRPS)

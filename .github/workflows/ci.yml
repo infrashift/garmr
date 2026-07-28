@@ -40,9 +40,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Run tests
-        run: |
-          PKGS=$(go list ./... | grep -v '/plugins/')
-          go test -short -race -coverprofile=coverage.out -covermode=atomic $PKGS
+        run: go test -short -race -coverprofile=coverage.out -covermode=atomic ./...
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -1
       - uses: actions/upload-artifact@v4
@@ -63,7 +61,30 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: gofmt
+        run: |
+          out="$(gofmt -l ./cmd ./internal)"
+          if [ -n "$out" ]; then
+            echo "The following files need gofmt:"
+            echo "$out"
+            exit 1
+          fi
+      # Pinned: `version: latest` lets an upstream release break CI with no
+      # change to this repo.
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v1.64.8
           args: --timeout=5m
+
+  docs:
+    name: Docs Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install
+        working-directory: docs
+        run: bun install --frozen-lockfile
+      - name: Build
+        working-directory: docs
+        run: bun run build

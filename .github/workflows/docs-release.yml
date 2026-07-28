@@ -26,6 +26,10 @@ jobs:
         uses: withastro/action@v5
         with:
           path: ./docs
+          # Pinned: the action otherwise auto-detects the package manager from
+          # whichever lockfile it finds, which must stay consistent with the
+          # `docs` job in ci.yml.
+          package-manager: bun@latest
 
   deploy:
     needs: build

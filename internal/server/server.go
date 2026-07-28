@@ -27,10 +27,10 @@ import (
 
 	"github.com/infrashift/garmr/internal/engine"
 	"github.com/infrashift/garmr/internal/experimental/ratelimit"
-	"github.com/infrashift/garmr/internal/storage"
 	"github.com/infrashift/garmr/internal/health"
 	"github.com/infrashift/garmr/internal/input"
 	"github.com/infrashift/garmr/internal/observability"
+	"github.com/infrashift/garmr/internal/storage"
 )
 
 //go:embed openapi.json
@@ -772,7 +772,7 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 				"deleted", deleted,
 				"source_ip", r.RemoteAddr,
 				"principal", PrincipalFromContext(r.Context()),
-			"trace_id", observability.TraceIDFromContext(r.Context()),
+				"trace_id", observability.TraceIDFromContext(r.Context()),
 			)
 		}
 
@@ -820,7 +820,7 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 				"reload_time_ms", time.Since(startTime).Milliseconds(),
 				"source_ip", r.RemoteAddr,
 				"principal", PrincipalFromContext(r.Context()),
-			"trace_id", observability.TraceIDFromContext(r.Context()),
+				"trace_id", observability.TraceIDFromContext(r.Context()),
 			)
 		}
 

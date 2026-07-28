@@ -207,11 +207,11 @@ before they reach a cluster:
 
 ```yaml
 - name: Validate policies
-  run: |
-    garmr-server --policy-dir ./policies --http-addr :8080 &
-    sleep 2
-    garmr validate ./policies/**/*.cue --strict
+  run: garmr validate ./policies
 ```
+
+`garmr validate` runs locally with the same loader the server uses at
+startup — no server process needed in CI.
 
 `garmr policy lock` and `garmr policy validate-lock` record and verify content
 hashes if you want to detect drift between what was reviewed and what is

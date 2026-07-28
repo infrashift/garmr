@@ -272,10 +272,10 @@ Lock file format:
 
 **Why this matters:**
 
-- **Tamper detection.** Lock files let you verify that a policy hasn't been modified since it was reviewed and approved.
+- **Tamper detection.** Lock files let CI verify that a policy hasn't been modified since it was reviewed and approved. (The server itself never reads lock files — they are a repo-side gate enforced by `garmr policy validate-lock`.)
 - **GitOps-native.** Commit both the policy and its `.lock` file. CI can validate that lock files are up to date before deployment.
 - **Version tracking.** Lock files carry a version field, so you can track which version of a policy is deployed.
-- **On-demand reload.** When Garmr detects a lock file checksum change, it knows a reload is needed — no polling required.
+- **Convergence verification.** `garmr policy digest` computes a deterministic digest of a checkout with the same loader the server uses; comparing it against the `digest` field of `GET /v1/policies` proves a running server loaded exactly what was shipped.
 
 OPA uses bundle manifests with revision fields, which serve a similar purpose but require a bundle server infrastructure. Garmr's approach works with plain Git repositories.
 

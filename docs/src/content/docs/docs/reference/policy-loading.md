@@ -197,10 +197,13 @@ concurrency.
 1. **Large policy sets** — use policy sets for modular organisation.
 2. **Reload frequency** — reload on deploy, not on a timer; each reload
    recompiles every policy into every replica.
-3. **GitOps** — use lock files to detect drift between what was reviewed and
-   what is deployed.
+3. **GitOps** — use lock files as a repo-side review gate, and the policy-set
+   digest to verify what a running server actually loaded.
 
 ## Lock File Workflow (GitOps)
+
+Lock files are read by CI only — the server never reads them. Their job is
+to fail the pipeline when a policy changed without being re-reviewed.
 
 ```bash
 # 1. Update policy
@@ -214,6 +217,13 @@ git add policies/release/prod-release.cue
 git add policies/release/prod-release.cue.lock
 git commit -m "Update production release policy"
 
-# 4. Deploy (CI/CD copies to mounted volume)
-# Garmr detects lock file change and reloads policy
+# 4. CI gate: fail if any policy changed without a lock update
+garmr policy validate-lock policies/
+
+# 5. Deploy (CI/CD lands files on the server's policy volume, then either
+#    restarts the instance or calls POST /v1/policies/reload)
+
+# 6. Verify convergence: the server's digest must match the checkout's
+garmr policy digest policies/
+curl -s $GARMR/v1/policies | jq -r .digest
 ```

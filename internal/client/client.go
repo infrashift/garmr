@@ -192,12 +192,11 @@ type ValidateResult struct {
 	Warnings []ValidationError `json:"warnings,omitempty"`
 }
 
-// ValidationError is a validation error.
+// ValidationError is a validation error. The server reports a message and a
+// coarse code (PARSE_ERROR, SCHEMA_ERROR); it has no position information.
 type ValidationError struct {
 	Message string `json:"message"`
 	Code    string `json:"code,omitempty"`
-	Line    int    `json:"line,omitempty"`
-	Column  int    `json:"column,omitempty"`
 }
 
 // Validate validates a policy.

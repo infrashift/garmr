@@ -8,7 +8,7 @@ sidebar:
 
 Complete command reference for the Garmr CLI.
 
-The CLI is a thin REST client: `eval`, `validate`, `policy list/get/delete/reload`, and `health` all require a running Garmr server. Only `test`, `docs generate`, and `policy lock/validate-lock/diff` run locally without a server.
+`eval`, `policy list/get/delete/reload`, and `health` are REST clients and require a running Garmr server. `validate`, `test`, `docs generate`, and `policy digest/lock/validate-lock/diff` run locally without a server — `validate` and `policy digest` embed the exact engine loader the server runs, so their results predict what the server will load.
 
 The CLI has no authentication or TLS client options and cannot talk to an API-key-protected server. Run the CLI against the server over a trusted network (localhost, cluster-internal), or behind a service mesh sidecar that handles mTLS — the same deployment model the server's `auth.identity_header` support is designed for.
 
@@ -118,7 +118,7 @@ or pass `--require-match=false` to `garmr-server`.
 
 ### garmr validate
 
-Validate policy syntax. Accepts files and directories (directories are expanded recursively to `.cue` files). Requires a running server — validation happens server-side.
+Validate policies locally with the same schema and loader the server uses at startup — no server required. A green result means the server will load the set. Directories are loaded as CUE packages, so multi-file policy packages (shared definitions + policies) validate correctly. On success the policy-set digest is printed for convergence checks.
 
 ```bash
 garmr validate <file-or-dir> [file-or-dir...] [flags]
@@ -128,23 +128,19 @@ garmr validate <file-or-dir> [file-or-dir...] [flags]
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--warn` | Show warnings | `false` |
-| `--strict` | Treat warnings as errors | `false` |
+| `--remote` | Validate via a running server's `/v1/validate` instead of locally (compiles each file in isolation) | `false` |
 
 **Examples:**
 
 ```bash
-# Validate a policy file
-garmr validate policies/security.cue
-
-# Validate all policies in directory
+# Validate a policy tree locally (CI gate)
 garmr validate policies/
 
-# Show warnings
-garmr validate policies/ --warn
+# Validate a single file
+garmr validate policies/security.cue
 
-# Strict mode (warnings are errors)
-garmr validate policies/ --strict
+# Validate against a running server
+garmr validate --remote --server http://garmr:8080 policies/security.cue
 ```
 
 ---

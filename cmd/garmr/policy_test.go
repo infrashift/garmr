@@ -14,14 +14,12 @@ import (
 func validateFlagSet(t *testing.T) *cobraCmd {
 	t.Helper()
 	return newTestCmd(t,
-		flagSpec{Kind: "bool", Name: "warn"},
-		flagSpec{Kind: "bool", Name: "strict"},
+		flagSpec{Kind: "bool", Name: "remote"},
 	)
 }
 
 func TestRunValidate_ValidPolicy(t *testing.T) {
-	newTestServer(t)
-	path := writeTempFile(t, "valid.cue", testPassPolicy)
+	path := writeTempFile(t, "valid.cue", testDirPolicy)
 
 	cmd := validateFlagSet(t)
 	rec := stubExit(t)
@@ -36,6 +34,9 @@ func TestRunValidate_ValidPolicy(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "valid") {
 		t.Errorf("expected valid marker, got %q", stdout)
+	}
+	if !strings.Contains(stdout, "Digest:") {
+		t.Errorf("expected the policy-set digest, got %q", stdout)
 	}
 }
 
@@ -67,14 +68,13 @@ func TestRunValidate_MissingFile(t *testing.T) {
 }
 
 func TestRunValidate_Directory(t *testing.T) {
-	newTestServer(t)
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "nested")
 	if err := os.MkdirAll(sub, 0755); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(dir, "a.cue"), []byte(testPassPolicy), 0644)
-	os.WriteFile(filepath.Join(sub, "b.cue"), []byte(testPassPolicy), 0644)
+	os.WriteFile(filepath.Join(dir, "a.cue"), []byte(testDirPolicy), 0644)
+	os.WriteFile(filepath.Join(sub, "b.cue"), []byte(strings.ReplaceAll(testDirPolicy, "pass-policy", "pass-policy-b")), 0644)
 	os.WriteFile(filepath.Join(dir, "ignored.txt"), []byte("not cue"), 0644)
 
 	cmd := validateFlagSet(t)
@@ -88,34 +88,31 @@ func TestRunValidate_Directory(t *testing.T) {
 	if rec.Called {
 		t.Errorf("unexpected exit: %d", rec.Code)
 	}
-	if !strings.Contains(stdout, "a.cue") || !strings.Contains(stdout, "b.cue") {
-		t.Errorf("expected both .cue files validated recursively, got %q", stdout)
-	}
-	if strings.Contains(stdout, "ignored.txt") {
-		t.Errorf("non-CUE file should be skipped, got %q", stdout)
+	// Local validation loads the directory as the server does and reports
+	// the policy count, not per-file lines.
+	if !strings.Contains(stdout, "2 policies valid") {
+		t.Errorf("expected both policies validated recursively, got %q", stdout)
 	}
 }
 
 func TestRunValidate_EmptyDirectory(t *testing.T) {
-	newTestServer(t)
 	cmd := validateFlagSet(t)
 	rec := stubExit(t)
-	_, stderr := captureOutput(t, func() {
+	stdout, _ := captureOutput(t, func() {
 		_ = runValidate(cmd, []string{t.TempDir()})
 	})
 	if rec.Code != 1 {
 		t.Errorf("expected exit 1 for directory without .cue files, got %d", rec.Code)
 	}
-	if !strings.Contains(stderr, "No .cue files") {
-		t.Errorf("expected no-cue-files message, got %q", stderr)
+	if !strings.Contains(stdout, "no policies found") {
+		t.Errorf("expected no-policies message, got %q", stdout)
 	}
 }
 
 func TestRunValidate_MixedFileAndDirectory(t *testing.T) {
-	newTestServer(t)
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "a.cue"), []byte(testPassPolicy), 0644)
-	file := writeTempFile(t, "direct.cue", testPassPolicy)
+	os.WriteFile(filepath.Join(dir, "a.cue"), []byte(testDirPolicy), 0644)
+	file := writeTempFile(t, "direct.cue", strings.ReplaceAll(testDirPolicy, "pass-policy", "pass-policy-b"))
 
 	cmd := validateFlagSet(t)
 	rec := stubExit(t)
@@ -127,8 +124,57 @@ func TestRunValidate_MixedFileAndDirectory(t *testing.T) {
 	if rec.Called {
 		t.Errorf("unexpected exit: %d", rec.Code)
 	}
-	if !strings.Contains(stdout, "a.cue") || !strings.Contains(stdout, "direct.cue") {
-		t.Errorf("expected dir contents and explicit file validated, got %q", stdout)
+	if !strings.Contains(stdout, "direct.cue") || strings.Count(stdout, "✓") != 2 {
+		t.Errorf("expected dir and explicit file both validated, got %q", stdout)
+	}
+}
+
+func TestRunValidate_Remote(t *testing.T) {
+	newTestServer(t)
+	path := writeTempFile(t, "valid.cue", testPassPolicy)
+
+	cmd := validateFlagSet(t)
+	if err := cmd.Flags().Set("remote", "true"); err != nil {
+		t.Fatal(err)
+	}
+	rec := stubExit(t)
+	stdout, _ := captureOutput(t, func() {
+		if err := runValidate(cmd, []string{path}); err != nil {
+			t.Fatalf("runValidate: %v", err)
+		}
+	})
+	if rec.Called {
+		t.Errorf("unexpected exit: %d", rec.Code)
+	}
+	if !strings.Contains(stdout, "valid") {
+		t.Errorf("expected valid marker from remote validation, got %q", stdout)
+	}
+}
+
+func TestRunPolicyDigest_MatchesValidateDigest(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.cue"), []byte(testDirPolicy), 0644)
+
+	cmd := newTestCmd(t)
+	stdout, _ := captureOutput(t, func() {
+		if err := runPolicyDigest(cmd, []string{dir}); err != nil {
+			t.Fatalf("runPolicyDigest: %v", err)
+		}
+	})
+	digest := strings.TrimSpace(stdout)
+	if len(digest) != 64 {
+		t.Fatalf("expected a sha256 hex digest, got %q", digest)
+	}
+
+	// Loading the same tree again must produce the identical digest — this
+	// is the property CI relies on to compare a checkout with a server.
+	stdout2, _ := captureOutput(t, func() {
+		if err := runPolicyDigest(cmd, []string{dir}); err != nil {
+			t.Fatalf("runPolicyDigest: %v", err)
+		}
+	})
+	if strings.TrimSpace(stdout2) != digest {
+		t.Errorf("digest not deterministic: %q != %q", stdout2, digest)
 	}
 }
 

@@ -15,35 +15,93 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"go.uber.org/zap"
 
 	"github.com/infrashift/garmr/internal/client"
+	"github.com/infrashift/garmr/internal/engine"
 )
 
 // validateCmd validates policy files
 var validateCmd = &cobra.Command{
-	Use:   "validate [files...]",
-	Short: "Validate policy files",
-	Long: `Validate CUE policy files for syntax and schema compliance.
+	Use:   "validate [paths...]",
+	Short: "Validate policy files or directories",
+	Long: `Validate CUE policies against the same schema and loader the server uses.
+
+By default validation runs locally: each path is loaded with the exact code
+path the server runs at startup, so a green result means the server will
+load the set. Directories are loaded as CUE packages, which is what makes
+multi-file policy packages (shared definitions + policies) validate
+correctly. No server is needed — ideal for CI.
+
+With --remote, file contents are sent to a running server's /v1/validate
+instead. Note that remote validation compiles each file in isolation, so
+multi-file packages cannot be validated remotely.
 
 Examples:
-  # Validate a single policy
+  # Validate a policy tree locally (CI gate; no server required)
+  garmr validate policies/
+
+  # Validate a single file
   garmr validate policy.cue
 
-  # Validate multiple policies
-  garmr validate policies/*.cue
-
-  # Validate and show warnings
-  garmr validate --warn policy.cue`,
+  # Validate against a running server
+  garmr validate --remote --server http://garmr:8080 policy.cue`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runValidate,
 }
 
 func init() {
-	validateCmd.Flags().Bool("warn", false, "show warnings")
-	validateCmd.Flags().Bool("strict", false, "fail on warnings")
+	validateCmd.Flags().Bool("remote", false, "validate via a running server's /v1/validate instead of locally")
 }
 
 func runValidate(cmd *cobra.Command, args []string) error {
+	if remote, _ := cmd.Flags().GetBool("remote"); remote {
+		return runValidateRemote(args)
+	}
+	return runValidateLocal(args)
+}
+
+// runValidateLocal loads each path with the engine loader the server uses,
+// answering "will the server load this?" without a running server.
+func runValidateLocal(args []string) error {
+	hasErrors := false
+	for _, arg := range args {
+		eng, err := engine.NewEngine(zap.NewNop())
+		if err != nil {
+			return fmt.Errorf("initializing engine: %w", err)
+		}
+
+		info, statErr := os.Stat(arg)
+		if statErr != nil {
+			fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", arg, statErr)
+			hasErrors = true
+			continue
+		}
+
+		if info.IsDir() {
+			err = eng.LoadPoliciesFromDir(context.Background(), arg)
+		} else {
+			_, err = eng.LoadPoliciesFromFile(context.Background(), arg)
+		}
+		if err != nil {
+			fmt.Printf("✗ %s: %v\n", arg, err)
+			hasErrors = true
+			continue
+		}
+
+		fmt.Printf("✓ %s: %d policies valid\n", arg, len(eng.ListPolicies("")))
+		fmt.Printf("  Digest: %s\n", eng.PolicySetDigest())
+	}
+
+	if hasErrors {
+		osExit(1)
+	}
+	return nil
+}
+
+// runValidateRemote sends each file's content to a running server's
+// /v1/validate endpoint.
+func runValidateRemote(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -58,8 +116,6 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	}
 	defer c.Close()
 
-	showWarn, _ := cmd.Flags().GetBool("warn")
-	strict, _ := cmd.Flags().GetBool("strict")
 	hasErrors := false
 
 	// Expand directory arguments into the .cue files they contain
@@ -104,22 +160,9 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Printf("✗ %s: invalid\n", file)
 			for _, e := range result.Errors {
-				loc := ""
-				if e.Line > 0 {
-					loc = fmt.Sprintf(":%d:%d", e.Line, e.Column)
-				}
-				fmt.Printf("  error%s: %s\n", loc, e.Message)
+				fmt.Printf("  error: %s\n", e.Message)
 			}
 			hasErrors = true
-		}
-
-		if showWarn && len(result.Warnings) > 0 {
-			for _, w := range result.Warnings {
-				fmt.Printf("  warning: %s\n", w.Message)
-			}
-			if strict {
-				hasErrors = true
-			}
 		}
 	}
 
@@ -193,6 +236,7 @@ func init() {
 	policyCmd.AddCommand(policyGetCmd)
 	policyCmd.AddCommand(policyDeleteCmd)
 	policyCmd.AddCommand(policyReloadCmd)
+	policyCmd.AddCommand(policyDigestCmd)
 	policyCmd.AddCommand(policyLockCmd)
 	policyCmd.AddCommand(policyValidateLockCmd)
 	policyCmd.AddCommand(policyDiffCmd)
@@ -213,16 +257,63 @@ func init() {
 	policyLockCmd.Flags().String("updated-by", "", "override updatedBy field")
 }
 
-// policyLockCmd generates lock files for GitOps workflows
+// policyDigestCmd computes the policy-set digest of a local checkout.
+var policyDigestCmd = &cobra.Command{
+	Use:   "digest <policy-dir|policy-file>",
+	Short: "Compute the policy-set digest of local policies",
+	Long: `Load policies locally exactly as the server does and print the
+deterministic policy-set digest.
+
+A CI/CD pipeline compares this value (computed from its git checkout)
+against the "digest" field of GET /v1/policies — or of the reload
+response — to verify that a running server converged on the exact policy
+content that was shipped.
+
+Examples:
+  # Digest of the checkout
+  garmr policy digest policies/
+
+  # Compare with what a server is actually serving
+  curl -s http://garmr:8080/v1/policies | jq -r .digest`,
+	Args: cobra.ExactArgs(1),
+	RunE: runPolicyDigest,
+}
+
+func runPolicyDigest(cmd *cobra.Command, args []string) error {
+	eng, err := engine.NewEngine(zap.NewNop())
+	if err != nil {
+		return fmt.Errorf("initializing engine: %w", err)
+	}
+
+	info, err := os.Stat(args[0])
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", args[0], err)
+	}
+	if info.IsDir() {
+		err = eng.LoadPoliciesFromDir(context.Background(), args[0])
+	} else {
+		_, err = eng.LoadPoliciesFromFile(context.Background(), args[0])
+	}
+	if err != nil {
+		return fmt.Errorf("loading %s: %w", args[0], err)
+	}
+
+	fmt.Println(eng.PolicySetDigest())
+	return nil
+}
+
+// policyLockCmd generates lock files for review-integrity checks in git.
 var policyLockCmd = &cobra.Command{
 	Use:   "lock <policy-file> [policy-file...]",
 	Short: "Generate lock files for policy files",
 	Long: `Generate lock files for one or more policy files.
 
-Lock files contain a SHA256 checksum of the policy content and enable
-the on-demand reload strategy for GitOps workflows. When Garmr starts with
-on-demand mode, it compares the lock file checksum with the cached
-policy checksum to determine if a reload is needed.
+A lock file records a SHA256 checksum of the policy content at the moment
+it was reviewed. It is a repo-side integrity gate: 'garmr policy
+validate-lock' in CI fails when a policy changed without its lock file
+being regenerated, so unreviewed edits cannot ship. The server never
+reads lock files — to verify what a running server actually loaded, use
+'garmr policy digest' and compare it with the digest the server reports.
 
 Examples:
   # Generate lock file for a single policy
@@ -247,12 +338,11 @@ Lock File Format:
     }
   }
 
-GitOps Workflow:
+Workflow:
   1. Edit policy file
   2. Run 'garmr policy lock <file>'
   3. Commit both policy and .lock file
-  4. GitOps controller syncs to cluster
-  5. Garmr detects lock file change, reloads policy`,
+  4. CI runs 'garmr policy validate-lock' to catch unreviewed edits`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runPolicyLock,
 }

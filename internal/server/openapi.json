@@ -142,11 +142,14 @@
       "get": {
         "tags": ["health"],
         "summary": "Deep health check",
-        "description": "Runs cheap and deep checkers (including a storage round trip). Always returns HTTP 200; the overall status is in the body. Requires the API key when one is configured.",
+        "description": "Runs cheap and deep checkers, including a real round trip to the policy storage. An operator diagnostic, not a probe — and unlike the probe endpoints it requires the API key when one is configured, because every call performs storage I/O.",
         "operationId": "getDeepHealth",
         "responses": {
           "200": {
-            "description": "Check results (inspect the body's status field)"
+            "description": "Every check healthy (per-check detail in the body)"
+          },
+          "503": {
+            "description": "One or more checks degraded or unhealthy (per-check detail in the body)"
           }
         }
       }

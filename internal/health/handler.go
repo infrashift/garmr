@@ -197,8 +197,12 @@ func (h *Handler) ReadinessHandler() http.HandlerFunc {
 	}
 }
 
-// DeepHealthHandler returns a comprehensive health check.
-// This is for debugging and monitoring, not for probes.
+// DeepHealthHandler returns a comprehensive health check, running the deep
+// checkers (storage round trip) alongside the cheap ones. It is for
+// operators and monitoring, not for probes — but the status code is still
+// honest: 200 only when every check is healthy, 503 otherwise, so `curl -f`
+// and alerting rules work without parsing the body. Per-check detail stays
+// in the body.
 func (h *Handler) DeepHealthHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
@@ -207,7 +211,11 @@ func (h *Handler) DeepHealthHandler() http.HandlerFunc {
 		resp := h.Check(ctx)
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK) // Always 200 for deep health
+		if resp.Status == StatusHealthy {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
 		_ = json.NewEncoder(w).Encode(resp)
 	}
 }

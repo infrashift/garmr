@@ -162,8 +162,16 @@ Recorded, deliberately not done before the deploy:
   The "identity" mode must only be enabled when a sidecar owns the XFCC
   header — documented in config.example.yaml, configuration.md, and the
   Nomad README.
-- **`/health/deep` quirks**: always returns HTTP 200 (status body-only) and
-  is the only health path that requires the API key. Both undocumented.
+- ~~**`/health/deep` quirks**~~ — done (2026-07-28, follow-up commit).
+  Kept: it is the only endpoint that verifies the policy volume is still
+  mounted and readable after startup (the storage round trip). The status
+  code is now honest — 200 only when every check is healthy, 503 otherwise,
+  per-check detail in the body — pinned by tests including a live
+  volume-goes-away case. The API-key requirement is kept deliberately and
+  now documented + pinned: probes can't carry credentials so
+  /healthz//readyz//livez stay exempt, while /health/deep performs storage
+  I/O on every call and stays gated. openapi.json, rest-api.md, and
+  deploying.md all state both behaviors.
 - **Hardcoded server limits**: `MaxRecvSize` fixed at 16 MB in main.go
   (evaluate buffers the full body via io.ReadAll), Read/Write/Idle
   timeouts fixed in `newHTTPServer` — should be config, and reconciled

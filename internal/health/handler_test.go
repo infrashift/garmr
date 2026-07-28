@@ -172,13 +172,14 @@ func TestDeepHealthHandler(t *testing.T) {
 	})
 	handler := h.DeepHealthHandler()
 
-	req := httptest.NewRequest("GET", "/livez", nil)
+	req := httptest.NewRequest("GET", "/health/deep", nil)
 	w := httptest.NewRecorder()
 	handler(w, req)
 
-	// Deep health always returns 200
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w.Code)
+	// The status code is honest: an unhealthy check means 503, with the
+	// per-check detail in the body.
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 for an unhealthy check, got %d", w.Code)
 	}
 
 	var resp Response
@@ -187,6 +188,22 @@ func TestDeepHealthHandler(t *testing.T) {
 	}
 	if _, ok := resp.Checks["check"]; !ok {
 		t.Error("expected check details in deep health response")
+	}
+}
+
+func TestDeepHealthHandler_Healthy(t *testing.T) {
+	h := NewHandler("1.0.0")
+	h.Register("check", func(ctx context.Context) *Check {
+		return &Check{Status: StatusHealthy}
+	})
+	handler := h.DeepHealthHandler()
+
+	req := httptest.NewRequest("GET", "/health/deep", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for healthy checks, got %d", w.Code)
 	}
 }
 

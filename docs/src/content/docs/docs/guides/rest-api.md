@@ -92,11 +92,23 @@ curl http://localhost:8080/readyz
 #### GET /health/deep
 
 Comprehensive health check. Runs every readiness check *plus* the dependency
-checks, including a real round trip to the storage backend. Intended for
-debugging and monitoring, not for probes.
+checks, including a real round trip to the storage backend — in a
+shared-volume deployment this is the endpoint that tells you whether the
+policy volume is still mounted and readable. Intended for operators and
+monitoring, not for probes.
+
+**Response:**
+
+- `200 OK` - Every check healthy (per-check detail in the body)
+- `503 Service Unavailable` - One or more checks degraded or unhealthy
+
+Unlike the probe endpoints (`/healthz`, `/readyz`, `/livez`), this endpoint
+is **not** auth-exempt: when `auth.api_key` is set, callers must present it.
+Probes can't carry credentials; this endpoint performs storage I/O on every
+call, so it is deliberately gated.
 
 ```bash
-curl http://localhost:8080/health/deep
+curl -f http://localhost:8080/health/deep
 ```
 
 ---

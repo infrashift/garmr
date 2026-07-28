@@ -146,7 +146,10 @@ tracing:
   cheap in-process checks: the storage backend is *not* contacted, so a
   kubelet polling this endpoint does not generate backend traffic.
 - `/health/deep` — comprehensive check, adding the storage backend round
-  trip, for debugging and monitoring (not for probes).
+  trip (is the policy volume still mounted and readable?), for operators
+  and monitoring, not for probes. Returns 503 when any check fails, and —
+  unlike the probe endpoints — requires the API key when one is set,
+  because every call performs storage I/O.
 
 The Helm chart wires these probes automatically.
 

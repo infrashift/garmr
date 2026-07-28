@@ -253,12 +253,12 @@ type PolicyList struct {
 
 // ListPolicies lists all policies along with the policy-set digest.
 func (c *Client) ListPolicies(ctx context.Context, namespace string) (*PolicyList, error) {
-	url := c.baseURL + "/v1/policies"
+	reqURL := c.baseURL + "/v1/policies"
 	if namespace != "" {
-		url += "?namespace=" + namespace
+		reqURL += "?" + url.Values{"namespace": {namespace}}.Encode()
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -282,11 +282,16 @@ func (c *Client) ListPolicies(ctx context.Context, namespace string) (*PolicyLis
 	return &result, nil
 }
 
-// DeletePolicy deletes a policy.
+// DeletePolicy deletes a policy. Name and namespace are query-escaped: a
+// value containing `&`, `#`, `=` or a space must arrive as data, not as
+// query-string structure.
 func (c *Client) DeletePolicy(ctx context.Context, name, namespace string) (bool, error) {
-	url := fmt.Sprintf("%s/v1/policies?name=%s&namespace=%s", c.baseURL, name, namespace)
+	reqURL := c.baseURL + "/v1/policies?" + url.Values{
+		"name":      {name},
+		"namespace": {namespace},
+	}.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "DELETE", reqURL, nil)
 	if err != nil {
 		return false, fmt.Errorf("creating request: %w", err)
 	}

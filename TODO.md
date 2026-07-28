@@ -143,9 +143,11 @@ Recorded, deliberately not done before the deploy:
   the limiter) and pinned. rest-api.md's status table now lists
   401/405/413/429 and the honest one-field error shape; openapi.json's
   reload 400 is JSON.
-- **Client query-param escaping**: `DeletePolicy`/`ListPolicies` build
-  query strings with Sprintf on raw input (`client.go`) — a name containing
-  `&`/`#`/space produces a malformed request. Use `url.Values`.
+- ~~**Client query-param escaping**~~ — done (2026-07-28, follow-up
+  commit). `DeletePolicy`/`ListPolicies` build their query strings with
+  `url.Values.Encode()` (the raw-Sprintf locals also shadowed the `url`
+  package); `TestClient_QueryParamsEscaped` pins that names/namespaces
+  containing `&`/`#`/`=`/spaces arrive server-side as data.
 - **Rate limiting behind a sidecar**: with Consul transparent proxy every
   caller shares one per-client bucket (RemoteAddr is the local Envoy), and
   the per-client knobs (`ClientIdentifier`, `HeaderName`, per-client

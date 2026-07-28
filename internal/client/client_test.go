@@ -281,6 +281,46 @@ func TestClient_ListPolicies_WithNamespace(t *testing.T) {
 
 // --- DeletePolicy ---
 
+// Query parameters must be escaped: a policy name containing query-string
+// metacharacters has to arrive server-side as data. The Sprintf-built URL
+// this replaces let `&`/`#`/`=`/spaces restructure the request.
+func TestClient_QueryParamsEscaped(t *testing.T) {
+	const hostileName = "we&ird na=me#1?"
+	const hostileNS = "team/a&b"
+
+	var gotDeleteName, gotDeleteNS, gotListNS string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodDelete:
+			gotDeleteName = r.URL.Query().Get("name")
+			gotDeleteNS = r.URL.Query().Get("namespace")
+			json.NewEncoder(w).Encode(map[string]any{"deleted": true})
+		default:
+			gotListNS = r.URL.Query().Get("namespace")
+			json.NewEncoder(w).Encode(map[string]any{"policies": []any{}})
+		}
+	}))
+	defer server.Close()
+
+	c, _ := NewClient(Config{Address: server.URL})
+	defer c.Close()
+
+	if _, err := c.DeletePolicy(context.Background(), hostileName, hostileNS); err != nil {
+		t.Fatalf("DeletePolicy: %v", err)
+	}
+	if gotDeleteName != hostileName || gotDeleteNS != hostileNS {
+		t.Errorf("delete params arrived as (%q, %q), want (%q, %q)",
+			gotDeleteName, gotDeleteNS, hostileName, hostileNS)
+	}
+
+	if _, err := c.ListPolicies(context.Background(), hostileNS); err != nil {
+		t.Fatalf("ListPolicies: %v", err)
+	}
+	if gotListNS != hostileNS {
+		t.Errorf("list namespace arrived as %q, want %q", gotListNS, hostileNS)
+	}
+}
+
 func TestClient_DeletePolicy(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {

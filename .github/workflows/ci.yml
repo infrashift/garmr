@@ -92,6 +92,33 @@ jobs:
       - name: cue fmt --check
         run: cue fmt --check ./schemas/... ./example-policies/...
 
+  container:
+    name: Container Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The image and its HEALTHCHECK were previously unverified on PRs,
+      # which is how a broken healthcheck and docker targets that pointed
+      # at a nonexistent Dockerfile shipped.
+      - name: Build image
+        run: docker build -f Containerfile -t garmr:ci .
+      - name: Smoke-test image
+        run: |
+          docker run -d --name garmr-ci \
+            -v "$PWD/example-policies:/policies:ro" \
+            garmr:ci --policy-dir /policies --http-addr :8080
+          for i in $(seq 1 30); do
+            if docker exec garmr-ci /usr/local/bin/garmr health --server http://localhost:8080; then
+              break
+            fi
+            if [ "$i" = 30 ]; then
+              echo "server never became healthy"; docker logs garmr-ci; exit 1
+            fi
+            sleep 1
+          done
+          docker exec garmr-ci wget -q -O- http://localhost:8080/readyz
+          docker rm -f garmr-ci
+
   docs:
     name: Docs Build
     runs-on: ubuntu-latest

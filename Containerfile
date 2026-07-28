@@ -56,4 +56,4 @@ ENTRYPOINT ["/usr/local/bin/garmr-server"]
 CMD ["--config", "/etc/garmr/config.yaml"]
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
-    CMD /usr/local/bin/garmr health --server localhost:8080 || exit 1
+    CMD /usr/local/bin/garmr health --server http://localhost:8080 || exit 1

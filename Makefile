@@ -79,9 +79,7 @@ fmt: ## Format code
 
 ## Development
 
-run: build ## Run server with config.yaml
-	@mkdir -p /tmp/garmr-audit
-	./bin/garmr-server --config garmr-server.config.yaml
+run: dev ## Alias of dev: run the server locally against the example policies
 
 dev: build ## Run server in development mode (no config file)
 	@mkdir -p /tmp/garmr-audit
@@ -97,8 +95,8 @@ doc-dev: ## Run the Astro documentation site locally (bun)
 
 ## Docker
 
-docker-build: ## Build Docker image (host platform)
-	docker build -t garmr:$(VERSION) .
+docker-build: ## Build container image (host platform)
+	docker build -f Containerfile -t garmr:$(VERSION) .
 
 docker-push: docker-build ## Push Docker image
 	docker push garmr:$(VERSION)
@@ -111,6 +109,7 @@ DOCKER_IMAGE     ?= $(DOCKER_REGISTRY)/garmr
 
 docker-buildx: ## Build multi-arch image without pushing (local tar only)
 	docker buildx build \
+		--file Containerfile \
 		--platform $(DOCKER_PLATFORMS) \
 		--tag $(DOCKER_IMAGE):$(VERSION) \
 		--build-arg VERSION=$(VERSION) \
@@ -119,6 +118,7 @@ docker-buildx: ## Build multi-arch image without pushing (local tar only)
 
 docker-release: ## Build and push multi-arch image to $(DOCKER_IMAGE)
 	docker buildx build \
+		--file Containerfile \
 		--platform $(DOCKER_PLATFORMS) \
 		--tag $(DOCKER_IMAGE):$(VERSION) \
 		--tag $(DOCKER_IMAGE):latest \

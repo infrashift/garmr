@@ -4,7 +4,7 @@ out/
 /garmr-server
 q-audit/
 garmr-audit/
-**/q-server.config.yaml
+**/garmr-server.config.yaml
 coverage.out
 coverage.html
 *.so

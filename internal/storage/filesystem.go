@@ -125,13 +125,21 @@ func (b *FilesystemBackend) List(ctx context.Context, pattern string) ([]FileInf
 	return files, err
 }
 
-// withinRoot reports whether fullPath is the backend root or inside it.
+// WithinRoot reports whether fullPath is root or inside it.
 // A bare prefix check is not enough: "/policiesX" has "/policies" as a
 // string prefix without being inside it.
-func (b *FilesystemBackend) withinRoot(fullPath string) bool {
-	root := filepath.Clean(b.root)
+//
+// Exported because the engine needs the same containment check when staging
+// files from a non-filesystem backend into a temp directory.
+func WithinRoot(root, fullPath string) bool {
+	cleanRoot := filepath.Clean(root)
 	cleaned := filepath.Clean(fullPath)
-	return cleaned == root || strings.HasPrefix(cleaned, root+string(os.PathSeparator))
+	return cleaned == cleanRoot || strings.HasPrefix(cleaned, cleanRoot+string(os.PathSeparator))
+}
+
+// withinRoot reports whether fullPath is the backend root or inside it.
+func (b *FilesystemBackend) withinRoot(fullPath string) bool {
+	return WithinRoot(b.root, fullPath)
 }
 
 func (b *FilesystemBackend) Get(ctx context.Context, path string) ([]byte, error) {

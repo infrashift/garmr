@@ -188,17 +188,10 @@ func numericComparison(fieldVal, operandVal cue.Value, path, symbol string, cmp 
 	return true, ""
 }
 
-// getCompiledRegex returns a compiled regex from the cache, compiling and caching it if needed.
+// getCompiledRegex returns a compiled regex from the engine's bounded cache,
+// compiling and caching it if needed.
 func (e *Engine) getCompiledRegex(pattern string) (*regexp.Regexp, error) {
-	if cached, ok := e.regexCache.Load(pattern); ok {
-		return cached.(*regexp.Regexp), nil
-	}
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return nil, err
-	}
-	e.regexCache.Store(pattern, re)
-	return re, nil
+	return e.regexCache.get(pattern)
 }
 
 // matchesPatternCached checks if a value matches a pattern (supports * wildcard)

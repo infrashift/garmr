@@ -112,7 +112,14 @@ funcComparePolicy: {
 	}
 }
 
-// Environment variable comparison — resolve values from environment
+// Cross-field comparison against a declared expectation.
+//
+// Note: comparing against a server environment variable is deliberately not
+// supported. Policy authors are not necessarily server operators, and
+// violation messages interpolate resolved values back to the caller, so
+// reading the server's environment would be a secret-exfiltration path.
+// Inject the expected value into the evaluation input instead — as an
+// annotation here — so it travels with the request and is auditable.
 envComparePolicy: {
 	apiVersion: "policy.garmr.io/v1"
 	kind:       "Policy"
@@ -121,19 +128,19 @@ envComparePolicy: {
 		namespace: "advanced-operators"
 	}
 	spec: {
-		description: "Compares input values against environment variables"
+		description: "Compares a deployment target against the cluster it was approved for"
 		target: resources: [{kind: "*"}]
 		rules: [
 			{
 				id:          "CMP-106"
-				description: "Target cluster must match DEPLOY_CLUSTER env var"
+				description: "Target cluster must match the approved cluster annotation"
 				severity:    "high"
 				expr: compare: {
 					left:  {path: "spec.targetCluster"}
 					op:    "=="
-					right: {env: "DEPLOY_CLUSTER"}
+					right: {path: "metadata.annotations.\"garmr.io/approved-cluster\""}
 				}
-				message: "target cluster does not match DEPLOY_CLUSTER environment variable"
+				message: "target cluster does not match the approved cluster annotation"
 			},
 		]
 		enforcement: action: "deny"

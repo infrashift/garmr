@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"cuelang.org/go/cue"
@@ -109,13 +108,81 @@ func (e *Engine) evaluateExpression(ctx context.Context, expr cue.Value, input c
 		return false, bindings, "expr 'ref' is not supported"
 	}
 
-	// Default: try to unify and check for errors
+	// Default: the expression is a raw CUE constraint over input fields, e.g.
+	// `expr: {spec: replicas: <=3}`. Unify it with the input and check for
+	// errors.
+	//
+	// This branch is why a typo'd operator used to pass silently: the input is
+	// encoded from a map[string]any, so it is an OPEN struct, and unifying
+	// `{mach: {...}}` (a misspelling of `match`) simply added a new field and
+	// succeeded. Guard the branch before unifying — see exprConstrainsInput.
+	if reason := exprConstrainsInput(expr, input); reason != "" {
+		return false, bindings, reason
+	}
+
 	unified := input.Unify(expr)
 	if unified.Err() != nil {
 		return false, bindings, unified.Err().Error()
 	}
 
+	// Require the unified result to be concrete. Without this, a constraint
+	// naming a field the input does not have (`expr: {spec: {required:
+	// string}}`) stays non-concrete and passes vacuously.
+	if err := unified.Validate(cue.Concrete(true)); err != nil {
+		return false, bindings, fmt.Sprintf("constraint not satisfied: %v", err)
+	}
+
 	return true, bindings, ""
+}
+
+// knownExprOperators is the closed set of structured expression operators,
+// matching #Expression in schemas/policy.cue. Every entry has a dedicated
+// branch in evaluateExpression above.
+var knownExprOperators = map[string]bool{
+	"forEach":  true,
+	"all":      true,
+	"any":      true,
+	"not":      true,
+	"exists":   true,
+	"absent":   true,
+	"contains": true,
+	"match":    true,
+	"compare":  true,
+	"func":     true,
+}
+
+// exprConstrainsInput guards the raw-CUE-constraint fallback. It returns a
+// failure reason when the expression looks like a misspelled operator rather
+// than a constraint over the input.
+//
+// The discriminator: a genuine raw constraint narrows a field that EXISTS on
+// the input, whereas a typo'd operator introduces a field that does not. We
+// cannot simply reject unknown keys — raw constraints are a supported,
+// tested feature (see TestEvaluate_RawConstraint_DirLoad_Concurrent).
+func exprConstrainsInput(expr cue.Value, input cue.Value) string {
+	iter, err := expr.Fields()
+	if err != nil {
+		// Not a struct: nothing to discriminate, let Unify decide.
+		return ""
+	}
+
+	for iter.Next() {
+		name := iter.Selector().Unquoted()
+		if knownExprOperators[name] {
+			// Handled by a branch above; reaching here means it coexists with
+			// other fields, which is still fine to unify.
+			continue
+		}
+		if input.LookupPath(cue.MakePath(cue.Str(name))).Exists() {
+			continue
+		}
+		return fmt.Sprintf(
+			"unknown expr operator %q, and the input has no field %q for it to constrain. "+
+				"Valid operators are: absent, all, any, compare, contains, exists, forEach, func, match, not.",
+			name, name)
+	}
+
+	return ""
 }
 
 // evaluateFunc evaluates a builtin function call expression.
@@ -588,10 +655,13 @@ func (e *Engine) resolveValue(ctx context.Context, val cue.Value, input cue.Valu
 		return result, nil
 	}
 
-	// Check for env variable
-	if envVal := val.LookupPath(cue.ParsePath("env")); envVal.Exists() {
-		envName, _ := envVal.String()
-		return os.Getenv(envName), nil
+	// Note: `{env: "NAME"}` is deliberately not supported. Policy authors are
+	// not necessarily server operators, and violation messages interpolate
+	// resolved values back to the caller, so reading the server's environment
+	// would let any policy exfiltrate credentials over /v1/evaluate. Inject
+	// the value into the evaluation input instead.
+	if val.LookupPath(cue.ParsePath("env")).Exists() {
+		return nil, fmt.Errorf("value source 'env' is not supported: reading server environment variables from a policy is disallowed; pass the value in the evaluation input instead")
 	}
 
 	return nil, fmt.Errorf("value must specify one of 'path', 'literal', or 'func'")

@@ -466,13 +466,28 @@ func (e *Engine) stageBackendFiles(ctx context.Context, backend storage.Backend)
 	cleanup := func() { os.RemoveAll(tempDir) }
 
 	for _, file := range files {
+		// Containment check before touching the filesystem. A backend key
+		// containing ".." or an absolute path would otherwise write outside
+		// the temp directory as the server user. Fail the whole load rather
+		// than skipping the file: a partially staged policy set is exactly
+		// the silent-pass that requireMatch exists to prevent.
+		rel := filepath.FromSlash(file.Path)
+		if !filepath.IsLocal(rel) {
+			cleanup()
+			return "", func() {}, fmt.Errorf("backend %s returned unsafe path %q", backend.Type(), file.Path)
+		}
+
+		destPath := filepath.Join(tempDir, rel)
+		if !storage.WithinRoot(tempDir, destPath) {
+			cleanup()
+			return "", func() {}, fmt.Errorf("backend %s returned path %q that escapes the staging directory", backend.Type(), file.Path)
+		}
+
 		content, err := backend.Get(ctx, file.Path)
 		if err != nil {
 			cleanup()
 			return "", func() {}, fmt.Errorf("reading %s from backend: %w", file.Path, err)
 		}
-
-		destPath := filepath.Join(tempDir, filepath.FromSlash(file.Path))
 
 		// Ensure parent directory exists
 		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {

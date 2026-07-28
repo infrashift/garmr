@@ -341,12 +341,6 @@ package policy
 
 	// Function call result
 	func?: #FuncCall
-
-	// Environment variable
-	env?: string
-
-	// Data reference
-	data?: string
 }
 
 // FuncCall invokes a built-in function within a Value context.

@@ -60,8 +60,9 @@ type Engine struct {
 	// Builtins for function evaluation
 	builtins map[string]BuiltinFunc
 
-	// regexCache caches compiled regular expressions for pattern matching
-	regexCache sync.Map // map[string]*regexp.Regexp
+	// regexCache caches compiled regular expressions for pattern matching.
+	// Bounded, because patterns can come from caller-supplied input.
+	regexCache *regexCache
 
 	// obs provides optional metrics, tracing, and audit logging
 	obs *observability.Provider
@@ -87,6 +88,7 @@ func NewEngine(logger *zap.Logger) (*Engine, error) {
 		set:          set,
 		logger:       logger,
 		builtins:     make(map[string]BuiltinFunc),
+		regexCache:   newRegexCache(maxRegexCacheEntries),
 		obs:          observability.NewProvider(),
 		requireMatch: true,
 	}

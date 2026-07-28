@@ -38,12 +38,12 @@ import (
 var openAPISpec []byte
 
 // Config holds server configuration.
+// Garmr terminates plain HTTP only: transport security (mTLS) is the service
+// mesh's job. The TLS listener and its config knobs were removed deliberately;
+// anyone deploying outside a mesh should front the server with a TLS proxy.
 type Config struct {
 	HTTPAddr        string
 	PolicyDir       string
-	TLSCert         string
-	TLSKey          string
-	EnableTLS       bool
 	MaxRecvSize     int
 	ShutdownTimeout time.Duration // graceful shutdown timeout (default 30s)
 	Version         string        // reported in /health and the health handler; injected via ldflags in main
@@ -157,6 +157,26 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 		version = "dev"
 	}
 	s.healthHandler = health.NewHandler(version)
+
+	// Readiness must fail the moment Stop() begins draining — the mesh
+	// otherwise keeps routing new requests at a server that is about to
+	// close its listener. Deployment probes point at /readyz, which runs
+	// only the cheap checkers, and none of them consulted s.ready before.
+	s.healthHandler.Register("server", func(ctx context.Context) *health.Check {
+		s.mu.RLock()
+		ready := s.ready
+		s.mu.RUnlock()
+		if !ready {
+			return &health.Check{
+				Status:  health.StatusDegraded,
+				Message: "not accepting traffic (starting or draining)",
+			}
+		}
+		return &health.Check{
+			Status:  health.StatusHealthy,
+			Message: "accepting traffic",
+		}
+	})
 
 	// Register a policy loader health checker
 	s.healthHandler.Register("policies", func(ctx context.Context) *health.Check {
@@ -513,11 +533,6 @@ func (s *Server) newHTTPServer() *http.Server {
 
 // serve blocks serving on srv. Only ever called from the Start goroutine.
 func (s *Server) serve(srv *http.Server) error {
-	if s.config.EnableTLS {
-		s.logger.Info("starting HTTPS server", zap.String("addr", s.config.HTTPAddr))
-		return srv.ListenAndServeTLS(s.config.TLSCert, s.config.TLSKey)
-	}
-
 	s.logger.Info("starting HTTP server", zap.String("addr", s.config.HTTPAddr))
 	return srv.ListenAndServe()
 }

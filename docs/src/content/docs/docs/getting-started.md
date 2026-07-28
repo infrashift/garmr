@@ -318,11 +318,8 @@ http_addr: ":8080"
 # Policy loading
 policy_dir: "/policies"
 
-# TLS (optional)
-tls:
-  enabled: false
-  cert: "/path/to/cert.pem"
-  key: "/path/to/key.pem"
+# Transport security: Garmr serves plain HTTP only. TLS/mTLS is the
+# service mesh's (or a fronting proxy's) job.
 
 # Logging
 log:

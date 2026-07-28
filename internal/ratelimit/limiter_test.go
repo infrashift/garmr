@@ -217,15 +217,19 @@ func TestExtractClientID_HeaderMode(t *testing.T) {
 	}
 }
 
-func TestExtractClientID_CertModeWithoutTLS(t *testing.T) {
+func TestExtractClientID_UnknownModeFallsBackToIP(t *testing.T) {
 	cfg := testConfig()
+	// "cert" was removed with the TLS listener (the server never terminates
+	// TLS, so peer certificates cannot exist); unknown identifiers fall back
+	// to the client IP.
 	cfg.ClientIdentifier = "cert"
 	l := New(cfg)
 	defer l.Close()
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	if got := l.extractClientID(req); got != "" {
-		t.Errorf("extractClientID = %q, want empty for a non-TLS request", got)
+	req.RemoteAddr = "10.1.2.3:4567"
+	if got := l.extractClientID(req); got != "10.1.2.3" {
+		t.Errorf("extractClientID = %q, want the client IP fallback", got)
 	}
 }
 

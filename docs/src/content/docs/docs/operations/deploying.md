@@ -174,10 +174,14 @@ This means:
 
 ## Graceful shutdown
 
-Garmr traps SIGTERM and shuts the HTTP server down within 5 seconds by
-default. Kubernetes sends SIGTERM at pod deletion and waits for
-`terminationGracePeriodSeconds` (default 30). The chart leaves the default
-grace period in place, which is more than enough for typical evaluations.
+Garmr traps SIGTERM, immediately flips `/readyz` to 503 so no new traffic
+routes to the instance, and drains in-flight requests for up to
+`shutdown_timeout` (default **30 seconds**, `--shutdown-timeout`).
+Kubernetes sends SIGTERM at pod deletion and waits for
+`terminationGracePeriodSeconds` (default 30). Because the drain budget and
+the default grace period are the same length, either lower
+`--shutdown-timeout` or raise `terminationGracePeriodSeconds` so a drain
+that uses its full budget is not cut short by SIGKILL.
 
 ## Backup & restore
 

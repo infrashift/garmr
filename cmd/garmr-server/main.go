@@ -65,11 +65,6 @@ func init() {
 	rootCmd.Flags().String("http-addr", ":8080", "HTTP listen address")
 	rootCmd.Flags().String("policy-dir", "", "directory containing policies")
 
-	// TLS flags
-	rootCmd.Flags().Bool("tls", false, "enable TLS")
-	rootCmd.Flags().String("tls-cert", "", "TLS certificate file")
-	rootCmd.Flags().String("tls-key", "", "TLS key file")
-
 	// Logging flags
 	rootCmd.Flags().String("log-level", "info", "log level (debug, info, warn, error)")
 	rootCmd.Flags().String("log-format", "json", "log format (json, console)")
@@ -89,9 +84,6 @@ func init() {
 	// Bind to viper
 	viper.BindPFlag("http_addr", rootCmd.Flags().Lookup("http-addr"))
 	viper.BindPFlag("policy_dir", rootCmd.Flags().Lookup("policy-dir"))
-	viper.BindPFlag("tls.enabled", rootCmd.Flags().Lookup("tls"))
-	viper.BindPFlag("tls.cert", rootCmd.Flags().Lookup("tls-cert"))
-	viper.BindPFlag("tls.key", rootCmd.Flags().Lookup("tls-key"))
 	viper.BindPFlag("log.level", rootCmd.Flags().Lookup("log-level"))
 	viper.BindPFlag("log.format", rootCmd.Flags().Lookup("log-format"))
 	viper.BindPFlag("dev", rootCmd.Flags().Lookup("dev"))
@@ -199,9 +191,6 @@ func runServer(cmd *cobra.Command, args []string) error {
 	cfg := server.Config{
 		HTTPAddr:           viper.GetString("http_addr"),
 		PolicyDir:          viper.GetString("policy_dir"),
-		TLSCert:            viper.GetString("tls.cert"),
-		TLSKey:             viper.GetString("tls.key"),
-		EnableTLS:          viper.GetBool("tls.enabled"),
 		MaxRecvSize:        16 * 1024 * 1024, // 16MB
 		ShutdownTimeout:    viper.GetDuration("shutdown_timeout"),
 		Version:            version,

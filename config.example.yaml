@@ -7,15 +7,12 @@ http_addr: ":8080"
 # Policy configuration
 policy_dir: "/etc/garmr/policies"
 
-# TLS configuration (optional)
-# Server-side TLS only. Garmr deliberately does not implement mTLS — mutual
-# TLS is the service mesh's job (Consul Connect terminates client mTLS at
-# the sidecar and forwards the verified identity; see auth.identity_header
-# below and deploy/helm/garmr/examples/consul-connect/).
-tls:
-  enabled: false
-  cert: "/etc/garmr/tls/server.crt"
-  key: "/etc/garmr/tls/server.key"
+# Transport security
+# Garmr serves plain HTTP only. TLS — including mTLS — is the service mesh's
+# job: Consul Connect terminates mTLS at the sidecar and forwards the
+# verified identity (see auth.identity_header below and
+# deploy/helm/garmr/examples/consul-connect/). Deploying outside a mesh?
+# Front the server with a TLS-terminating proxy.
 
 # Logging configuration
 log:

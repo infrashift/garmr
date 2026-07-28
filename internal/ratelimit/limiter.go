@@ -415,12 +415,6 @@ func (l *Limiter) extractClientID(r *http.Request) string {
 	case "header":
 		return r.Header.Get(l.config.HeaderName)
 
-	case "cert":
-		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-			return r.TLS.PeerCertificates[0].Subject.CommonName
-		}
-		return ""
-
 	default:
 		return clientIP(r.RemoteAddr)
 	}

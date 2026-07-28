@@ -34,22 +34,9 @@ policy_dir: "/etc/garmr/policies"
 |---------|---------|-------------|
 | `policy_dir` | _(none)_ | Root directory for CUE policy files |
 
-## TLS Configuration
+## Transport Security
 
-Enable TLS to encrypt traffic between clients and the Garmr server. Mutual TLS (client certificate authentication) is not currently implemented.
-
-```yaml
-tls:
-  enabled: false
-  cert: "/etc/garmr/tls/server.crt"
-  key: "/etc/garmr/tls/server.key"
-```
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `tls.enabled` | `false` | Enable TLS encryption |
-| `tls.cert` | _(none)_ | Path to TLS certificate file |
-| `tls.key` | _(none)_ | Path to TLS private key file |
+Garmr serves plain HTTP only — there are no TLS settings. Transport security, including mTLS, is the service mesh's job: Consul Connect (or another sidecar proxy) terminates mTLS and forwards the verified caller identity in the header configured by `auth.identity_header`. Deploying outside a mesh? Front the server with a TLS-terminating proxy.
 
 ## Authentication
 
@@ -167,16 +154,25 @@ http_addr: ":8080"
 # Policy configuration
 policy_dir: "/etc/garmr/policies"
 
-# TLS configuration (optional)
-tls:
-  enabled: false
-  cert: "/etc/garmr/tls/server.crt"
-  key: "/etc/garmr/tls/server.key"
+# Graceful shutdown drain budget
+shutdown_timeout: "30s"
 
-# Authentication (optional)
+# Authentication & caller identity (optional)
 # auth:
 #   api_key: "change-me"
 #   api_key_header: "X-API-Key"
+#   identity_header: "X-Forwarded-Client-Cert"
+
+# CORS (optional; empty list = Access-Control-Allow-Origin: *)
+# cors:
+#   allowed_origins: []
+
+# Rate limiting (optional)
+# rate_limit:
+#   enabled: false
+#   rps: 100
+#   burst: 200
+#   trusted_proxies: []
 
 # Logging configuration
 log:
@@ -191,6 +187,9 @@ evaluation:
 audit:
   enabled: true
   path: "/var/log/garmr/audit.log"
+  # max_size: 100      # MB before rotation
+  # max_backups: 10
+  # max_age: 30        # days
 
 # Storage backend configuration
 # storage:

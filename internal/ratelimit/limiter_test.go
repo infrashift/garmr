@@ -1,7 +1,6 @@
 package ratelimit
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -86,53 +85,6 @@ func TestAllow_ExemptClient(t *testing.T) {
 		if got := l.Allow("trusted"); !got.Allowed {
 			t.Fatalf("exempt client denied on request %d", i)
 		}
-	}
-}
-
-func TestAllowN(t *testing.T) {
-	cfg := testConfig()
-	cfg.PerClient = false
-	cfg.RequestsPerSecond = 1
-	cfg.Burst = 5
-	l := New(cfg)
-	defer l.Close()
-
-	if got := l.AllowN("", 5); !got.Allowed {
-		t.Fatal("AllowN(5) denied within a burst of 5")
-	}
-	if got := l.AllowN("", 5); got.Allowed {
-		t.Error("AllowN(5) allowed after the burst was consumed")
-	}
-}
-
-func TestWait_CancelledContext(t *testing.T) {
-	cfg := testConfig()
-	cfg.PerClient = false
-	cfg.RequestsPerSecond = 0.0001
-	cfg.Burst = 1
-	l := New(cfg)
-	defer l.Close()
-
-	// Consume the burst.
-	if err := l.Wait(context.Background(), ""); err != nil {
-		t.Fatalf("first Wait failed: %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	if err := l.Wait(ctx, ""); err == nil {
-		t.Error("Wait returned nil after its context expired")
-	}
-}
-
-func TestWait_Disabled(t *testing.T) {
-	cfg := testConfig()
-	cfg.Enabled = false
-	l := New(cfg)
-	defer l.Close()
-
-	if err := l.Wait(context.Background(), "x"); err != nil {
-		t.Errorf("Wait failed while disabled: %v", err)
 	}
 }
 
@@ -246,9 +198,17 @@ func TestClientMap_BoundedByMaxClients(t *testing.T) {
 		l.Allow(string(rune('a'+i%26)) + string(rune('0'+i%10)) + time.Duration(i).String())
 	}
 
-	if got := l.ClientCount(); got > cfg.MaxClients {
+	if got := trackedClients(l); got > cfg.MaxClients {
 		t.Errorf("client map holds %d entries, want at most %d", got, cfg.MaxClients)
 	}
+}
+
+// trackedClients reads the client-map size directly; the exported
+// ClientCount accessor was deleted with the rest of the unused surface.
+func trackedClients(l *Limiter) int {
+	l.clientsMu.RLock()
+	defer l.clientsMu.RUnlock()
+	return len(l.clients)
 }
 
 func TestCleanupExpired(t *testing.T) {
@@ -260,15 +220,15 @@ func TestCleanupExpired(t *testing.T) {
 
 	l.Allow("client-a")
 	l.Allow("client-b")
-	if l.ClientCount() != 2 {
-		t.Fatalf("ClientCount = %d, want 2", l.ClientCount())
+	if got := trackedClients(l); got != 2 {
+		t.Fatalf("tracked clients = %d, want 2", got)
 	}
 
 	time.Sleep(time.Millisecond)
 	l.cleanupExpired()
 
-	if got := l.ClientCount(); got != 0 {
-		t.Errorf("ClientCount after cleanup = %d, want 0", got)
+	if got := trackedClients(l); got != 0 {
+		t.Errorf("tracked clients after cleanup = %d, want 0", got)
 	}
 }
 
@@ -355,7 +315,7 @@ func TestConcurrentAllowAndCleanup(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < 500; j++ {
 				l.Allow(string(rune('a' + (i+j)%26)))
-				l.ClientCount()
+				trackedClients(l)
 			}
 		}(i)
 	}

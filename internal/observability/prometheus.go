@@ -101,12 +101,6 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 	return m
 }
 
-// Registry returns the underlying Prometheus registry. Useful for tests and
-// for wiring additional collectors.
-func (m *PrometheusMetrics) Registry() *prometheus.Registry {
-	return m.registry
-}
-
 // Handler returns an http.Handler that exposes metrics in Prometheus text
 // format.
 func (m *PrometheusMetrics) Handler() http.Handler {

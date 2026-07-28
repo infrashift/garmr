@@ -74,11 +74,6 @@ func (p *Parser) Parse(data []byte, format Format) (map[string]any, error) {
 	}
 }
 
-// ParseBytes is a convenience method that auto-detects format.
-func (p *Parser) ParseBytes(data []byte) (map[string]any, error) {
-	return p.Parse(data, FormatAuto)
-}
-
 // DetectFormat attempts to detect the format from content.
 func (p *Parser) DetectFormat(data []byte) Format {
 	// Trim whitespace
@@ -149,21 +144,6 @@ func (p *Parser) parseYAML(data []byte) (map[string]any, error) {
 	return result, nil
 }
 
-// ToJSON converts a map to JSON bytes.
-func ToJSON(data map[string]any) ([]byte, error) {
-	return json.Marshal(data)
-}
-
-// ToJSONIndent converts a map to indented JSON bytes.
-func ToJSONIndent(data map[string]any, prefix, indent string) ([]byte, error) {
-	return json.MarshalIndent(data, prefix, indent)
-}
-
-// ToYAML converts a map to YAML bytes.
-func ToYAML(data map[string]any) ([]byte, error) {
-	return yaml.Marshal(data)
-}
-
 // FormatString returns a string representation of the format.
 func (f Format) String() string {
 	return string(f)
@@ -181,14 +161,4 @@ func ParseFormat(s string) (Format, error) {
 	default:
 		return "", fmt.Errorf("%w: %s", ErrUnsupportedFormat, s)
 	}
-}
-
-// SupportedFormats returns list of supported input formats.
-func SupportedFormats() []Format {
-	return []Format{FormatJSON, FormatYAML}
-}
-
-// SupportedExtensions returns list of supported file extensions.
-func SupportedExtensions() []string {
-	return []string{".json", ".yaml", ".yml"}
 }

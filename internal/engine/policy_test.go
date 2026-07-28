@@ -52,18 +52,6 @@ func TestDeletePolicy(t *testing.T) {
 	}
 }
 
-func TestClearPolicies(t *testing.T) {
-	source := makePolicy("p1", "default", "test",
-		`{id: "r1", description: "test", severity: "low", expr: {match: {path: "x", equals: 1}}, message: "fail"}`,
-		"deny", "")
-	eng := loadTestPolicy(t, "p1", "default", source)
-
-	eng.ClearPolicies()
-	if len(eng.ListPolicies("")) != 0 {
-		t.Error("expected no policies after clear")
-	}
-}
-
 func TestListPolicies_NamespaceFilter(t *testing.T) {
 	eng, _ := NewEngine(zap.NewNop())
 	source1 := makePolicy("p1", "ns1", "test",

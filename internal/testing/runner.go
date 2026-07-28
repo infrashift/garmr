@@ -46,9 +46,6 @@ type TestCase struct {
 	// Input is the test input data
 	Input map[string]interface{} `json:"input"`
 
-	// Context provides additional context (environment, principal, etc.)
-	Context map[string]interface{} `json:"context,omitempty"`
-
 	// Expect defines expected outcomes
 	Expect TestExpectation `json:"expect"`
 }
@@ -66,9 +63,6 @@ type TestExpectation struct {
 
 	// ViolationCount is the expected number of violations
 	ViolationCount *int `json:"violationCount,omitempty"`
-
-	// Output is expected output data (for data policies)
-	Output map[string]interface{} `json:"output,omitempty"`
 
 	// Error expects an error
 	Error bool `json:"error,omitempty"`
@@ -117,7 +111,6 @@ type TestResult struct {
 type ActualResult struct {
 	Decision   string      `json:"decision"`
 	Violations []Violation `json:"violations,omitempty"`
-	Output     interface{} `json:"output,omitempty"`
 	Error      string      `json:"error,omitempty"`
 }
 
@@ -237,12 +230,6 @@ func (r *Runner) parseTestCase(value cue.Value) (TestCase, error) {
 	if v := value.LookupPath(cue.ParsePath("input")); v.Exists() {
 		inputJSON, _ := v.MarshalJSON()
 		_ = json.Unmarshal(inputJSON, &tc.Input)
-	}
-
-	// Parse context
-	if v := value.LookupPath(cue.ParsePath("context")); v.Exists() {
-		ctxJSON, _ := v.MarshalJSON()
-		_ = json.Unmarshal(ctxJSON, &tc.Context)
 	}
 
 	// Parse expectations

@@ -85,25 +85,6 @@ func (h *Handler) RegisterDeep(name string, checker Checker) {
 	h.deepCheckers[name] = checker
 }
 
-// Unregister removes a health checker.
-func (h *Handler) Unregister(name string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	delete(h.checkers, name)
-	delete(h.deepCheckers, name)
-}
-
-// SetLive sets the liveness status.
-func (h *Handler) SetLive(live bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if live {
-		h.liveStatus = StatusHealthy
-	} else {
-		h.liveStatus = StatusUnhealthy
-	}
-}
-
 // Check runs every registered health check, readiness and deep alike.
 // /health/deep and external callers use this; readiness uses checkReadiness.
 func (h *Handler) Check(ctx context.Context) *Response {
@@ -242,69 +223,4 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/livez", h.LivenessHandler())
 	mux.HandleFunc("/readyz", h.ReadinessHandler())
 	mux.HandleFunc("/health/deep", h.DeepHealthHandler())
-}
-
-// Common health checkers
-
-// PolicyLoaderChecker creates a checker for policy loader health.
-func PolicyLoaderChecker(loader interface{ Health() error }) Checker {
-	return func(ctx context.Context) *Check {
-		if err := loader.Health(); err != nil {
-			return &Check{
-				Status:  StatusUnhealthy,
-				Message: err.Error(),
-			}
-		}
-		return &Check{Status: StatusHealthy}
-	}
-}
-
-// StorageBackendChecker creates a checker for storage backend health.
-func StorageBackendChecker(name string, backend interface{ Health(context.Context) error }) Checker {
-	return func(ctx context.Context) *Check {
-		if err := backend.Health(ctx); err != nil {
-			return &Check{
-				Status:  StatusUnhealthy,
-				Message: err.Error(),
-			}
-		}
-		return &Check{Status: StatusHealthy}
-	}
-}
-
-// PluginChecker creates a checker for a plugin.
-func PluginChecker(name string, plugin interface{ Health(context.Context) error }) Checker {
-	return func(ctx context.Context) *Check {
-		if err := plugin.Health(ctx); err != nil {
-			return &Check{
-				Status:  StatusUnhealthy,
-				Message: err.Error(),
-			}
-		}
-		return &Check{Status: StatusHealthy}
-	}
-}
-
-// DiskSpaceChecker creates a checker for available disk space.
-func DiskSpaceChecker(path string, minFreeBytes uint64) Checker {
-	return func(ctx context.Context) *Check {
-		// In production, use syscall.Statfs
-		// This is a placeholder
-		return &Check{
-			Status:  StatusHealthy,
-			Message: "disk space OK",
-		}
-	}
-}
-
-// MemoryChecker creates a checker for memory usage.
-func MemoryChecker(maxUsagePercent float64) Checker {
-	return func(ctx context.Context) *Check {
-		// In production, use runtime.MemStats
-		// This is a placeholder
-		return &Check{
-			Status:  StatusHealthy,
-			Message: "memory OK",
-		}
-	}
 }

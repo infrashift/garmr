@@ -30,6 +30,12 @@ func canonicalPolicyHash(val cue.Value) (string, error) {
 
 // LoadPolicy loads and compiles a policy from CUE source. The source is
 // compiled into every replica so each replica's context stays self-contained.
+//
+// No production path calls this — the server loads exclusively from the
+// policy directory. It is kept as the engine's in-memory load API: the test
+// suites across cmd/garmr, internal/server and this package build their
+// fixtures with it, and it validates against the same embedded schema as the
+// directory loader.
 func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string) error {
 	e.loadMu.Lock()
 	defer e.loadMu.Unlock()

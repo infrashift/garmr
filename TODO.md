@@ -89,17 +89,22 @@ Connect deployment.
 
 Recorded, deliberately not done before the deploy:
 
-- **Dead code**: `health` placeholder checkers (`PluginChecker`, and
-  `DiskSpaceChecker`/`MemoryChecker` which return healthy unconditionally —
-  the fail-open shape Phase 1 removed elsewhere; delete rather than ever
-  register), `health.SetLive`/`Unregister` (liveness is a constant),
-  `ratelimit.AllowN`/`Wait`/`ClientCount`, `input.ParseBytes`/`ToJSON*`/
-  `ToYAML`/`Supported*`, `engine.ClearPolicies` (then fold
-  `forEachExclusive` into its one caller), `PrometheusMetrics.Registry`,
-  `internal/testing` dead struct fields (`TestExpectation.Output`,
-  `ActualResult.Output`, `TestCase.Context` is parsed then ignored).
-  `engine.LoadPolicy` is now test-scaffolding only (no production caller);
-  keep or fold into test helpers.
+- ~~**Dead code**~~ — done (2026-07-28, follow-up commit). Deleted: the
+  `health` placeholder checkers (`PluginChecker`, the unconditionally-healthy
+  `DiskSpaceChecker`/`MemoryChecker`, plus the superseded
+  `PolicyLoaderChecker`/`StorageBackendChecker`), `health.SetLive`/
+  `Unregister` (liveness is deliberately constant — a test now pins the
+  always-200 contract), `ratelimit.AllowN`/`Wait`/`ClientCount` (the two
+  tests that used `ClientCount` to assert the map bound now read the map
+  directly in-package), `input.ParseBytes`/`ToJSON*`/`ToYAML`/`Supported*`,
+  `engine.ClearPolicies` (and `forEachExclusive` folded away — `DeletePolicy`
+  now goes through `mutateAll` with an infallible prepare),
+  `PrometheusMetrics.Registry`, and the `internal/testing` dead fields
+  (`TestExpectation.Output`, `ActualResult.Output`, `TestCase.Context`
+  including its parse-then-ignore block). `engine.LoadPolicy` was kept as
+  the engine's in-memory load API — the test suites in three packages build
+  fixtures with it, and its doc comment now states it has no production
+  caller.
 - **Duplication**: 8× CLI client-construction boilerplate (a
   `newClientFromFlags` helper collapses ~90 lines); `Load*/Reload*
   FromBackend` twins; `getNestedString` (server) vs `getStringField`

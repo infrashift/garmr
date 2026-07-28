@@ -56,7 +56,9 @@ func (e *Engine) GetPolicy(namespace, name string) (*CompiledPolicy, error) {
 // failure and aborts the load.
 var errNoPoliciesFound = errors.New("no policies found")
 
-// DeletePolicy removes a policy.
+// DeletePolicy removes a policy. The mutation cannot fail, so it goes
+// through mutateAll with an always-succeeding prepare — every commit runs,
+// keeping the replicas identical.
 func (e *Engine) DeletePolicy(namespace, name string) bool {
 	e.loadMu.Lock()
 	defer e.loadMu.Unlock()
@@ -65,33 +67,17 @@ func (e *Engine) DeletePolicy(namespace, name string) bool {
 
 	key := policyKey(namespace, name)
 	found := false
-	// Cannot fail, so forEachExclusive is fine here; the error is discarded
-	// deliberately rather than by omission.
-	_ = e.set.forEachExclusive(func(i int, r *policyReplica) error {
-		if _, ok := r.policies[key]; ok {
-			delete(r.policies, key)
-			if i == 0 {
-				found = true
+	_ = e.set.mutateAll(func(i int, r *policyReplica) (func(), error) {
+		return func() {
+			if _, ok := r.policies[key]; ok {
+				delete(r.policies, key)
+				if i == 0 {
+					found = true
+				}
 			}
-		}
-		return nil
+		}, nil
 	})
 	return found
-}
-
-// ClearPolicies removes all loaded policies.
-func (e *Engine) ClearPolicies() {
-	e.loadMu.Lock()
-	defer e.loadMu.Unlock()
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	// Cannot fail; see DeletePolicy.
-	_ = e.set.forEachExclusive(func(i int, r *policyReplica) error {
-		r.policies = make(map[string]*CompiledPolicy)
-		return nil
-	})
-	e.logger.Info("cleared all policies")
 }
 
 // ReloadPoliciesFromDir atomically reloads all policies from a directory.

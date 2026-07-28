@@ -7,7 +7,6 @@
 package ratelimit
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -224,66 +223,6 @@ func (l *Limiter) Allow(clientID string) *Result {
 	}
 }
 
-// AllowN checks if n requests are allowed.
-func (l *Limiter) AllowN(clientID string, n int) *Result {
-	if !l.config.Enabled {
-		return &Result{Allowed: true}
-	}
-
-	if l.exemptSet[clientID] {
-		return &Result{Allowed: true}
-	}
-
-	// Check global limit
-	if !l.global.AllowN(time.Now(), n) {
-		return &Result{
-			Allowed:   false,
-			Limit:     l.config.RequestsPerSecond,
-			Remaining: 0,
-		}
-	}
-
-	// Check per-client limit
-	if l.config.PerClient && clientID != "" {
-		client := l.getOrCreateClient(clientID)
-		if !client.limiter.AllowN(time.Now(), n) {
-			return &Result{
-				Allowed:   false,
-				Limit:     l.config.ClientRequestsPerSecond,
-				Remaining: 0,
-			}
-		}
-	}
-
-	return &Result{Allowed: true}
-}
-
-// Wait waits until a request is allowed or context is cancelled.
-func (l *Limiter) Wait(ctx context.Context, clientID string) error {
-	if !l.config.Enabled {
-		return nil
-	}
-
-	if l.exemptSet[clientID] {
-		return nil
-	}
-
-	// Wait on global limiter
-	if err := l.global.Wait(ctx); err != nil {
-		return err
-	}
-
-	// Wait on per-client limiter
-	if l.config.PerClient && clientID != "" {
-		client := l.getOrCreateClient(clientID)
-		if err := client.limiter.Wait(ctx); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
 func (l *Limiter) getOrCreateClient(clientID string) *clientLimiter {
 	l.clientsMu.RLock()
 	client, exists := l.clients[clientID]
@@ -367,13 +306,6 @@ func (l *Limiter) Close() {
 	l.closeOnce.Do(func() {
 		close(l.stopCleanup)
 	})
-}
-
-// ClientCount returns the number of tracked clients.
-func (l *Limiter) ClientCount() int {
-	l.clientsMu.RLock()
-	defer l.clientsMu.RUnlock()
-	return len(l.clients)
 }
 
 // Middleware returns an HTTP middleware for rate limiting.

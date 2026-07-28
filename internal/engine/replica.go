@@ -84,41 +84,17 @@ func (s *policySet) put(r *policyReplica) {
 	s.replicas <- r
 }
 
-// forEachExclusive drains every replica (blocking until in-flight evaluations
-// return theirs), applies fn to each, and refills the set. fn receives the
-// replica index; use it to emit logs/metrics only once (index 0). fn is
-// applied to all replicas even after an error so that deterministic failures
-// leave the replicas consistent; the first error is returned.
-func (s *policySet) forEachExclusive(fn func(i int, r *policyReplica) error) error {
-	drained := make([]*policyReplica, s.k)
-	for i := 0; i < s.k; i++ {
-		drained[i] = <-s.replicas
-	}
-	defer func() {
-		for _, r := range drained {
-			s.replicas <- r
-		}
-	}()
-
-	var firstErr error
-	for i, r := range drained {
-		if err := fn(i, r); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
-}
-
-// mutateAll applies a mutation to every replica atomically: prepare runs
-// against each replica first, and the returned commit functions are applied
-// only if every prepare succeeded.
+// mutateAll applies a mutation to every replica atomically: it drains every
+// replica (blocking until in-flight evaluations return theirs), runs prepare
+// against each, and applies the returned commit functions only if every
+// prepare succeeded.
 //
-// forEachExclusive cannot give this guarantee — it applies fn to all replicas
-// and returns the first error, so replicas that already succeeded keep the
-// mutation. A non-deterministic failure (transient I/O, memory pressure)
-// therefore left some replicas holding a policy and others not, and since
+// The two-phase shape matters for fallible mutations: applying as it went
+// would leave replicas that already succeeded holding the mutation after a
+// non-deterministic failure (transient I/O, memory pressure), and since
 // evaluations check out an arbitrary replica, two identical requests could
-// return different decisions.
+// then return different decisions. Infallible mutations (DeletePolicy) pass
+// a nil error and put the work in the commit closure.
 func (s *policySet) mutateAll(prepare func(i int, r *policyReplica) (commit func(), err error)) error {
 	drained := make([]*policyReplica, s.k)
 	for i := 0; i < s.k; i++ {

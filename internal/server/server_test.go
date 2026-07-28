@@ -56,23 +56,10 @@ func setupTestServer(t *testing.T, cfg Config) *httptest.Server {
 		t.Fatalf("NewServer: %v", err)
 	}
 
-	// Build the handler chain the same way startHTTP does
-	mux := http.NewServeMux()
-	srv.healthHandler.RegisterRoutes(mux)
-	mux.HandleFunc("/health", srv.handleHealth)
-	mux.HandleFunc("/ready", srv.handleReady)
-	mux.HandleFunc("/v1/evaluate", srv.handleEvaluate)
-	mux.HandleFunc("/v1/validate", srv.handleValidate)
-	mux.HandleFunc("/v1/policies", srv.handlePolicies)
-	mux.HandleFunc("/v1/policies/reload", srv.handleReloadPolicies)
-
-	var handler http.Handler = srv.identityMiddleware(mux)
-	handler = corsMiddleware(handler, cfg.CORSAllowedOrigins)
-	if srv.rateLimiter != nil {
-		handler = srv.rateLimiter.Middleware(handler)
-	}
-	handler = srv.authMiddleware(handler)
-	handler = srv.recoveryMiddleware(handler)
+	// Use the real handler chain rather than re-deriving it here: a local
+	// copy silently pins whatever middleware order it was written against,
+	// which is how the CORS-behind-auth bug stayed invisible to these tests.
+	handler := srv.Handler()
 
 	// Mark server as ready
 	srv.mu.Lock()

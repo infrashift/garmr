@@ -69,12 +69,19 @@ curl http://localhost:8080/livez
 
 #### GET /readyz
 
-Readiness probe — runs the health checks (with a short timeout) to determine whether the server can serve traffic.
+Readiness probe — runs the in-process readiness checks (with a short timeout)
+to determine whether the server can serve traffic.
+
+Readiness checks are deliberately cheap. Checks that make a network round trip
+— notably the storage backend — run only on `/health/deep`, because the
+kubelet polls this endpoint every few seconds and probing should not generate
+external traffic.
 
 **Response:**
 
 - `200 OK` - Server is ready
-- `503 Service Unavailable` - Server is not ready
+- `503 Service Unavailable` - Server is not ready (including when zero
+  policies are loaded)
 
 ```bash
 curl http://localhost:8080/readyz
@@ -84,7 +91,9 @@ curl http://localhost:8080/readyz
 
 #### GET /health/deep
 
-Comprehensive health check, including dependency checks such as the storage backend. Intended for debugging and monitoring, not for probes.
+Comprehensive health check. Runs every readiness check *plus* the dependency
+checks, including a real round trip to the storage backend. Intended for
+debugging and monitoring, not for probes.
 
 ```bash
 curl http://localhost:8080/health/deep
@@ -106,7 +115,7 @@ Legacy endpoints kept for backwards compatibility.
 }
 ```
 
-**GET /ready** returns `{"ready": ..., "checks": ...}` with `200 OK` when ready, `503 Service Unavailable` otherwise.
+**GET /ready** returns `{"ready": ..., "checks": ...}` with `200 OK` when ready, `503 Service Unavailable` otherwise. A failing entry in `checks` makes the endpoint report 503, so it agrees with `/readyz`.
 
 ```bash
 curl http://localhost:8080/health

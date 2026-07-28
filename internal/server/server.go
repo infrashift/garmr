@@ -94,9 +94,10 @@ type Server struct {
 	obs            *observability.Provider
 	storageBackend storage.Backend
 
-	mu     sync.RWMutex
-	ready  bool
-	checks map[string]bool
+	mu       sync.RWMutex
+	ready    bool
+	checks   map[string]bool
+	stopOnce sync.Once
 }
 
 // NewServer creates a new server instance.
@@ -172,8 +173,10 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 		}
 	})
 
-	// Register storage health checker
-	s.healthHandler.Register("storage", func(ctx context.Context) *health.Check {
+	// Storage is a DEEP checker: it makes a real round trip to the backend.
+	// Registered as a readiness check it ran on every kubelet probe, and the
+	// Helm chart points readinessProbe at /readyz.
+	s.healthHandler.RegisterDeep("storage", func(ctx context.Context) *health.Check {
 		if s.storageBackend == nil {
 			return &health.Check{
 				Status:  health.StatusHealthy,
@@ -299,9 +302,14 @@ func (s *Server) initStorageBackend() error {
 // Start starts the HTTP server.
 func (s *Server) Start(ctx context.Context) error {
 	// Load policies from the storage backend wired up in NewServer.
+	//
+	// This fails startup rather than warning. NewServer already documents
+	// that a misconfigured backend must not start; warning here contradicted
+	// that and left the process serving with zero policies, which under
+	// require_match denies everything (and without it allows everything).
 	if s.storageBackend != nil {
 		if err := s.engine.LoadPoliciesFromBackend(ctx, s.storageBackend); err != nil {
-			s.logger.Warn("failed to load policies from storage backend", zap.Error(err))
+			return fmt.Errorf("loading policies from storage backend: %w", err)
 		}
 	}
 
@@ -316,10 +324,13 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
-	// Mark as ready
+	// Mark as ready. The policies check reflects reality rather than being
+	// hardcoded true — otherwise legacy /ready reported 200 with zero
+	// policies loaded while /readyz reported 503, so the two probes
+	// contradicted each other.
 	s.mu.Lock()
 	s.ready = true
-	s.checks["policies"] = true
+	s.checks["policies"] = len(s.engine.ListPolicies("")) > 0
 	s.checks["http"] = true
 	s.mu.Unlock()
 
@@ -329,48 +340,72 @@ func (s *Server) Start(ctx context.Context) error {
 
 	select {
 	case err := <-errCh:
-		return err
+		// Stop() too, or the audit file, storage backend and rate-limiter
+		// goroutine leak whenever the listener fails.
+		return errors.Join(err, s.Stop())
 	case <-ctx.Done():
 		return s.Stop()
 	}
 }
 
 // Stop gracefully shuts down the server.
+//
+// Ordering is load-bearing: in-flight requests are drained BEFORE the
+// dependencies they need are closed. Closing the storage backend, audit sink
+// and rate limiter first (as this used to) meant a reload in flight hit a
+// closed backend, and decisions completing during the drain window lost their
+// audit records.
+//
+// Safe to call more than once — Start calls it on both the ctx.Done() and the
+// serve-error paths.
 func (s *Server) Stop() error {
-	s.logger.Info("shutting down server")
+	var err error
 
-	// Close storage backend
-	if s.storageBackend != nil {
-		if err := s.storageBackend.Close(); err != nil {
-			s.logger.Warn("error closing storage backend", zap.Error(err))
+	s.stopOnce.Do(func() {
+		s.logger.Info("shutting down server")
+
+		// Fail probes first so a load balancer stops sending new work while
+		// the drain runs.
+		s.mu.Lock()
+		s.ready = false
+		s.checks["http"] = false
+		srv := s.httpServer
+		s.mu.Unlock()
+
+		var errs []error
+
+		// 1. Drain in-flight requests.
+		if srv != nil {
+			timeout := s.config.ShutdownTimeout
+			if timeout <= 0 {
+				timeout = 30 * time.Second
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			if shutErr := srv.Shutdown(ctx); shutErr != nil {
+				errs = append(errs, fmt.Errorf("draining HTTP server: %w", shutErr))
+			}
 		}
-	}
 
-	// Close audit log file
-	if s.auditFile != nil {
-		s.auditFile.Close()
-	}
-
-	// Close rate limiter
-	if s.rateLimiter != nil {
-		s.rateLimiter.Close()
-	}
-
-	s.mu.RLock()
-	srv := s.httpServer
-	s.mu.RUnlock()
-
-	if srv != nil {
-		timeout := s.config.ShutdownTimeout
-		if timeout <= 0 {
-			timeout = 30 * time.Second
+		// 2. Only then release what those requests depended on.
+		if s.rateLimiter != nil {
+			s.rateLimiter.Close()
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		return srv.Shutdown(ctx)
-	}
+		if s.auditFile != nil {
+			if closeErr := s.auditFile.Close(); closeErr != nil {
+				errs = append(errs, fmt.Errorf("closing audit log: %w", closeErr))
+			}
+		}
+		if s.storageBackend != nil {
+			if closeErr := s.storageBackend.Close(); closeErr != nil {
+				errs = append(errs, fmt.Errorf("closing storage backend: %w", closeErr))
+			}
+		}
 
-	return nil
+		err = errors.Join(errs...)
+	})
+
+	return err
 }
 
 // Handler returns the fully-wired HTTP handler (routes + middleware).
@@ -424,12 +459,24 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("/swagger-ui", s.handleSwaggerUI)
 	mux.HandleFunc("/swagger-ui/", s.handleSwaggerUI)
 
+	// Middleware chain, innermost first. Reading outward the request passes
+	// through: otel -> recovery -> CORS -> rate limit -> auth -> identity -> mux.
+	//
+	// Order matters twice here:
+	//   - CORS must be OUTSIDE auth. Preflight OPTIONS requests carry no
+	//     X-API-Key, so with auth outermost every preflight was answered 401
+	//     with no CORS headers whenever an API key was configured — browsers
+	//     could not call the API at all.
+	//   - Rate limiting must also be outside auth, or unauthenticated floods
+	//     are rejected by auth before the limiter ever sees them, which is
+	//     exactly the traffic worth limiting.
+	// Recovery stays outside both so panics in them still return a 500.
 	var handler http.Handler = s.identityMiddleware(mux)
-	handler = corsMiddleware(handler, s.config.CORSAllowedOrigins)
+	handler = s.authMiddleware(handler)
 	if s.rateLimiter != nil {
 		handler = s.rateLimiter.Middleware(handler)
 	}
-	handler = s.authMiddleware(handler)
+	handler = corsMiddleware(handler, s.config.CORSAllowedOrigins)
 	handler = s.recoveryMiddleware(handler)
 	// otelhttp extracts `traceparent` from the incoming request and starts
 	// a server span covering the whole middleware chain.
@@ -520,6 +567,16 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	// recoveryMiddleware cannot catch.
 	checks := maps.Clone(s.checks)
 	s.mu.RUnlock()
+
+	// A failing check means not ready. Reporting 200 while a check is false
+	// made this endpoint disagree with /readyz, which runs the same checks
+	// properly.
+	for _, ok := range checks {
+		if !ok {
+			ready = false
+			break
+		}
+	}
 
 	resp := map[string]interface{}{
 		"ready":  ready,

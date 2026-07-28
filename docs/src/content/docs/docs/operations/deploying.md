@@ -141,10 +141,11 @@ tracing:
 
 - `/healthz` and `/livez` — liveness (cheap, cached; both serve the same
   check). Return 200 while the process is live.
-- `/readyz` — readiness. Returns 503 until policies are loaded and the
-  storage backend is reachable.
-- `/health/deep` — comprehensive check including the storage backend, for
-  debugging and monitoring (not for probes).
+- `/readyz` — readiness. Returns 503 until policies are loaded. Runs only
+  cheap in-process checks: the storage backend is *not* contacted, so a
+  kubelet polling this endpoint does not generate backend traffic.
+- `/health/deep` — comprehensive check, adding the storage backend round
+  trip, for debugging and monitoring (not for probes).
 
 The Helm chart wires these probes automatically.
 

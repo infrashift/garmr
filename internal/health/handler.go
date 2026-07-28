@@ -41,9 +41,13 @@ type Checker func(ctx context.Context) *Check
 
 // Handler manages health checks and serves health endpoints.
 type Handler struct {
-	mu       sync.RWMutex
+	mu sync.RWMutex
+	// checkers run on readiness probes and must stay cheap.
 	checkers map[string]Checker
-	version  string
+	// deepCheckers run only on /health/deep — anything that talks to a
+	// network dependency belongs here.
+	deepCheckers map[string]Checker
+	version      string
 
 	// Cached status for liveness (avoids expensive checks)
 	liveStatus Status
@@ -52,17 +56,33 @@ type Handler struct {
 // NewHandler creates a new health handler.
 func NewHandler(version string) *Handler {
 	return &Handler{
-		checkers:   make(map[string]Checker),
-		version:    version,
-		liveStatus: StatusHealthy,
+		checkers:     make(map[string]Checker),
+		deepCheckers: make(map[string]Checker),
+		version:      version,
+		liveStatus:   StatusHealthy,
 	}
 }
 
-// Register registers a health checker.
+// Register registers a health checker that runs on readiness probes.
+//
+// Readiness is polled by the kubelet every few seconds, so only cheap,
+// in-process checks belong here. Anything that talks to a network dependency
+// should use RegisterDeep.
 func (h *Handler) Register(name string, checker Checker) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.checkers[name] = checker
+}
+
+// RegisterDeep registers a health checker that runs only on /health/deep.
+//
+// Use this for checks with a real cost — a round trip to a storage backend,
+// for example. Registering those as readiness checks turns every kubelet
+// probe into external traffic.
+func (h *Handler) RegisterDeep(name string, checker Checker) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.deepCheckers[name] = checker
 }
 
 // Unregister removes a health checker.
@@ -70,6 +90,7 @@ func (h *Handler) Unregister(name string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.checkers, name)
+	delete(h.deepCheckers, name)
 }
 
 // SetLive sets the liveness status.
@@ -83,12 +104,27 @@ func (h *Handler) SetLive(live bool) {
 	}
 }
 
-// Check runs all health checks.
+// Check runs every registered health check, readiness and deep alike.
+// /health/deep and external callers use this; readiness uses checkReadiness.
 func (h *Handler) Check(ctx context.Context) *Response {
+	return h.runCheckers(ctx, true)
+}
+
+// checkReadiness runs only the cheap readiness checkers.
+func (h *Handler) checkReadiness(ctx context.Context) *Response {
+	return h.runCheckers(ctx, false)
+}
+
+func (h *Handler) runCheckers(ctx context.Context, includeDeep bool) *Response {
 	h.mu.RLock()
 	checkers := make(map[string]Checker, len(h.checkers))
 	for k, v := range h.checkers {
 		checkers[k] = v
+	}
+	if includeDeep {
+		for k, v := range h.deepCheckers {
+			checkers[k] = v
+		}
 	}
 	h.mu.RUnlock()
 
@@ -163,7 +199,10 @@ func (h *Handler) ReadinessHandler() http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
-		resp := h.Check(ctx)
+		// Readiness checks only — deep checkers (e.g. a storage round trip)
+		// are excluded so a kubelet probe does not generate external traffic
+		// every few seconds.
+		resp := h.checkReadiness(ctx)
 
 		// Headers must be set before WriteHeader or they are dropped
 		w.Header().Set("Content-Type", "application/json")

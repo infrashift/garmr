@@ -25,6 +25,7 @@ type PrometheusMetrics struct {
 	activeEvaluations      prometheus.Gauge
 	policyLoadErrorsTotal  *prometheus.CounterVec
 	policiesLoaded         *prometheus.GaugeVec
+	policyReloadsTotal     *prometheus.CounterVec
 	rateLimitHitsTotal     *prometheus.CounterVec
 	panicsTotal            prometheus.Counter
 }
@@ -75,6 +76,12 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 		Help:      "Number of policies currently loaded, by namespace.",
 	}, []string{"namespace"})
 
+	m.policyReloadsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: promNamespace,
+		Name:      "policy_reloads_total",
+		Help:      "Total policy reload attempts by result. A failed reload keeps the previous policy set serving.",
+	}, []string{"result"})
+
 	m.rateLimitHitsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: promNamespace,
 		Name:      "rate_limit_hits_total",
@@ -94,6 +101,7 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 		m.activeEvaluations,
 		m.policyLoadErrorsTotal,
 		m.policiesLoaded,
+		m.policyReloadsTotal,
 		m.rateLimitHitsTotal,
 		m.panicsTotal,
 	)
@@ -130,8 +138,22 @@ func (m *PrometheusMetrics) RecordPolicyLoadError(policy, namespace, errorType s
 	m.policyLoadErrorsTotal.WithLabelValues(policy, namespace, errorType).Inc()
 }
 
-func (m *PrometheusMetrics) SetPoliciesLoaded(namespace string, count int) {
-	m.policiesLoaded.WithLabelValues(namespace).Set(float64(count))
+func (m *PrometheusMetrics) SetPoliciesLoaded(counts map[string]int) {
+	// Reset first: the counts are a full snapshot, and a namespace that
+	// vanished on reload must drop out of the series rather than keep its
+	// last value forever.
+	m.policiesLoaded.Reset()
+	for namespace, count := range counts {
+		m.policiesLoaded.WithLabelValues(namespace).Set(float64(count))
+	}
+}
+
+func (m *PrometheusMetrics) RecordPolicyReload(success bool) {
+	result := "success"
+	if !success {
+		result = "failure"
+	}
+	m.policyReloadsTotal.WithLabelValues(result).Inc()
 }
 
 func (m *PrometheusMetrics) RecordRateLimitHit(client string) {

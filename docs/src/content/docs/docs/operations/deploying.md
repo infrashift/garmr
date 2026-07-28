@@ -112,8 +112,14 @@ spec:
 `/metrics` exposes Prometheus-format metrics for policy evaluations
 (`garmr_policy_evaluations_total`), evaluation duration histograms,
 violations, active evaluations, policies loaded, policy load errors,
-rate-limit hits, and recovered panics, plus Go runtime metrics. The endpoint is exempt from API
-key authentication so Prometheus scrapers work without a shared secret.
+policy reloads (`garmr_policy_reloads_total{result="success"|"failure"}` —
+alert on failures: a failed reload keeps the previous policy set serving
+and is otherwise only visible in logs and the reload response),
+rate-limit hits, and recovered panics, plus Go runtime metrics.
+`garmr_policies_loaded{namespace=...}` is a snapshot of the current set:
+a namespace whose policies disappear on reload drops out of the series.
+The endpoint is exempt from API key authentication so Prometheus scrapers
+work without a shared secret.
 
 Expose it to a Consul-aware Prometheus by adding these pod annotations:
 

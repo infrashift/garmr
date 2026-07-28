@@ -2,11 +2,16 @@ package engine
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
+
+	"github.com/infrashift/garmr/internal/observability"
 )
 
 const reloadGoodPolicy = `package policy
@@ -147,5 +152,66 @@ second_policy: {
 	}
 	if engC.PolicySetDigest() == engA.PolicySetDigest() {
 		t.Error("different policy sets produced the same digest")
+	}
+}
+
+// End-to-end metrics contract for reloads: outcomes are counted, and the
+// policies_loaded gauge is a snapshot — a namespace whose policies vanish in
+// a reload must disappear from the exported series.
+func TestReloadMetrics_CounterAndGaugeSnapshot(t *testing.T) {
+	teamA := strings.ReplaceAll(strings.ReplaceAll(reloadGoodPolicy, `metadata: name: "good-policy"`, `metadata: {name: "good-policy", namespace: "team-a"}`), "good_policy", "team_a_policy")
+	teamB := strings.ReplaceAll(strings.ReplaceAll(reloadGoodPolicy, `metadata: name: "good-policy"`, `metadata: {name: "good-policy", namespace: "team-b"}`), "good_policy", "team_b_policy")
+
+	dirA := writePolicyDir(t, teamA)
+	dirB := writePolicyDir(t, teamB)
+
+	pm := observability.NewPrometheusMetrics()
+	obs := observability.NewProvider()
+	obs.SetMetrics(pm)
+
+	eng, _ := NewEngine(zap.NewNop())
+	eng.SetObservability(obs)
+
+	scrape := func() string {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		pm.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		return rr.Body.String()
+	}
+
+	if _, err := eng.ReloadPoliciesFromDir(context.Background(), dirA); err != nil {
+		t.Fatalf("reload A: %v", err)
+	}
+	out := scrape()
+	if !strings.Contains(out, `garmr_policies_loaded{namespace="team-a"} 1`) {
+		t.Fatalf("team-a gauge missing after first reload:\n%s", out)
+	}
+
+	// Reload to a tree where team-a no longer exists.
+	if _, err := eng.ReloadPoliciesFromDir(context.Background(), dirB); err != nil {
+		t.Fatalf("reload B: %v", err)
+	}
+	out = scrape()
+	if !strings.Contains(out, `garmr_policies_loaded{namespace="team-b"} 1`) {
+		t.Errorf("team-b gauge missing after second reload:\n%s", out)
+	}
+	if strings.Contains(out, `namespace="team-a"`) {
+		t.Errorf("vanished namespace team-a still exported:\n%s", out)
+	}
+	if !strings.Contains(out, `garmr_policy_reloads_total{result="success"} 2`) {
+		t.Errorf("expected 2 successful reloads:\n%s", out)
+	}
+
+	// A failed reload (empty tree) increments the failure counter and leaves
+	// the gauge snapshot untouched.
+	if _, err := eng.ReloadPoliciesFromDir(context.Background(), t.TempDir()); err == nil {
+		t.Fatal("expected reload of an empty dir to fail")
+	}
+	out = scrape()
+	if !strings.Contains(out, `garmr_policy_reloads_total{result="failure"} 1`) {
+		t.Errorf("expected 1 failed reload:\n%s", out)
+	}
+	if !strings.Contains(out, `garmr_policies_loaded{namespace="team-b"} 1`) {
+		t.Errorf("failed reload must not disturb the gauge:\n%s", out)
 	}
 }

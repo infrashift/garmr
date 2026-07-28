@@ -67,6 +67,7 @@ func (e *Engine) DeletePolicy(namespace, name string) bool {
 
 	key := policyKey(namespace, name)
 	found := false
+	var counts map[string]int
 	_ = e.set.mutateAll(func(i int, r *policyReplica) (func(), error) {
 		return func() {
 			if _, ok := r.policies[key]; ok {
@@ -75,9 +76,32 @@ func (e *Engine) DeletePolicy(namespace, name string) bool {
 					found = true
 				}
 			}
+			if i == 0 {
+				counts = namespaceCounts(r.policies)
+			}
 		}, nil
 	})
+	if found {
+		e.observability().Metrics().SetPoliciesLoaded(counts)
+	}
 	return found
+}
+
+// namespaceCounts folds one or more policy maps (later maps override earlier
+// entries with the same key) into the per-namespace counts published as the
+// policies_loaded gauge snapshot.
+func namespaceCounts(maps ...map[string]*CompiledPolicy) map[string]int {
+	merged := make(map[string]*CompiledPolicy)
+	for _, m := range maps {
+		for k, v := range m {
+			merged[k] = v
+		}
+	}
+	counts := make(map[string]int, len(merged))
+	for _, p := range merged {
+		counts[p.Namespace]++
+	}
+	return counts
 }
 
 // ReloadPoliciesFromDir atomically reloads all policies from a directory.
@@ -98,10 +122,12 @@ func (e *Engine) ReloadPoliciesFromDir(ctx context.Context, dir string) (int, er
 
 	newSet, err := newPolicySet(defaultReplicaCount())
 	if err != nil {
+		e.observability().Metrics().RecordPolicyReload(false)
 		return 0, err
 	}
 
 	count := 0
+	var counts map[string]int
 	if err := newSet.mutateAll(func(i int, r *policyReplica) (func(), error) {
 		pending := make(map[string]*CompiledPolicy)
 		if err := e.loadDirIntoReplica(ctx, dir, r, i != 0, pending); err != nil {
@@ -109,6 +135,7 @@ func (e *Engine) ReloadPoliciesFromDir(ctx context.Context, dir string) (int, er
 		}
 		if i == 0 {
 			count = len(pending)
+			counts = namespaceCounts(pending)
 		}
 		return func() {
 			for k, v := range pending {
@@ -116,10 +143,12 @@ func (e *Engine) ReloadPoliciesFromDir(ctx context.Context, dir string) (int, er
 			}
 		}, nil
 	}); err != nil {
+		e.observability().Metrics().RecordPolicyReload(false)
 		return 0, err
 	}
 
 	if count == 0 {
+		e.observability().Metrics().RecordPolicyReload(false)
 		return 0, fmt.Errorf("%w in %s; keeping the existing policy set", errNoPoliciesFound, dir)
 	}
 
@@ -129,6 +158,8 @@ func (e *Engine) ReloadPoliciesFromDir(ctx context.Context, dir string) (int, er
 	e.set = newSet
 	e.mu.Unlock()
 
+	e.observability().Metrics().RecordPolicyReload(true)
+	e.observability().Metrics().SetPoliciesLoaded(counts)
 	e.logger.Info("policies reloaded atomically", zap.Int("count", count))
 	return count, nil
 }
@@ -144,6 +175,7 @@ func (e *Engine) LoadPoliciesFromDir(ctx context.Context, dir string) error {
 	defer e.mu.Unlock()
 
 	loaded := 0
+	var counts map[string]int
 	// Two-phase so a failure partway through leaves every replica identical.
 	err := e.set.mutateAll(func(i int, r *policyReplica) (func(), error) {
 		pending := make(map[string]*CompiledPolicy)
@@ -152,6 +184,7 @@ func (e *Engine) LoadPoliciesFromDir(ctx context.Context, dir string) error {
 		}
 		if i == 0 {
 			loaded = len(pending)
+			counts = namespaceCounts(r.policies, pending)
 		}
 		return func() {
 			for k, v := range pending {
@@ -165,6 +198,7 @@ func (e *Engine) LoadPoliciesFromDir(ctx context.Context, dir string) error {
 	if loaded == 0 {
 		return fmt.Errorf("%w in %s", errNoPoliciesFound, dir)
 	}
+	e.observability().Metrics().SetPoliciesLoaded(counts)
 	return nil
 }
 
@@ -259,9 +293,6 @@ func (e *Engine) loadInstancesIntoReplica(args []string, dir string, r *policyRe
 	instances := load.Instances(args, cfg)
 	var keys []string
 
-	// Track namespaces that got policies loaded for metrics
-	namespaceCounts := make(map[string]int)
-
 	for _, inst := range instances {
 		if inst.Err != nil {
 			if !quiet {
@@ -334,7 +365,6 @@ func (e *Engine) loadInstancesIntoReplica(args []string, dir string, r *policyRe
 			key := policyKey(ns, name)
 			pending[key] = compiled
 			keys = append(keys, key)
-			namespaceCounts[ns]++
 
 			if !quiet {
 				e.logger.Info("loaded policy from directory",
@@ -345,12 +375,10 @@ func (e *Engine) loadInstancesIntoReplica(args []string, dir string, r *policyRe
 		}
 	}
 
-	// Record loaded policy counts per namespace
-	if !quiet {
-		for ns, count := range namespaceCounts {
-			e.observability().Metrics().SetPoliciesLoaded(ns, count)
-		}
-	}
+	// The policies_loaded gauge is published by the calling operation
+	// (load/reload/delete) as a full snapshot of the resulting set, not
+	// here: a per-batch record could neither see the whole set nor clear
+	// namespaces that vanished.
 
 	return keys, nil
 }
@@ -370,6 +398,7 @@ func (e *Engine) LoadPoliciesFromFile(ctx context.Context, path string) ([]strin
 	defer e.mu.Unlock()
 
 	var keys []string
+	var counts map[string]int
 	err = e.set.mutateAll(func(i int, r *policyReplica) (func(), error) {
 		pending := make(map[string]*CompiledPolicy)
 		loaded, loadErr := e.loadInstancesIntoReplica(
@@ -379,6 +408,7 @@ func (e *Engine) LoadPoliciesFromFile(ctx context.Context, path string) ([]strin
 		}
 		if i == 0 {
 			keys = loaded
+			counts = namespaceCounts(r.policies, pending)
 		}
 		return func() {
 			for k, v := range pending {
@@ -392,6 +422,7 @@ func (e *Engine) LoadPoliciesFromFile(ctx context.Context, path string) ([]strin
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("no policies found in %s", path)
 	}
+	e.observability().Metrics().SetPoliciesLoaded(counts)
 	return keys, nil
 }
 

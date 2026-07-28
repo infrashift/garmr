@@ -59,7 +59,8 @@ func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string)
 	// succeeded. Mutating as we go would leave a partially-loaded set on a
 	// non-deterministic failure, and evaluations would then get different
 	// answers depending on which replica they checked out.
-	var ruleCount, nsCount int
+	var ruleCount int
+	var counts map[string]int
 	err := e.set.mutateAll(func(i int, r *policyReplica) (func(), error) {
 		compiled, err := e.compilePolicySource(r, name, namespace, source)
 		if err != nil {
@@ -69,12 +70,7 @@ func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string)
 
 		if i == 0 {
 			ruleCount = len(compiled.Rules)
-			nsCount = 1 // this policy
-			for k, p := range r.policies {
-				if p.Namespace == namespace && k != key {
-					nsCount++
-				}
-			}
+			counts = namespaceCounts(r.policies, map[string]*CompiledPolicy{key: compiled})
 		}
 
 		return func() { r.policies[key] = compiled }, nil
@@ -91,8 +87,7 @@ func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string)
 		zap.Duration("compile_time", time.Since(start)),
 	)
 
-	// Record successful policy load count for this namespace
-	e.observability().Metrics().SetPoliciesLoaded(namespace, nsCount)
+	e.observability().Metrics().SetPoliciesLoaded(counts)
 
 	return nil
 }

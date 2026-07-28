@@ -176,9 +176,18 @@ Recorded, deliberately not done before the deploy:
   (evaluate buffers the full body via io.ReadAll), Read/Write/Idle
   timeouts fixed in `newHTTPServer` — should be config, and reconciled
   with Envoy timeouts.
-- **Metrics gaps**: no `garmr_policy_reloads_total`; the per-namespace
-  `policies_loaded` gauge goes stale when a namespace disappears on
-  reload.
+- ~~**Metrics gaps**~~ — done (2026-07-28, follow-up commit).
+  `garmr_policy_reloads_total{result}` counts reload outcomes (recorded in
+  `ReloadPoliciesFromDir`, covering the endpoint and backend paths — alert
+  on failures, which keep the old set serving). The staleness fix changed
+  the recorder contract: `SetPoliciesLoaded` now takes a full per-namespace
+  snapshot (Reset + set in the Prometheus impl), published by each mutation
+  (load/reload/delete) from the resulting set, so a vanished namespace
+  drops out of the series instead of exporting its last value forever —
+  which also fixed per-batch counts overwriting each other. Pinned at the
+  recorder level and end-to-end (reload dirA → dirB, team-a disappears
+  from the exposition; failed reload increments the failure counter and
+  leaves the gauge untouched).
 - **Swagger UI loads swagger-ui-dist from unpkg.com** — fails closed in an
   egress-restricted mesh (page just breaks), but should be vendored or
   dropped.

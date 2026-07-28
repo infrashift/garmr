@@ -26,7 +26,15 @@ type MetricsRecorder interface {
 
 	// Policy loading
 	RecordPolicyLoadError(policy, namespace, errorType string)
-	SetPoliciesLoaded(namespace string, count int)
+	// SetPoliciesLoaded publishes a FULL snapshot of per-namespace policy
+	// counts. Snapshot semantics are what let the recorder clear a
+	// namespace that disappeared on reload — a per-namespace setter could
+	// never do that, so vanished namespaces kept their stale gauge value.
+	SetPoliciesLoaded(counts map[string]int)
+	// RecordPolicyReload counts reload attempts by outcome, so operators
+	// can alert on failed reloads (which keep the old set serving and are
+	// otherwise only visible in logs and the reload response).
+	RecordPolicyReload(success bool)
 
 	// Rate limiting
 	RecordRateLimitHit(client string)
@@ -41,7 +49,8 @@ func (NoopMetrics) RecordViolation(policy, namespace, ruleID, severity string) {
 func (NoopMetrics) IncActiveEvaluations()                                      {}
 func (NoopMetrics) DecActiveEvaluations()                                      {}
 func (NoopMetrics) RecordPolicyLoadError(policy, namespace, errorType string)  {}
-func (NoopMetrics) SetPoliciesLoaded(namespace string, count int)              {}
+func (NoopMetrics) SetPoliciesLoaded(counts map[string]int)                    {}
+func (NoopMetrics) RecordPolicyReload(success bool)                            {}
 func (NoopMetrics) RecordRateLimitHit(client string)                           {}
 
 // Provider holds the process-wide metrics recorder.

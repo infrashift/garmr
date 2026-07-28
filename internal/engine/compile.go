@@ -255,7 +255,41 @@ func extractStringList(val cue.Value) []string {
 	return result
 }
 
-// sortRules sorts rules according to the specified evaluation order.
+// comparePriority orders rules with a priority before rules without, then by
+// ascending priority value. 0 is a tie.
+func comparePriority(a, b CompiledRule) int {
+	switch {
+	case a.Priority == nil && b.Priority == nil:
+		return 0
+	case a.Priority == nil:
+		return 1
+	case b.Priority == nil:
+		return -1
+	case *a.Priority < *b.Priority:
+		return -1
+	case *a.Priority > *b.Priority:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// compareSeverity orders more severe rules first. 0 is a tie.
+func compareSeverity(a, b CompiledRule) int {
+	aw, bw := a.Severity.Weight(), b.Severity.Weight()
+	switch {
+	case aw > bw:
+		return -1
+	case aw < bw:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// sortRules returns a copy of rules sorted for the given evaluation order.
+// Each order is a chain of comparators with DefinitionOrder as the universal
+// final tiebreak, so rules that compare equal keep their authored order.
 func sortRules(rules []CompiledRule, order EvaluationOrder) []CompiledRule {
 	if len(rules) == 0 {
 		return rules
@@ -265,105 +299,30 @@ func sortRules(rules []CompiledRule, order EvaluationOrder) []CompiledRule {
 	sorted := make([]CompiledRule, len(rules))
 	copy(sorted, rules)
 
-	switch order {
-	case EvalOrderDefinition:
-		// Already in definition order, no sorting needed
+	if order == EvalOrderDefinition {
 		return sorted
-
-	case EvalOrderSeverity:
-		// Sort by severity (critical first), then definition order
-		sortBySeverityThenDefinition(sorted)
-
-	case EvalOrderPriority:
-		// Sort by priority (lower first), then definition order
-		sortByPriorityThenDefinition(sorted)
-
-	case EvalOrderPriorityThenSev:
-		// Sort by priority, then severity within same priority
-		sortByPriorityThenSeverity(sorted)
-
-	default:
-		// Default to priority ordering
-		sortByPriorityThenDefinition(sorted)
 	}
+
+	var chain []func(a, b CompiledRule) int
+	switch order {
+	case EvalOrderSeverity:
+		chain = []func(a, b CompiledRule) int{compareSeverity}
+	case EvalOrderPriorityThenSev:
+		chain = []func(a, b CompiledRule) int{comparePriority, compareSeverity}
+	default: // EvalOrderPriority and anything unrecognized
+		chain = []func(a, b CompiledRule) int{comparePriority}
+	}
+
+	sort.SliceStable(sorted, func(i, j int) bool {
+		for _, cmp := range chain {
+			if c := cmp(sorted[i], sorted[j]); c != 0 {
+				return c < 0
+			}
+		}
+		return sorted[i].DefinitionOrder < sorted[j].DefinitionOrder
+	})
 
 	return sorted
-}
-
-// sortByPriorityThenDefinition sorts rules by priority (lower first),
-// then by definition order for rules without priority or with same priority.
-func sortByPriorityThenDefinition(rules []CompiledRule) {
-	sort.SliceStable(rules, func(i, j int) bool {
-		return shouldSwapPriority(rules[j], rules[i])
-	})
-}
-
-// shouldSwapPriority returns true if rule b should come before rule a.
-func shouldSwapPriority(a, b CompiledRule) bool {
-	// Rules with priority come before rules without
-	if a.Priority == nil && b.Priority != nil {
-		return true
-	}
-	if a.Priority != nil && b.Priority == nil {
-		return false
-	}
-	// Both have priority: lower priority value comes first
-	if a.Priority != nil && b.Priority != nil {
-		if *a.Priority != *b.Priority {
-			return *b.Priority < *a.Priority
-		}
-	}
-	// Same priority (or both nil): maintain definition order
-	return b.DefinitionOrder < a.DefinitionOrder
-}
-
-// sortBySeverityThenDefinition sorts rules by severity (critical first),
-// then by definition order for same severity.
-func sortBySeverityThenDefinition(rules []CompiledRule) {
-	sort.SliceStable(rules, func(i, j int) bool {
-		return shouldSwapSeverity(rules[j], rules[i])
-	})
-}
-
-// shouldSwapSeverity returns true if rule b should come before rule a.
-func shouldSwapSeverity(a, b CompiledRule) bool {
-	aWeight := a.Severity.Weight()
-	bWeight := b.Severity.Weight()
-	if aWeight != bWeight {
-		return bWeight > aWeight // Higher weight (more severe) comes first
-	}
-	return b.DefinitionOrder < a.DefinitionOrder
-}
-
-// sortByPriorityThenSeverity sorts by priority first, then severity within same priority.
-func sortByPriorityThenSeverity(rules []CompiledRule) {
-	sort.SliceStable(rules, func(i, j int) bool {
-		return shouldSwapPriorityThenSeverity(rules[j], rules[i])
-	})
-}
-
-// shouldSwapPriorityThenSeverity returns true if rule b should come before rule a.
-func shouldSwapPriorityThenSeverity(a, b CompiledRule) bool {
-	// First compare by priority
-	if a.Priority == nil && b.Priority != nil {
-		return true
-	}
-	if a.Priority != nil && b.Priority == nil {
-		return false
-	}
-	if a.Priority != nil && b.Priority != nil {
-		if *a.Priority != *b.Priority {
-			return *b.Priority < *a.Priority
-		}
-	}
-	// Same priority: compare by severity
-	aWeight := a.Severity.Weight()
-	bWeight := b.Severity.Weight()
-	if aWeight != bWeight {
-		return bWeight > aWeight
-	}
-	// Same priority and severity: maintain definition order
-	return b.DefinitionOrder < a.DefinitionOrder
 }
 
 func (e *Engine) extractTarget(val cue.Value) (TargetSpec, error) {

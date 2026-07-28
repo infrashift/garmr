@@ -2,7 +2,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -79,19 +78,11 @@ func init() {
 }
 
 func runEval(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	cfg := client.Config{
-		Address: viper.GetString("server"),
-		Timeout: 30 * time.Second,
-	}
-
-	c, err := client.NewClient(cfg)
+	c, ctx, cleanup, err := newServerClient()
 	if err != nil {
-		return fmt.Errorf("creating client: %w", err)
+		return err
 	}
-	defer c.Close()
+	defer cleanup()
 
 	// Read input
 	input, err := readInput(cmd)

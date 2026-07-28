@@ -31,6 +31,25 @@ func init() {
 	healthCmd.Flags().Duration("timeout", 30*time.Second, "timeout when waiting")
 }
 
+// newServerClient builds the REST client from the configured --server
+// address together with the standard 30-second request context shared by
+// every server-backed command. The returned cleanup releases both; callers
+// defer it immediately.
+func newServerClient() (*client.Client, context.Context, func(), error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	c, err := client.NewClient(client.Config{
+		Address: viper.GetString("server"),
+	})
+	if err != nil {
+		cancel()
+		return nil, nil, nil, fmt.Errorf("connecting to server: %w", err)
+	}
+	return c, ctx, func() {
+		cancel()
+		_ = c.Close()
+	}, nil
+}
+
 func runHealth(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

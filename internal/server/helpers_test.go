@@ -40,39 +40,6 @@ func TestSeverityToString(t *testing.T) {
 	}
 }
 
-func TestGetNestedString(t *testing.T) {
-	m := map[string]interface{}{
-		"metadata": map[string]interface{}{
-			"name": "foo",
-			"labels": map[string]interface{}{
-				"env": "prod",
-			},
-		},
-		"count": 3, // non-string leaf
-	}
-
-	cases := []struct {
-		name string
-		keys []string
-		want string
-	}{
-		{"nested string", []string{"metadata", "name"}, "foo"},
-		{"deeply nested string", []string{"metadata", "labels", "env"}, "prod"},
-		{"missing leaf", []string{"metadata", "missing"}, ""},
-		{"missing intermediate", []string{"metadata", "absent", "env"}, ""},
-		{"leaf not a string", []string{"count"}, ""},
-		{"intermediate not a map", []string{"count", "bogus"}, ""},
-		{"top-level missing", []string{"nope"}, ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := getNestedString(m, tc.keys...); got != tc.want {
-				t.Errorf("getNestedString(%v) = %q, want %q", tc.keys, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestStorageType(t *testing.T) {
 	cases := []struct {
 		name string

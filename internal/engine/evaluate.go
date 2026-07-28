@@ -326,10 +326,10 @@ func (e *Engine) policyMatchesInput(policy *CompiledPolicy, input map[string]any
 	}
 
 	// Extract resource identifiers from input
-	inputKind := getStringField(input, "kind")
-	inputAPIGroup := getStringField(input, "apiVersion")
-	inputName := getStringField(input, "metadata", "name")
-	inputNamespace := getStringField(input, "metadata", "namespace")
+	inputKind := NestedString(input, "kind")
+	inputAPIGroup := NestedString(input, "apiVersion")
+	inputName := NestedString(input, "metadata", "name")
+	inputNamespace := NestedString(input, "metadata", "namespace")
 	inputLabels := getMapField(input, "metadata", "labels")
 	inputAnnotations := getMapField(input, "metadata", "annotations")
 
@@ -603,10 +603,10 @@ func (e *Engine) shouldEvaluateRule(rule CompiledRule, policyConfig EvaluationCo
 
 // matchesException checks if any non-expired exception matches the input.
 func (e *Engine) matchesException(exceptions []ExceptionSpec, input map[string]any) bool {
-	inputKind := getStringField(input, "kind")
-	inputAPIGroup := getStringField(input, "apiVersion")
-	inputName := getStringField(input, "metadata", "name")
-	inputNamespace := getStringField(input, "metadata", "namespace")
+	inputKind := NestedString(input, "kind")
+	inputAPIGroup := NestedString(input, "apiVersion")
+	inputName := NestedString(input, "metadata", "name")
+	inputNamespace := NestedString(input, "metadata", "namespace")
 	inputLabels := getMapField(input, "metadata", "labels")
 	inputAnnotations := getMapField(input, "metadata", "annotations")
 
@@ -663,8 +663,8 @@ func (e *Engine) buildNoMatchResult(rep *policyReplica, req *EvaluateRequest) Ru
 			message = fmt.Sprintf("Policy %s not found. Run `garmr policy list` to see available policies.", strings.Join(missing, ", "))
 		} else {
 			message = fmt.Sprintf("Requested policies exist but none target this input (kind=%q apiVersion=%q). Check the target selectors on %s.",
-				getStringField(req.Input, "kind"),
-				getStringField(req.Input, "apiVersion"),
+				NestedString(req.Input, "kind"),
+				NestedString(req.Input, "apiVersion"),
 				strings.Join(req.Policies, ", "),
 			)
 		}
@@ -672,8 +672,8 @@ func (e *Engine) buildNoMatchResult(rep *policyReplica, req *EvaluateRequest) Ru
 		message = fmt.Sprintf("No policies found in namespace %q. Run `garmr policy list` to see available namespaces.", req.Namespace)
 	default:
 		message = fmt.Sprintf("No policy targets this input (kind=%q apiVersion=%q). Check resource selectors on your policies or the `kind` field of your input.",
-			getStringField(req.Input, "kind"),
-			getStringField(req.Input, "apiVersion"),
+			NestedString(req.Input, "kind"),
+			NestedString(req.Input, "apiVersion"),
 		)
 	}
 

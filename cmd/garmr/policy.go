@@ -102,19 +102,11 @@ func runValidateLocal(args []string) error {
 // runValidateRemote sends each file's content to a running server's
 // /v1/validate endpoint.
 func runValidateRemote(args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	serverAddr := viper.GetString("server")
-	cfg := client.Config{
-		Address: serverAddr,
-	}
-
-	c, err := client.NewClient(cfg)
+	c, ctx, cleanup, err := newServerClient()
 	if err != nil {
-		return fmt.Errorf("connecting to server: %w", err)
+		return err
 	}
-	defer c.Close()
+	defer cleanup()
 
 	hasErrors := false
 
@@ -668,19 +660,11 @@ func truncateHash(hash string) string {
 }
 
 func runPolicyList(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	serverAddr := viper.GetString("server")
-	cfg := client.Config{
-		Address: serverAddr,
-	}
-
-	c, err := client.NewClient(cfg)
+	c, ctx, cleanup, err := newServerClient()
 	if err != nil {
-		return fmt.Errorf("connecting to server: %w", err)
+		return err
 	}
-	defer c.Close()
+	defer cleanup()
 
 	namespace, _ := cmd.Flags().GetString("namespace")
 	list, err := c.ListPolicies(ctx, namespace)
@@ -718,19 +702,11 @@ func runPolicyList(cmd *cobra.Command, args []string) error {
 }
 
 func runPolicyGet(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	serverAddr := viper.GetString("server")
-	cfg := client.Config{
-		Address: serverAddr,
-	}
-
-	c, err := client.NewClient(cfg)
+	c, ctx, cleanup, err := newServerClient()
 	if err != nil {
-		return fmt.Errorf("connecting to server: %w", err)
+		return err
 	}
-	defer c.Close()
+	defer cleanup()
 
 	name := args[0]
 	namespace, _ := cmd.Flags().GetString("namespace")
@@ -768,19 +744,11 @@ func runPolicyGet(cmd *cobra.Command, args []string) error {
 }
 
 func runPolicyDelete(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	serverAddr := viper.GetString("server")
-	cfg := client.Config{
-		Address: serverAddr,
-	}
-
-	c, err := client.NewClient(cfg)
+	c, ctx, cleanup, err := newServerClient()
 	if err != nil {
-		return fmt.Errorf("connecting to server: %w", err)
+		return err
 	}
-	defer c.Close()
+	defer cleanup()
 
 	name := args[0]
 	namespace, _ := cmd.Flags().GetString("namespace")
@@ -812,19 +780,11 @@ func runPolicyDelete(cmd *cobra.Command, args []string) error {
 }
 
 func runPolicyReload(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	serverAddr := viper.GetString("server")
-	cfg := client.Config{
-		Address: serverAddr,
-	}
-
-	c, err := client.NewClient(cfg)
+	c, ctx, cleanup, err := newServerClient()
 	if err != nil {
-		return fmt.Errorf("connecting to server: %w", err)
+		return err
 	}
-	defer c.Close()
+	defer cleanup()
 
 	fmt.Println("Reloading policies...")
 

@@ -506,41 +506,39 @@ func (e *Engine) hasCueFiles(dir string) (bool, error) {
 	return false, nil
 }
 
-// LoadPoliciesFromBackend loads all policies from a storage backend.
-// For FilesystemBackend, this delegates directly to LoadPoliciesFromDir (zero overhead).
-// For other backends, files are staged to a temp directory then loaded via CUE.
-func (e *Engine) LoadPoliciesFromBackend(ctx context.Context, backend storage.Backend) error {
-	// Filesystem shortcut: use the root directory directly
+// withBackendDir resolves a storage backend to an on-disk directory and
+// calls fn on it: the filesystem backend's root is used directly (zero
+// overhead), any other backend is staged into a temp directory first.
+func (e *Engine) withBackendDir(ctx context.Context, backend storage.Backend, fn func(dir string) error) error {
 	if fsBackend, ok := backend.(*storage.FilesystemBackend); ok {
-		return e.LoadPoliciesFromDir(ctx, fsBackend.Root())
+		return fn(fsBackend.Root())
 	}
 
-	// Other backends: stage files to temp dir, then load
 	tempDir, cleanup, err := e.stageBackendFiles(ctx, backend)
 	if err != nil {
 		return fmt.Errorf("staging backend files: %w", err)
 	}
 	defer cleanup()
 
-	return e.LoadPoliciesFromDir(ctx, tempDir)
+	return fn(tempDir)
+}
+
+// LoadPoliciesFromBackend loads all policies from a storage backend.
+func (e *Engine) LoadPoliciesFromBackend(ctx context.Context, backend storage.Backend) error {
+	return e.withBackendDir(ctx, backend, func(dir string) error {
+		return e.LoadPoliciesFromDir(ctx, dir)
+	})
 }
 
 // ReloadPoliciesFromBackend atomically reloads all policies from a storage backend.
 // This is safe to call while evaluations are in progress.
 func (e *Engine) ReloadPoliciesFromBackend(ctx context.Context, backend storage.Backend) (int, error) {
-	// Filesystem shortcut: use the root directory directly
-	if fsBackend, ok := backend.(*storage.FilesystemBackend); ok {
-		return e.ReloadPoliciesFromDir(ctx, fsBackend.Root())
-	}
-
-	// Other backends: stage files to temp dir, then reload
-	tempDir, cleanup, err := e.stageBackendFiles(ctx, backend)
-	if err != nil {
-		return 0, fmt.Errorf("staging backend files: %w", err)
-	}
-	defer cleanup()
-
-	count, err := e.ReloadPoliciesFromDir(ctx, tempDir)
+	var count int
+	err := e.withBackendDir(ctx, backend, func(dir string) error {
+		var reloadErr error
+		count, reloadErr = e.ReloadPoliciesFromDir(ctx, dir)
+		return reloadErr
+	})
 	if err != nil {
 		return 0, err
 	}

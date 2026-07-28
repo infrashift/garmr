@@ -45,13 +45,13 @@ func TestGetStringField(t *testing.T) {
 			"name": "test",
 		},
 	}
-	if got := getStringField(m, "metadata", "name"); got != "test" {
+	if got := NestedString(m, "metadata", "name"); got != "test" {
 		t.Errorf("expected 'test', got %q", got)
 	}
-	if got := getStringField(m, "metadata", "missing"); got != "" {
+	if got := NestedString(m, "metadata", "missing"); got != "" {
 		t.Errorf("expected empty, got %q", got)
 	}
-	if got := getStringField(m, "nonexistent", "name"); got != "" {
+	if got := NestedString(m, "nonexistent", "name"); got != "" {
 		t.Errorf("expected empty for missing path, got %q", got)
 	}
 }

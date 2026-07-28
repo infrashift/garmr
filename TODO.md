@@ -105,10 +105,17 @@ Recorded, deliberately not done before the deploy:
   the engine's in-memory load API — the test suites in three packages build
   fixtures with it, and its doc comment now states it has no production
   caller.
-- **Duplication**: 8× CLI client-construction boilerplate (a
-  `newClientFromFlags` helper collapses ~90 lines); `Load*/Reload*
-  FromBackend` twins; `getNestedString` (server) vs `getStringField`
-  (engine); sort comparators in `compile.go:267-339` share their prologue.
+- ~~**Duplication**~~ — done (2026-07-28, follow-up commit). The six
+  identical CLI client-construction blocks collapsed into
+  `newServerClient()` in `cmd/garmr/commands.go` (`runHealth` keeps its own
+  construction deliberately: it has a `--wait` retry loop and different
+  timeouts). `Load*/Reload* FromBackend` now share `withBackendDir`.
+  `getNestedString` (server) deleted in favor of the exported
+  `engine.NestedString`. The three ~35-line sort comparators reduced to two
+  compare primitives plus a comparator chain in `sortRules`, with
+  `TestSortRules_Orders` pinning the ordering contract for all four
+  evaluation orders (written against the old implementation first, then the
+  refactor verified against it).
 - **Oversized functions**: `Evaluate` (219 lines), `evaluateExpression`
   (124), `handleEvaluate` (113), `runTest` (143) — split only with tests in
   hand; they are the hottest correctness surfaces.

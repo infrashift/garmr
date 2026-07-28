@@ -247,8 +247,10 @@ func (e *Engine) matchesPatternCached(pattern, value string) bool {
 	return false
 }
 
-// getStringField safely extracts a string field from nested maps.
-func getStringField(m map[string]any, keys ...string) string {
+// NestedString safely extracts a string field from nested maps. Exported so
+// the server's audit logging resolves input fields with the same traversal
+// the engine's target matching uses.
+func NestedString(m map[string]any, keys ...string) string {
 	current := m
 	for i, key := range keys {
 		if i == len(keys)-1 {

@@ -711,7 +711,7 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 			"trace_id", observability.TraceIDFromContext(r.Context()),
 			"user_agent", r.UserAgent(),
 			"input_kind", req.Input["kind"],
-			"input_name", getNestedString(req.Input, "metadata", "name"),
+			"input_name", engine.NestedString(req.Input, "metadata", "name"),
 		)
 	}
 
@@ -783,31 +783,6 @@ func evaluateResponseBody(result *engine.EvaluateResponse, requestID string) map
 	}
 
 	return resp
-}
-
-// getNestedString safely extracts a nested string value.
-func getNestedString(m map[string]interface{}, keys ...string) string {
-	current := m
-	for i, key := range keys {
-		if i == len(keys)-1 {
-			if val, ok := current[key]; ok {
-				if s, ok := val.(string); ok {
-					return s
-				}
-			}
-			return ""
-		}
-		if next, ok := current[key]; ok {
-			if nextMap, ok := next.(map[string]interface{}); ok {
-				current = nextMap
-			} else {
-				return ""
-			}
-		} else {
-			return ""
-		}
-	}
-	return ""
 }
 
 func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -61,19 +62,23 @@ func TestDefaultRegistry_FilesystemRegistered(t *testing.T) {
 	}
 }
 
-func TestDefaultRegistry_S3Registered(t *testing.T) {
-	// Verify the s3 and minio types are registered via init()
-	// We can't actually create an S3 backend without a bucket, but we can verify
-	// the factory is registered by checking that we get a bucket error, not unknown backend
-	_, err := New(Config{
-		Type:    "s3",
-		Options: map[string]interface{}{},
-	})
-	if err == nil {
-		t.Fatal("expected error (no bucket)")
-	}
-	if _, ok := err.(*ErrUnknownBackend); ok {
-		t.Error("s3 backend should be registered but got ErrUnknownBackend")
+// TestDefaultRegistry_UnregisteredTypes documents which backend names are
+// deliberately absent. The S3/MinIO backend was removed; see TODO.md for the
+// rationale and for what a revival would need. The supported path for object
+// storage is to sync objects to disk (init container, CSI mount) and point
+// --policy-dir at the result.
+func TestDefaultRegistry_UnregisteredTypes(t *testing.T) {
+	for _, typ := range []string{"s3", "minio", "gcs", "azure"} {
+		t.Run(typ, func(t *testing.T) {
+			_, err := New(Config{Type: typ})
+			if err == nil {
+				t.Fatalf("New(%q) succeeded; that backend is not implemented", typ)
+			}
+			var unknown *ErrUnknownBackend
+			if !errors.As(err, &unknown) {
+				t.Errorf("New(%q) error = %v, want ErrUnknownBackend", typ, err)
+			}
+		})
 	}
 }
 

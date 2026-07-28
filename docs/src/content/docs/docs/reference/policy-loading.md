@@ -1,6 +1,6 @@
 ---
 title: "Policy Loading"
-description: "Policy loading architecture and hot-reload strategies"
+description: "How Garmr discovers, loads, and reloads policies"
 sidebar:
   order: 1
   label: "Policy Loading"
@@ -31,46 +31,6 @@ Garmr is designed to be deployed in containerized environments where policies ar
     └── prod-release.cue
 ```
 
-## Configuration (CUE)
-
-Garmr uses CUE for its own configuration, ensuring type safety:
-
-```cue
-// /etc/garmr/config.cue
-{
-    apiVersion: "config.garmr.io/v1"
-
-    server: {
-        http: address: ":8080"
-    }
-
-    policies: {
-        rootDir: "/policies"
-
-        namespaceStrategy: {
-            mode: "hybrid"      // Use directory, allow override
-            directoryDepth: 0   // First subdir is namespace
-        }
-
-        reload: {
-            enabled: true
-            strategy: {
-                mode: "watch"   // or "poll", "ondemand", "jit"
-            }
-        }
-    }
-
-    engine: {
-        parallelRules: true
-        cache: {
-            enabled: true
-            size: 10000
-            ttl: "60s"
-        }
-    }
-}
-```
-
 ## Namespace Resolution
 
 | Mode | Behavior |
@@ -95,131 +55,35 @@ Mode: directory, depth=1
 Result: namespace=security, name=sbom
 ```
 
-## Hot Reload Strategies
+## Reloading Policies
 
-### 1. Watch Mode (Default)
+Reload is **explicit**. Garmr does not watch the filesystem and does not poll.
 
-Uses file system notifications (inotify/fsnotify).
-
-```cue
-reload: strategy: mode: "watch"
+```bash
+curl -X POST http://localhost:8080/v1/policies/reload
 ```
 
-**Pros:**
-- Immediate detection (~ms latency)
-- Low CPU usage
+The reload compiles a complete new policy set in fresh CUE contexts and swaps
+it in atomically: in-flight evaluations finish against the old set, and if the
+new set fails to compile the old one stays live. A reload never leaves the
+server serving a partially-loaded policy set.
 
-**Cons:**
-- May not work across all mount types in containers
-- inotify limits may be hit with many files
+### In Kubernetes
 
-**Best for:** Development, VMs with local storage
+You usually do not need to call the endpoint. The Helm chart stamps a
+`checksum/config` annotation onto the Deployment, so editing the ConfigMap
+rolls the pods, and each new pod loads the new policies at startup.
 
-### 2. Poll Mode
+For policies synced from object storage, an init container re-syncs on every
+pod start — so a rollout is also the reload mechanism. See
+[Policy Storage](/garmr/docs/advanced/storage-backends/).
 
-Periodically scans directory for changes.
+### Startup behaviour
 
-```cue
-reload: strategy: {
-    mode: "poll"
-    pollInterval: "5s"
-}
-```
-
-**Pros:**
-- Works with any mount type
-- Simple, predictable
-
-**Cons:**
-- Higher latency (up to pollInterval)
-- More I/O operations
-
-**Best for:** Containers with mounted volumes, NFS
-
-### 3. On-Demand Mode (Lock Files)
-
-Checks lock file checksum before evaluation.
-
-```cue
-reload: strategy: {
-    mode: "ondemand"
-    lockFiles: {
-        enabled: true
-        extension: ".lock"
-    }
-}
-```
-
-**Lock file format:**
-```json
-{
-    "checksum": "sha256:abc123...",
-    "version": "2.5.0",
-    "updatedAt": "2024-12-06T10:00:00Z",
-    "updatedBy": "ci-pipeline"
-}
-```
-
-**Flow:**
-1. Request arrives for policy `release-gate`
-2. Garmr reads `release-gate.cue.lock`
-3. Compares lock checksum with cached policy checksum
-4. If match -- use cached policy
-5. If mismatch -- reload policy, update cache
-
-**Pros:**
-- Explicit version control
-- Git-friendly (lock files can be committed)
-- Works with any CI/CD pipeline
-
-**Cons:**
-- Requires lock file management
-- Slight overhead per evaluation
-
-**Best for:** GitOps workflows, strict version control
-
-### 4. JIT Mode (Just-In-Time)
-
-Loads policy from disk immediately before evaluation.
-
-```cue
-reload: strategy: {
-    mode: "jit"
-    jitCache: {
-        enabled: true
-        ttl: "5s"      // 0s = always read from disk
-    }
-}
-```
-
-**Flow:**
-1. Request arrives for policy `release-gate`
-2. Check JIT cache (if enabled and TTL > 0)
-3. If cache miss or expired -- read from disk
-4. Evaluate policy
-5. Update JIT cache
-
-**Pros:**
-- Always gets latest policy
-- Simple mental model
-- Good for frequently changing policies
-
-**Cons:**
-- Higher I/O per evaluation
-- Potential latency variance
-
-**Best for:** Development, testing, policies that change frequently
-
-## Recommendation by Deployment Type
-
-| Deployment | Recommended Mode | Rationale |
-|------------|-----------------|-----------|
-| **Development** | `watch` | Immediate feedback |
-| **Kubernetes (ConfigMap)** | `poll` (5s) | ConfigMaps don't trigger inotify reliably |
-| **Kubernetes (PVC)** | `watch` | Works with persistent volumes |
-| **Docker/Podman** | `poll` (5s) | Bind mounts may not trigger inotify |
-| **GitOps/ArgoCD** | `ondemand` | Version control with lock files |
-| **High-frequency updates** | `jit` (ttl=5s) | Balance freshness vs I/O |
+A policy set that cannot be loaded **fails startup**, and a server with zero
+policies loaded reports `503` on `/readyz` and `/ready`. Running with no
+policies is not a safe default: under `require_match` (the default) it denies
+everything, and without it, allows everything.
 
 ## Policy Sets
 
@@ -360,22 +224,22 @@ spec:
 
 ## Performance Considerations
 
-### File I/O Impact
+Policies are compiled once at load time and held in memory, so evaluation does
+no file I/O. Reload cost scales with the size of the policy set, not with
+request volume.
 
-| Mode | I/O per Request | Latency Impact |
-|------|-----------------|----------------|
-| watch | 0 (cached) | None |
-| poll | 0 (cached) | None |
-| ondemand | 1 read (lock file) | ~0.1ms |
-| jit (ttl=0) | 1 read (policy) | ~0.5-2ms |
-| jit (ttl=5s) | 0.2 avg (20% miss) | ~0.1-0.4ms avg |
+The engine keeps a pool of compiled policy replicas (one per CPU, capped at 8)
+so evaluations run concurrently without sharing a CUE context. Each replica
+holds a full copy of the compiled policy set, which trades memory for
+concurrency.
 
 ### Recommendations
 
-1. **Production**: Use `watch` or `poll` mode - policies are cached
-2. **High throughput**: Enable result caching in engine
-3. **Large policies**: Use policy sets for modular loading
-4. **GitOps**: Use `ondemand` with lock files for controlled rollouts
+1. **Large policy sets** — use policy sets for modular organisation.
+2. **Reload frequency** — reload on deploy, not on a timer; each reload
+   recompiles every policy into every replica.
+3. **GitOps** — use lock files to detect drift between what was reviewed and
+   what is deployed.
 
 ## Lock File Workflow (GitOps)
 
@@ -394,14 +258,3 @@ git commit -m "Update production release policy"
 # 4. Deploy (CI/CD copies to mounted volume)
 # Garmr detects lock file change and reloads policy
 ```
-
-## Conclusion
-
-The recommended approach for most deployments:
-
-1. **Development**: `watch` mode for immediate feedback
-2. **Production containers**: `poll` mode (5-10s interval)
-3. **GitOps workflows**: `ondemand` mode with lock files
-4. **Complex policies**: Use policy sets for organization
-
-All modes support the same policy format - switching is just a configuration change.

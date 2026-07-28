@@ -146,10 +146,6 @@ func (m *mockBackend) Stat(ctx context.Context, path string) (*storage.FileInfo,
 	return nil, nil
 }
 
-func (m *mockBackend) Watch(ctx context.Context, pattern string) (<-chan storage.Event, error) {
-	return nil, nil
-}
-
 func (m *mockBackend) Checksum(ctx context.Context, path string) (string, error) {
 	return "", nil
 }

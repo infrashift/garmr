@@ -29,10 +29,6 @@ type Backend interface {
 	// Stat returns file metadata without reading content.
 	Stat(ctx context.Context, path string) (*FileInfo, error)
 
-	// Watch returns a channel that receives events when files change.
-	// Returns nil if the backend doesn't support watching.
-	Watch(ctx context.Context, pattern string) (<-chan Event, error)
-
 	// Checksum returns the checksum of a file (for change detection).
 	// Backends may compute this differently (ETag, MD5, SHA256).
 	Checksum(ctx context.Context, path string) (string, error)
@@ -60,46 +56,6 @@ type FileInfo struct {
 
 	// Metadata contains backend-specific metadata
 	Metadata map[string]string
-}
-
-// Event represents a file change event.
-type Event struct {
-	// Type of event
-	Type EventType
-
-	// Path of the affected file
-	Path string
-
-	// Timestamp of the event
-	Timestamp time.Time
-
-	// Error if the event represents an error condition
-	Error error
-}
-
-// EventType defines the type of file event.
-type EventType int
-
-const (
-	EventCreate EventType = iota
-	EventModify
-	EventDelete
-	EventError
-)
-
-func (e EventType) String() string {
-	switch e {
-	case EventCreate:
-		return "create"
-	case EventModify:
-		return "modify"
-	case EventDelete:
-		return "delete"
-	case EventError:
-		return "error"
-	default:
-		return "unknown"
-	}
 }
 
 // Config is the base configuration for all backends.

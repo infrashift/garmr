@@ -647,7 +647,7 @@
           },
           "storage_type": {
             "type": "string",
-            "description": "Active storage backend type (e.g., filesystem, s3)"
+            "description": "Active storage backend type (filesystem)"
           }
         }
       },

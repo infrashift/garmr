@@ -5,16 +5,17 @@ sidebar:
   order: 1
 ---
 
-Garmr is a stateless HTTP service. Replicas share policy state by polling a
-common storage backend — you can run as many pods as you like behind a service
+Garmr is a stateless HTTP service. Every replica compiles the same policy
+directory at startup, so you can run as many pods as you like behind a service
 or a mesh. This page covers the deployment models you'll hit in practice.
 
 ## Minimum configuration
 
 Whatever you deploy onto, Garmr needs:
 
-1. **A storage backend.** Either a filesystem directory mounted into the pod,
-   or S3/MinIO. See [Storage Backends](../advanced/storage-backends).
+1. **A policy directory** mounted into the pod — from a ConfigMap, a PVC, a
+   CSI volume, or an init container that syncs from object storage. See
+   [Policy Storage](../advanced/storage-backends).
 2. **An HTTP listen address.** Defaults to `:8080`.
 3. **An audit-log path.** Defaults to `/var/log/garmr/audit.log`.
 
@@ -153,20 +154,23 @@ The Helm chart wires these probes automatically.
 
 Garmr replicas are fully stateless. Each replica:
 
-- Loads policies from the configured storage backend at startup.
-- Re-reads the backend on `POST /v1/policies/reload` or on filesystem
-  inotify events (filesystem backend) or on a poll interval (S3 backend).
-- Serves evaluation requests from its in-memory cache.
+- Loads policies from the configured storage backend at startup, and fails
+  to start if that load fails.
+- Re-reads the backend on `POST /v1/policies/reload`. There is no watcher and
+  no poller: reload is explicit, or happens implicitly when the pod restarts.
+- Serves evaluation requests from its in-memory compiled policy set.
 
 This means:
 
 - **Multiple replicas stay in sync** via the shared backend, not leader
   election. There is no cross-replica coordination to fail.
-- **Expect a brief convergence window** when a policy changes in S3 — new
-  replicas will read the update on their next poll interval. Filesystem
-  backends are eventually consistent only if a shared RWX volume is used.
+- **Expect a convergence window** when policies change: replicas pick up the
+  new set when they are reloaded or rolled. The chart's `checksum/config`
+  annotation rolls pods automatically when the ConfigMap changes, so the
+  window is the rollout.
 - **A lost backend does not take Garmr down.** Pods continue serving from
-  cached state until they restart.
+  their compiled policy set until they restart — but a restart with an
+  unreachable backend fails startup rather than serving zero policies.
 
 ## Graceful shutdown
 
@@ -177,10 +181,10 @@ grace period in place, which is more than enough for typical evaluations.
 
 ## Backup & restore
 
-- **Filesystem backend:** policies are whatever files are on disk. Back up
-  the directory with your usual volume snapshot tooling.
-- **S3 backend:** enable bucket versioning and a lifecycle policy. Garmr
-  does not implement its own backup.
+Policies are whatever files are on disk, so they are backed up wherever they
+come from: the Git repository that renders the ConfigMap, the object-storage
+bucket an init container syncs from (enable versioning there), or your usual
+volume snapshot tooling for a PVC. Garmr does not implement its own backup.
 
 Audit logs rotate via lumberjack (`max_size`, `max_backups`, `max_age` in
 `config.audit`). Ship them off the pod to a long-term store — the chart

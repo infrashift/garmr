@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestNewFilesystemBackend(t *testing.T) {
@@ -255,50 +254,6 @@ func TestFilesystemBackend_Checksum(t *testing.T) {
 	}
 	if checksum[:7] != "sha256:" {
 		t.Errorf("expected sha256: prefix, got %s", checksum[:7])
-	}
-}
-
-func TestFilesystemBackend_Watch(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "initial.cue"), []byte("package p\nx: 1"), 0644)
-
-	cfg := Config{Type: "filesystem", Root: dir}
-	backend, err := NewFilesystemBackend(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer backend.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	events, err := backend.Watch(ctx, "**/*.cue")
-	if err != nil {
-		t.Fatalf("Watch: %v", err)
-	}
-	if events == nil {
-		t.Fatal("expected non-nil events channel")
-	}
-
-	// Give watcher time to fully initialize
-	time.Sleep(200 * time.Millisecond)
-
-	// Create a new file
-	os.WriteFile(filepath.Join(dir, "new.cue"), []byte("package p\ny: 2"), 0644)
-
-	// Wait for a CUE file event (may get create or write)
-	gotEvent := false
-	timeout := time.After(3 * time.Second)
-	for !gotEvent {
-		select {
-		case event := <-events:
-			if event.Type == EventCreate || event.Type == EventModify {
-				gotEvent = true
-			}
-		case <-timeout:
-			t.Error("timed out waiting for file change event")
-			return
-		}
 	}
 }
 

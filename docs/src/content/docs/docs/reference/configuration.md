@@ -121,11 +121,8 @@ audit:
 
 ## Storage Backend
 
-By default, Garmr uses the filesystem backend powered by the `policy_dir` setting. For shared or cloud-native deployments, you can configure S3 or MinIO as the storage backend.
-
-A misconfigured storage backend is fatal at startup: the server refuses to start rather than silently running without policies.
-
-### Filesystem (Default)
+Garmr reads policies from disk. The filesystem backend is selected
+automatically by `policy_dir`, or configured explicitly:
 
 ```yaml
 storage:
@@ -133,33 +130,17 @@ storage:
   root: "/etc/garmr/policies"
 ```
 
-### S3 / MinIO
-
-```yaml
-storage:
-  type: "s3"           # or "minio"
-  root: "policies/"    # S3 key prefix
-  s3:
-    endpoint: "minio.example.com:9000"  # omit for AWS S3
-    bucket: "garmr-policies"
-    region: "us-east-1"
-    access_key: ""
-    secret_key: ""
-    use_ssl: true
-    poll_interval: "10s"
-```
-
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `storage.type` | `filesystem` | Backend type: `filesystem`, `s3`, or `minio` |
-| `storage.root` | _(from policy_dir)_ | Root path or S3 key prefix |
-| `storage.s3.endpoint` | _(none)_ | S3-compatible endpoint (omit for AWS) |
-| `storage.s3.bucket` | _(none)_ | S3 bucket name |
-| `storage.s3.region` | _(none)_ | AWS region |
-| `storage.s3.access_key` | _(none)_ | Access key (use IAM roles in production) |
-| `storage.s3.secret_key` | _(none)_ | Secret key (use IAM roles in production) |
-| `storage.s3.use_ssl` | `true` | Use SSL for S3 connections |
-| `storage.s3.poll_interval` | `10s` | How often to poll for policy changes |
+| `storage.type` | `filesystem` | Backend type (the only implemented backend) |
+| `storage.root` | _(from policy_dir)_ | Root directory |
+
+A misconfigured storage backend is fatal at startup: the server refuses to
+start rather than silently running without policies.
+
+To serve policies from object storage, sync them onto the pod first — an init
+container running `mc mirror` / `aws s3 sync`, or a CSI volume — and point
+`root` at the mount.
 
 For more details on storage backends, see the [Storage Backends](/garmr/docs/advanced/storage-backends/) documentation.
 

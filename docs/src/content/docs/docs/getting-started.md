@@ -331,7 +331,7 @@ log:
 
 # Storage backend (optional)
 storage:
-  type: "filesystem"  # filesystem, s3
+  type: "filesystem"  # the only implemented backend
 ```
 
 ## Troubleshooting

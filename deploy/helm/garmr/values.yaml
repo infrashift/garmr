@@ -79,8 +79,8 @@ nodeSelector: {}
 tolerations: []
 topologySpreadConstraints: []
 
-# Policies can live on disk (rendered from the ConfigMap below) or in an S3
-# bucket — configure one.
+# Policies are read from disk. They can be rendered from the ConfigMap below,
+# or mounted from a PVC/CSI volume — set config.policy_dir accordingly.
 policies:
   # Inline policies go into the ConfigMap. Keys must end in .cue.
   # Example:
@@ -117,16 +117,10 @@ config:
     enabled: false
     rps: 100
     burst: 200
-  # Uncomment to use S3/MinIO instead of filesystem:
-  # storage:
-  #   type: s3
-  #   root: policies/
-  #   s3:
-  #     endpoint: minio.minio.svc.cluster.local:9000
-  #     bucket: garmr-policies
-  #     region: us-east-1
-  #     use_ssl: false
-  #     poll_interval: 10s
+  # storage.type defaults to the filesystem backend rooted at policy_dir.
+  # To serve policies from object storage, sync them onto the pod first (an
+  # init container running `mc mirror` / `aws s3 sync`, or a CSI volume) and
+  # leave policy_dir pointing at the mount.
 
 # OpenTelemetry tracing. Leaving endpoint empty disables trace export;
 # incoming `traceparent` headers are still honored for log correlation.

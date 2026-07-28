@@ -1,411 +1,232 @@
 ---
-title: "Storage Backends"
-description: "Configure policy storage with filesystem, S3, or MinIO"
+title: "Policy Storage"
+description: "How Garmr loads policies from disk, and how to serve them from object storage"
 sidebar:
   order: 1
-  label: "Storage Backends"
+  label: "Policy Storage"
 ---
 
 ## Overview
 
-Garmr uses a pluggable storage backend architecture. The engine and loader are completely decoupled from storage implementation details -- they only interact with the `storage.Backend` interface.
+Garmr reads policies through a small storage abstraction. The engine and the
+loader never touch storage details directly — they go through the
+`storage.Backend` interface.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Garmr                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐    │
-│  │    Engine    │────▶│    Loader    │────▶│   Backend    │    │
-│  │              │     │              │     │  Interface   │    │
-│  └──────────────┘     └──────────────┘     └──────┬───────┘    │
-│                                                    │            │
-└────────────────────────────────────────────────────┼────────────┘
-                                                     │
-                     ┌───────────────────────────────┼───────────────────────────────┐
-                     │                               │                               │
-              ┌──────▼──────┐               ┌───────▼───────┐               ┌───────▼───────┐
-              │  Filesystem │               │  S3 / MinIO   │               │  GCS / Azure  │
-              │   Backend   │               │    Backend    │               │    Backend    │
-              └──────┬──────┘               └───────┬───────┘               └───────┬───────┘
-                     │                               │                               │
-              ┌──────▼──────┐               ┌───────▼───────┐               ┌───────▼───────┐
-              │ Local Disk  │               │   S3 Bucket   │               │  Cloud Blob   │
-              │ / NFS / PVC │               │   MinIO       │               │   Storage     │
-              └─────────────┘               └───────────────┘               └───────────────┘
+**One backend is implemented: `filesystem`.** It is what `--policy-dir` uses,
+and it is the path every deployment takes today. If you keep policies in
+object storage, [sync them onto disk](#serving-policies-from-object-storage)
+and point Garmr at the result.
+
+## Configuration
+
+The filesystem backend is selected automatically when you pass `--policy-dir`:
+
+```bash
+garmr-server --policy-dir /etc/garmr/policies
 ```
 
-## Backend Interface
+Equivalently, in `config.yaml`:
 
-All storage backends implement this interface:
+```yaml
+storage:
+  type: "filesystem"
+  root: "/etc/garmr/policies"
+```
+
+| Setting | Env var | Default | Description |
+|---------|---------|---------|-------------|
+| `storage.type` | `GARMR_STORAGE_TYPE` | `filesystem` | Backend type |
+| `storage.root` | `GARMR_STORAGE_ROOT` | — | Root directory |
+| `policy_dir` | `GARMR_POLICY_DIR` | — | Shorthand: selects the filesystem backend rooted here |
+
+By default the backend includes `**/*.cue` and excludes `**/*_test.cue` and
+`**/testdata/**`, so `garmr test` fixtures sitting alongside policies are not
+loaded as policies.
+
+A backend that cannot be initialised, or a policy set that cannot be loaded,
+**fails startup**. Running with zero policies is not a safe default: under
+`require_match` (the default) it denies everything, and without it, allows
+everything.
+
+## The Backend interface
 
 ```go
 type Backend interface {
-    // Type returns the backend identifier
+    // Type returns the backend type identifier.
     Type() string
 
-    // List returns all files matching pattern
+    // List returns all files matching the pattern.
     List(ctx context.Context, pattern string) ([]FileInfo, error)
 
-    // Get retrieves file content
+    // Get retrieves file content.
     Get(ctx context.Context, path string) ([]byte, error)
 
-    // GetReader returns a streaming reader
+    // GetReader returns a reader for streaming large files.
     GetReader(ctx context.Context, path string) (io.ReadCloser, error)
 
-    // Stat returns file metadata
+    // Stat returns file metadata without reading content.
     Stat(ctx context.Context, path string) (*FileInfo, error)
 
-    // Watch returns change events (nil if unsupported)
-    Watch(ctx context.Context, pattern string) (<-chan Event, error)
-
-    // Checksum returns file checksum for change detection
+    // Checksum returns the checksum of a file (for change detection).
     Checksum(ctx context.Context, path string) (string, error)
 
-    // Close releases resources
+    // Close releases any resources held by the backend.
     Close() error
 }
 ```
 
-## Supported Backends
-
-| Backend | Watch Support | Change Detection | Use Case |
-|---------|---------------|------------------|----------|
-| `filesystem` | Native (inotify) | Checksum (SHA256) | Local dev, VMs, PVCs |
-| `s3` / `minio` | Polling | ETag or SHA256 | Production, shared storage |
-| `gcs` | Polling | Generation ID | GCP deployments |
-| `azure` | Polling | ETag | Azure deployments |
-
-## Configuration
-
-### Filesystem (Default)
-
-```cue
-storage: {
-    type: "filesystem"
-    root: "/policies"
-    options: {
-        followSymlinks: false
-    }
-}
-```
-
-### MinIO (Self-Hosted S3)
-
-```cue
-storage: {
-    type: "minio"
-    root: "policies/"  // Prefix in bucket
-    options: {
-        endpoint:        "minio.storage.svc.cluster.local:9000"
-        bucket:          "garmr-policies"
-        accessKeyId:     "${MINIO_ACCESS_KEY}"
-        secretAccessKey: "${MINIO_SECRET_KEY}"
-        useSsl:          false
-        pollInterval:    "5s"
-    }
-}
-```
-
-### AWS S3 with IAM Role
-
-```cue
-storage: {
-    type: "s3"
-    root: "production/policies/"
-    options: {
-        region: "us-west-2"
-        bucket: "company-policies"
-        // No credentials = use IAM role (recommended)
-        pollInterval: "30s"
-    }
-}
-```
-
-## Architecture Benefits
-
-### 1. Engine Remains Storage-Agnostic
-
-The engine accepts any `storage.Backend` and never learns where the bytes came from:
+Backends register themselves with the default registry:
 
 ```go
-// Server hands the engine a Backend; engine does the rest.
-if err := eng.LoadPoliciesFromBackend(ctx, backend); err != nil {
-    return err
-}
-
-// Hot reload over the same interface
-count, err := eng.ReloadPoliciesFromBackend(ctx, backend)
-```
-
-### 2. Unified Change Detection
-
-Every backend exposes the same primitives, so the server uses one code path regardless of source:
-
-```go
-// Works for filesystem, S3, MinIO, or any future backend
-events, _ := backend.Watch(ctx, "**/*.cue")
-checksum, _ := backend.Checksum(ctx, path)
-```
-
-### 3. Easy to Add New Backends
-
-```go
-// Register a new backend
 func init() {
-    storage.Register("mycloud", func(cfg storage.Config) (storage.Backend, error) {
-        return NewMyCloudBackend(cfg)
-    })
+    storage.Register("filesystem", NewFilesystemBackend)
 }
 ```
 
-## Deployment Patterns
+`storage.New(cfg)` resolves `cfg.Type` against that registry.
 
-### Pattern 1: Simple Container Mount
+### How the loader uses it
 
-```yaml
-# docker-compose.yml
-services:
-  garmr:
-    image: garmr:latest
-    volumes:
-      - ./policies:/policies:ro
-    environment:
-      GARMR_STORAGE_TYPE: filesystem
-      GARMR_STORAGE_ROOT: /policies
+`LoadPoliciesFromBackend` special-cases the filesystem backend and loads the
+directory directly. Any other backend has its files staged into a temporary
+directory first and is then loaded from there, because CUE's loader resolves
+imports and package structure against a real filesystem.
+
+Staged paths are checked for containment before anything is written: a backend
+key containing `..` or an absolute path aborts the load rather than writing
+outside the staging directory.
+
+## Path traversal protection
+
+The filesystem backend confines every read to its root:
+
+```go
+// WithinRoot reports whether fullPath is root or inside it.
+// A bare prefix check is not enough: "/policiesX" has "/policies" as a
+// string prefix without being inside it.
+func WithinRoot(root, fullPath string) bool {
+    cleanRoot := filepath.Clean(root)
+    cleaned := filepath.Clean(fullPath)
+    return cleaned == cleanRoot || strings.HasPrefix(cleaned, cleanRoot+string(os.PathSeparator))
+}
 ```
 
-### Pattern 2: Kubernetes with ConfigMap
+`Get`, `GetReader` and `Stat` all apply it and return `ErrAccessDenied` on a
+traversal attempt.
+
+## Reloading policies
+
+Reload is **explicit**. There is no filesystem watcher and no poller:
+
+```bash
+curl -X POST http://localhost:8080/v1/policies/reload
+```
+
+The reload compiles a complete new policy set and swaps it in atomically, so
+in-flight evaluations finish against the old set and never observe a partial
+one. If the new set fails to compile, the old one stays live.
+
+In Kubernetes you generally do not need to call it: the Helm chart stamps a
+`checksum/config` annotation onto the Deployment, so changing the ConfigMap
+rolls the pods.
+
+:::note[Why there is no automatic watching]
+An earlier version of this page described automatic change detection. It was
+never wired up, and the obvious implementation would not have worked for the
+deployment that matters: Kubernetes projects a ConfigMap by swapping a
+`..data` symlink, `filepath.WalkDir` does not follow symlinks, and the
+resulting events never match `**/*.cue`. It would have appeared to work in
+local development and silently done nothing in production. See `TODO.md` for
+what a correct implementation would need.
+:::
+
+## Serving policies from object storage
+
+Garmr has no S3, GCS, or Azure backend. Sync objects onto the pod's filesystem
+and point `--policy-dir` at the mount. This keeps credential handling, retries,
+and rotation in tooling built for it, and it means Garmr's only input is a
+directory.
+
+### Init container
 
 ```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: garmr-policies
-data:
-  release-gate-prod.cue: |
-    // Policy content...
-
----
-apiVersion: apps/v1
-kind: Deployment
 spec:
-  template:
-    spec:
-      containers:
-        - name: garmr
-          volumeMounts:
-            - name: policies
-              mountPath: /policies
-              readOnly: true
-      volumes:
+  initContainers:
+    - name: fetch-policies
+      image: minio/mc:latest
+      command:
+        - sh
+        - -c
+        - |
+          mc alias set src "$S3_ENDPOINT" "$S3_ACCESS_KEY" "$S3_SECRET_KEY"
+          mc mirror --overwrite --remove src/garmr-policies /policies
+      env:
+        - name: S3_ENDPOINT
+          value: https://s3.example.com
+        - name: S3_ACCESS_KEY
+          valueFrom:
+            secretKeyRef: {name: garmr-policy-store, key: access-key}
+        - name: S3_SECRET_KEY
+          valueFrom:
+            secretKeyRef: {name: garmr-policy-store, key: secret-key}
+      volumeMounts:
         - name: policies
-          configMap:
-            name: garmr-policies
+          mountPath: /policies
+  containers:
+    - name: garmr
+      args: ["--policy-dir", "/policies"]
+      volumeMounts:
+        - name: policies
+          mountPath: /policies
+          readOnly: true
+  volumes:
+    - name: policies
+      emptyDir: {}
 ```
 
-### Pattern 3: MinIO Shared Storage
+Credentials live in a Secret rather than in Garmr's config, and on AWS the init
+container can use IRSA and carry no static credentials at all.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Kubernetes Cluster                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
-│  │ Garmr Pod (1)    │    │ Garmr Pod (2)    │    │ Garmr Pod (3)    │      │
-│  │              │    │              │    │              │      │
-│  └──────┬───────┘    └──────┬───────┘    └──────┬───────┘      │
-│         │                   │                   │               │
-│         └───────────────────┼───────────────────┘               │
-│                             │                                   │
-│                      ┌──────▼───────┐                           │
-│                      │    MinIO     │                           │
-│                      │   Service    │                           │
-│                      └──────┬───────┘                           │
-│                             │                                   │
-│                      ┌──────▼───────┐                           │
-│                      │garmr-policies│                           │
-│                      │   bucket     │                           │
-│                      └──────────────┘                           │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+To pick up changes, roll the Deployment — the init container re-syncs on every
+pod start.
 
-Benefits:
-- Single source of truth for all Garmr replicas
-- No volume mounts needed per pod
-- Easy to update policies (upload to bucket)
-- Scales horizontally
+### Other options
+
+| Approach | When it fits |
+|----------|--------------|
+| ConfigMap (Helm `policies.inline`) | Small policy sets managed with the release |
+| Init container sync | Policies in object storage, updated on rollout |
+| CSI volume (Secrets Store, s3-csi) | Policies in object storage, mounted directly |
+| PVC | Policies written by another process in-cluster |
+| Baked into the image | Immutable, versioned with the binary |
+
+## GitOps workflow
+
+Policies are files, so the usual review flow applies. Validate them in CI
+before they reach a cluster:
+
+```yaml
+- name: Validate policies
+  run: |
+    garmr-server --policy-dir ./policies --http-addr :8080 &
+    sleep 2
+    garmr validate ./policies/**/*.cue --strict
 ```
 
-### Pattern 4: GitOps with S3
+`garmr policy lock` and `garmr policy validate-lock` record and verify content
+hashes if you want to detect drift between what was reviewed and what is
+deployed.
 
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Git Repo  │────▶│   CI/CD     │────▶│   S3/MinIO  │◀────│Garmr Agent │
-│  (policies) │     │  (sync)     │     │  (storage)  │     │ (consumer)  │
-└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
-      │                    │                   │                   │
-      │ 1. Commit          │ 2. Upload         │ 3. Poll           │
-      │    policy +        │    to bucket      │    for changes    │
-      │    lock file       │                   │                   │
-      ▼                    ▼                   ▼                   ▼
-```
+## Adding a backend
 
-**CI/CD Script:**
-```bash
-#!/bin/bash
-# sync-policies.sh
+Implement `Backend`, register it in an `init()`, and the loader's staging path
+handles the rest:
 
-# Validate lock files
-garmr policy validate-lock policies/**/*.cue
-
-# Sync to MinIO
-mc mirror --overwrite policies/ myminio/garmr-policies/
-
-echo "Policies synced to MinIO"
-```
-
-## Change Detection Comparison
-
-| Backend | Method | Latency | Overhead |
-|---------|--------|---------|----------|
-| Filesystem + Watch | inotify events | ~1ms | Very low |
-| Filesystem + Poll | SHA256 comparison | pollInterval | Medium |
-| S3/MinIO | ETag polling | pollInterval | Low (metadata only) |
-| S3 + Event Bridge | SQS/SNS events | ~1-5s | Low |
-
-## Security Considerations
-
-### Path Traversal Protection
-
-```go
-func (b *FilesystemBackend) Get(ctx context.Context, path string) ([]byte, error) {
-    fullPath := filepath.Join(b.root, path)
-
-    // SECURITY: Prevent escaping root directory
-    if !strings.HasPrefix(filepath.Clean(fullPath), filepath.Clean(b.root)) {
-        return nil, &ErrAccessDenied{Path: path, Reason: "path traversal attempt"}
-    }
-
-    return os.ReadFile(fullPath)
-}
-```
-
-### S3 Credential Handling
-
-```cue
-// RECOMMENDED: Use IAM roles (no credentials in config)
-storage: {
-    type: "s3"
-    options: {
-        region: "us-west-2"
-        bucket: "policies"
-        // No accessKeyId/secretAccessKey = use IAM
-    }
-}
-
-// If credentials needed, use environment variables
-storage: {
-    type: "s3"
-    options: {
-        accessKeyId:     "${AWS_ACCESS_KEY_ID}"
-        secretAccessKey: "${AWS_SECRET_ACCESS_KEY}"
-    }
-}
-```
-
-### Read-Only Access
-
-- All backends treat storage as read-only
-- Garmr never writes to storage (except lock files in special modes)
-- Use bucket policies / IAM to enforce read-only access
-
-## Performance Considerations
-
-### S3 Polling Efficiency
-
-```go
-// List operation returns ETags, avoiding per-file Stat calls
-infos, _ := backend.List(ctx, "**/*.cue")
-
-for _, info := range infos {
-    // ETag already in info.Checksum
-    if info.Checksum != cachedChecksum {
-        // Only then fetch content
-        content, _ := backend.Get(ctx, info.Path)
-    }
-}
-```
-
-### Caching Strategy
-
-1. **Policy Content**: Cached in Loader until checksum changes
-2. **Evaluation Results**: Cached in Engine (separate cache)
-3. **Checksums**: Cached per poll cycle
-
-### Recommended Poll Intervals
-
-| Scenario | Interval | Rationale |
-|----------|----------|-----------|
-| Development | 1-2s | Fast feedback |
-| Production (low change rate) | 30-60s | Reduce API calls |
-| Production (frequent updates) | 5-10s | Balance freshness vs load |
-| GitOps with lock files | On-demand | Only check when evaluating |
-
-## Migration Guide
-
-### From Filesystem to MinIO
-
-1. **Update configuration:**
-```cue
-// Before
-storage: {
-    type: "filesystem"
-    root: "/policies"
-}
-
-// After
-storage: {
-    type: "minio"
-    root: "policies/"
-    options: {
-        endpoint: "minio:9000"
-        bucket:   "garmr-policies"
-    }
-}
-```
-
-2. **Sync existing policies:**
-```bash
-mc cp --recursive /policies/ myminio/garmr-policies/
-```
-
-3. **Deploy with new config** - no code changes needed
-
-### Adding a New Backend
-
-1. Implement `storage.Backend` interface
-2. Register in `init()`:
 ```go
 func init() {
     storage.Register("mybackend", NewMyBackend)
 }
 ```
-3. Add configuration schema to `schemas/storage.cue`
-4. Document in this file
 
-## Summary
-
-| Aspect | Filesystem | S3/MinIO |
-|--------|------------|----------|
-| Setup complexity | Low | Medium |
-| Scaling | Limited | Excellent |
-| Change detection | Native watch | Polling |
-| Shared across pods | Requires PVC | Native |
-| GitOps integration | Direct mount | CI/CD sync |
-| Cost | Free | Storage + API costs |
-
-**Recommendation:**
-- **Development / Single node**: Filesystem
-- **Production / Multi-replica**: MinIO or S3
-- **Strict version control**: Any backend + on-demand mode with lock files
+Before adding one, check whether syncing to disk covers your case — it usually
+does, and it keeps credentials out of Garmr.

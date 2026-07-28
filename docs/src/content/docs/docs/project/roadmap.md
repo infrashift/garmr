@@ -68,13 +68,13 @@ This document describes what Garmr can do today and where it's headed.
 
 - Target-based policy filtering (kind, apiGroup, names, labels, annotations, namespaces)
 - Namespace-based policy organization
-- Hot reload via API and CLI
+- Explicit policy reload via `POST /v1/policies/reload`
 - Lock file support for GitOps workflows
 
 ### Storage Backends
 
-- **Filesystem** (built-in) -- local file watching with inotify
-- **S3 / MinIO** (built-in) -- AWS S3 and MinIO support, polling-based change detection
+- **Filesystem** (built-in) -- the policy directory, from a ConfigMap, PVC,
+  CSI mount, or an init container that syncs from object storage
 
 ### Observability
 

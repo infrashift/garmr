@@ -69,9 +69,9 @@ type Config struct {
 	// believed for per-client identification. Empty means never trust it.
 	RateLimitTrustedProxies []string
 	// Storage backend
-	StorageType    string                 // "filesystem" (default), "s3", "minio"
+	StorageType    string                 // "filesystem" (default)
 	StorageRoot    string                 // Root path/prefix for storage backend
-	StorageOptions map[string]interface{} // Backend-specific options (S3 endpoint, bucket, etc.)
+	StorageOptions map[string]interface{} // Backend-specific options
 	// Evaluation posture
 	// RequireMatch is a tri-state: nil means "use the engine default" (true /
 	// fail-closed). A non-nil pointer lets operators explicitly opt out via

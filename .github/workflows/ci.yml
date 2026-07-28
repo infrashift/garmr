@@ -76,6 +76,22 @@ jobs:
           version: v1.64.8
           args: --timeout=5m
 
+  schemas:
+    name: CUE Schemas & Policies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install cue
+        run: go install cuelang.org/go/cmd/cue@v0.15.1
+      - name: cue vet
+        run: cue vet ./schemas/...
+      - name: cue fmt --check
+        run: cue fmt --check ./schemas/... ./example-policies/...
+
   docs:
     name: Docs Build
     runs-on: ubuntu-latest

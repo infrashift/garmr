@@ -77,7 +77,7 @@ package policy
 	maxRules?: int & >=0 | *0
 
 	// Timeout for entire policy evaluation
-	timeout?: string  // Duration string, e.g., "30s", "5m"
+	timeout?: string // Duration string, e.g., "30s", "5m"
 }
 
 // Target specifies what resources a policy applies to.
@@ -173,34 +173,34 @@ package policy
 // Default priority values by category (for use in policies)
 #DefaultPriority: {
 	// Promotion/chain validation should run first
-	promotion:   100
+	promotion: 100
 	// Security checks next
-	security:    200
+	security: 200
 	// Quality gates
-	quality:     300
+	quality: 300
 	// Compliance checks
-	compliance:  400
+	compliance: 400
 	// Best practices / recommendations last
-	advisory:    500
+	advisory: 500
 }
 
 // Expression is the core constraint logic using a composable structure.
 // Exactly one field must be set.
 #Expression: {
 	// Logical operators
-	all?: [...#Expression]  // AND: all must pass
-	any?: [...#Expression]  // OR: at least one must pass
-	not?: #Expression       // NOT: must fail
+	all?: [...#Expression] // AND: all must pass
+	any?: [...#Expression] // OR: at least one must pass
+	not?:                  #Expression // NOT: must fail
 
 	// Field matching (supports equals, pattern, comparison, etc.)
-	match?:    #MatchExpr
+	match?: #MatchExpr
 
 	// Cross-field comparison
-	compare?:  #CompareExpr
+	compare?: #CompareExpr
 
 	// Existence checks
-	exists?: string  // Path must exist and be non-null
-	absent?: string  // Path must not exist or be null
+	exists?: string // Path must exist and be non-null
+	absent?: string // Path must not exist or be null
 
 	// Collection operators
 	contains?: #ContainsExpr
@@ -397,13 +397,13 @@ package policy
 // ContainsExpr checks if a collection contains a value.
 #ContainsExpr: {
 	// Path to the collection or string field
-	path:   string
+	path: string
 	// Single value that must be present
 	value?: _
 	// All listed values must be present
-	all?:   [..._]
+	all?: [...]
 	// At least one of the listed values must be present
-	any?:   [..._]
+	any?: [...]
 }
 
 // ForEachExpr iterates over a collection and evaluates a condition per item.
@@ -476,7 +476,7 @@ package policy
 	// TLS configuration
 	tls?: {
 		insecure?: bool
-		ca?:       string  // Base64 encoded CA cert
+		ca?:       string // Base64 encoded CA cert
 	}
 }
 
@@ -484,23 +484,6 @@ package policy
 #PolicyRef: {
 	name:      string
 	namespace: string | *"default"
-}
-
-// PolicySet groups policies for atomic evaluation.
-#PolicySet: {
-	apiVersion: "policy.garmr.io/v1"
-	kind:       "PolicySet"
-	metadata:   #Metadata
-	spec: {
-		// Policies in this set
-		policies: [...#Policy | #PolicyRef]
-
-		// Evaluation mode
-		mode: "all" | "any" | *"all"
-
-		// Stop on first failure
-		failFast: bool | *false
-	}
 }
 
 // EvaluationResult is the output of policy evaluation.

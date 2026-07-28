@@ -66,10 +66,12 @@ bench: ## Run benchmarks
 
 lint: fmt-check ## Run linters
 	golangci-lint run ./...
+	cue vet ./schemas/...
 
-fmt-check: ## Verify Go formatting without rewriting files
+fmt-check: ## Verify Go and CUE formatting without rewriting files
 	@out="$$($$(go env GOROOT)/bin/gofmt -l ./cmd ./internal)"; \
 		if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+	cue fmt --check ./schemas/... ./example-policies/...
 
 fmt: ## Format code
 	go fmt ./...

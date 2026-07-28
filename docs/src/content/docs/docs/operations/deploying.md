@@ -111,8 +111,8 @@ spec:
 
 `/metrics` exposes Prometheus-format metrics for policy evaluations
 (`garmr_policy_evaluations_total`), evaluation duration histograms,
-violations, active evaluations, cache hits/misses, rate-limit hits, and
-recovered panics, plus Go runtime metrics. The endpoint is exempt from API
+violations, active evaluations, policies loaded, policy load errors,
+rate-limit hits, and recovered panics, plus Go runtime metrics. The endpoint is exempt from API
 key authentication so Prometheus scrapers work without a shared secret.
 
 Expose it to a Consul-aware Prometheus by adding these pod annotations:

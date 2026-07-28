@@ -191,7 +191,7 @@ garmr/
 │   ├── client/             # Go client library
 │   ├── health/             # Health check handlers
 │   ├── storage/            # Storage backends
-│   └── ...                 # builtin, input, observability, validation, ...
+│   └── ...                 # input, observability, ratelimit, ...
 ├── example-policies/       # Example policies
 │   ├── advanced-operators/ # forEach, length, semver, datetime, compare
 │   ├── builtins/           # Built-in function examples
@@ -202,7 +202,7 @@ garmr/
 ├── testdata/               # Test input files
 │   ├── advanced-operators/ # Operator-specific inputs
 │   └── real-world/         # Real-world scenario inputs
-├── schemas/                # CUE schema definitions
+├── schemas/                # CUE policy schema (policy.cue)
 ├── deploy/                 # Deployment manifests
 └── docs/                   # Documentation site (Astro Starlight)
 ```

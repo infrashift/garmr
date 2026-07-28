@@ -112,8 +112,8 @@ cloudResourceGovernanceTerraformPolicy: {
 								{match: {path: "r.change.after.min_size", greaterThanOrEqual: 1}},
 								{match: {path: "r.change.after.max_size", lessThanOrEqual: 50}},
 								{compare: {
-									left:  {path: "r.change.after.max_size"}
-									op:    ">"
+									left: {path: "r.change.after.max_size"}
+									op: ">"
 									right: {path: "r.change.after.min_size"}
 								}},
 							]},

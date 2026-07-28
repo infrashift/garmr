@@ -20,7 +20,7 @@ cidrValidationPolicy: {
 				description: "Pod IP must be within cluster CIDR"
 				severity:    "critical"
 				expr: "func": {
-					name:   "cidrContains"
+					name: "cidrContains"
 					args: ["10.244.0.0/16", "input.spec.podIP"]
 					expect: true
 				}
@@ -33,7 +33,7 @@ cidrValidationPolicy: {
 				description: "Service IP must be IPv4"
 				severity:    "high"
 				expr: "func": {
-					name:   "ipVersion"
+					name: "ipVersion"
 					args: ["input.spec.serviceIP"]
 					expect: 4
 				}
@@ -66,7 +66,7 @@ k8sUnitsPolicy: {
 						name: "unitsParse"
 						args: [{path: "spec.resources.requests.cpu"}]
 					}}
-					op:    ">="
+					op: ">="
 					right: {func: {
 						name: "unitsParse"
 						args: [{literal: "100m"}]
@@ -98,7 +98,7 @@ typeCheckPolicy: {
 				description: "Replicas must be a number"
 				severity:    "high"
 				expr: "func": {
-					name:   "isType"
+					name: "isType"
 					args: ["input.spec.replicas", "number"]
 					expect: true
 				}
@@ -109,7 +109,7 @@ typeCheckPolicy: {
 				description: "Labels must be a map"
 				severity:    "medium"
 				expr: "func": {
-					name:   "isType"
+					name: "isType"
 					args: ["input.metadata.labels", "map"]
 					expect: true
 				}
@@ -148,7 +148,7 @@ encodingPolicy: {
 				description: "Namespace must be lowercase"
 				severity:    "medium"
 				expr: "func": {
-					name:   "lower"
+					name: "lower"
 					args: ["input.metadata.namespace"]
 					expect: "input.metadata.namespace"
 				}
@@ -176,7 +176,7 @@ mapOperationsPolicy: {
 				description: "Annotations must contain the 'managed-by' key"
 				severity:    "medium"
 				expr: "func": {
-					name:   "hasKey"
+					name: "hasKey"
 					args: ["input.metadata.annotations", "managed-by"]
 					expect: true
 				}

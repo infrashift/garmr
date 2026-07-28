@@ -11,7 +11,7 @@
 _compliantRelease: {
 	kind:       "Release"
 	apiVersion: "release.garmr.io/v1"
-	metadata: name:    "my-service"
+	metadata: name: "my-service"
 	version:           string | *"v1.2.3"
 	targetEnvironment: string | *"production"
 	quality: {
@@ -87,7 +87,7 @@ tests: [
 		name: "staging release does not require approvals"
 		input: _compliantRelease & {
 			targetEnvironment: "staging"
-			approvals: count:  0
+			approvals: count: 0
 		}
 		expect: decision: "allow"
 	},

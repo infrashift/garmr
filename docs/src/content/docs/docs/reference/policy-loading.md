@@ -23,9 +23,8 @@ Garmr is designed to be deployed in containerized environments where policies ar
 │   └── release-gate.cue
 ├── shared/                         # Namespace: shared
 │   └── definitions.cue            # Shared definitions
-└── release-pipeline/               # Policy Set
-    ├── policyset.cue              # Manifest
-    ├── definitions.cue
+└── release/                        # Namespace: release
+    ├── definitions.cue            # Shared definitions (same CUE package)
     ├── dev-release.cue
     ├── test-release.cue
     └── prod-release.cue
@@ -85,71 +84,31 @@ policies loaded reports `503` on `/readyz` and `/ready`. Running with no
 policies is not a safe default: under `require_match` (the default) it denies
 everything, and without it, allows everything.
 
-## Policy Sets
+## Multi-file policies
 
-For complex policies spanning multiple files:
+A policy file may declare several policies as top-level fields, and a
+namespace directory may hold many files. CUE's own package mechanism handles
+sharing between them: put files in the same package and reference shared
+definitions directly.
 
 ```
-/policies/release-pipeline/
-├── policyset.cue          # Manifest
-├── definitions.cue        # Shared definitions (#RulePriority, etc.)
-├── input-schema.cue       # #ReleaseInput schema
-├── dev-release.cue        # Dev environment policy
-├── test-release.cue       # Test environment policy
-├── acc-release.cue        # Acceptance environment policy
-└── prod-release.cue       # Production environment policy
+/policies/release/
+├── definitions.cue     # shared _approvalGroups, _severityMap, ...
+├── dev-release.cue
+├── test-release.cue
+└── prod-release.cue
 ```
 
-### Manifest (policyset.cue)
+All four files are loaded as one CUE package, so `dev-release.cue` can use a
+definition declared in `definitions.cue` without any Garmr-specific manifest.
 
-```cue
-{
-    apiVersion: "policy.garmr.io/v1"
-    kind: "PolicySet"
-    metadata: {
-        name: "release-pipeline"
-        namespace: "release"
-        version: "2.0.0"
-    }
-    spec: {
-        include: [
-            "definitions.cue",
-            "input-schema.cue",
-            "dev-release.cue",
-            "test-release.cue",
-            "acc-release.cue",
-            "prod-release.cue",
-        ]
-
-        // Shared definitions unified with each policy
-        definitions: {
-            _approvalGroups: {
-                prod: ["release-managers"]
-            }
-        }
-
-        evaluationOrder: "dependency"
-
-        policies: [{
-            file: "prod-release.cue"
-            requires: ["acc-release.cue"]
-        }]
-    }
-}
-```
-
-### Benefits
-
-1. **Modularity** - Split large policies into focused files
-2. **Reuse** - Share definitions across policies
-3. **Versioning** - Version the entire set as a unit
-4. **Dependencies** - Express evaluation order
-
-### When NOT to Use Policy Sets
-
-- Simple, single-file policies
-- Policies that don't share definitions
-- When you want maximum loading flexibility
+:::note[No `policyset.cue` manifest]
+Earlier drafts of this page described a `kind: "PolicySet"` manifest with
+`include` ordering, `evaluationOrder: "dependency"`, and per-policy `requires`
+dependencies. None of it was implemented, and `requires` was separately
+decided against (see `TODO.md`). The schema describing it has been removed.
+Use CUE packages, as above.
+:::
 
 ## Container Deployment Example
 

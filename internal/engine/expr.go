@@ -287,265 +287,174 @@ func (e *Engine) evaluateMatch(expr cue.Value, input cue.Value) (bool, map[strin
 	// Get value at path
 	fieldVal := input.LookupPath(cue.ParsePath(path))
 
-	// Check for 'exists' condition
-	if existsVal := expr.LookupPath(cue.ParsePath("exists")); existsVal.Exists() {
-		shouldExist, _ := existsVal.Bool()
-		exists := fieldVal.Exists() && fieldVal.Kind() != cue.NullKind
-		if shouldExist && !exists {
-			return false, bindings, fmt.Sprintf("field '%s' does not exist", path)
+	// requireField wraps operators that need the path to resolve; 'exists' is
+	// the only operator that inspects absence itself. The numeric comparisons
+	// carry their own not-found handling inside numericComparison.
+	requireField := func(eval func(op cue.Value) (bool, string)) func(cue.Value) (bool, string) {
+		return func(op cue.Value) (bool, string) {
+			if !fieldVal.Exists() {
+				return false, fmt.Sprintf("path '%s' not found", path)
+			}
+			return eval(op)
 		}
-		if !shouldExist && exists {
-			return false, bindings, fmt.Sprintf("field '%s' should not exist", path)
+	}
+	// delegate adapts the family evaluators (set, length, semver, datetime),
+	// folding their bindings into this match's bindings.
+	delegate := func(eval func(fieldVal, op cue.Value, path string) (bool, map[string]any, string)) func(cue.Value) (bool, string) {
+		return requireField(func(op cue.Value) (bool, string) {
+			ok, b, reason := eval(fieldVal, op, path)
+			for k, v := range b {
+				bindings[k] = v
+			}
+			return ok, reason
+		})
+	}
+	numericOp := func(symbol string, cmp func(actual, expected float64) bool) func(cue.Value) (bool, string) {
+		return func(op cue.Value) (bool, string) {
+			return numericComparison(fieldVal, op, path, symbol, cmp)
 		}
-		return true, bindings, ""
 	}
 
-	// Check for 'pattern' (regex match)
-	if patternVal := expr.LookupPath(cue.ParsePath("pattern")); patternVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-
-		fieldStr, err := fieldVal.String()
-		if err != nil {
-			return false, bindings, fmt.Sprintf("path '%s' is not a string", path)
-		}
-
-		pattern, _ := patternVal.String()
-		re, err := e.getCompiledRegex(pattern)
-		if err != nil {
-			return false, bindings, fmt.Sprintf("invalid pattern: %s", err)
-		}
-
-		if !re.MatchString(fieldStr) {
-			return false, bindings, fmt.Sprintf("'%s' does not match pattern '%s'", fieldStr, pattern)
-		}
-		return true, bindings, ""
-	}
-
-	// Check for 'equals' (exact match)
-	if equalsVal := expr.LookupPath(cue.ParsePath("equals")); equalsVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-
-		expected, err := decodeAny(equalsVal)
-		if err != nil {
-			return false, bindings, fmt.Sprintf("'equals' operand for '%s' is not decodable: %v", path, err)
-		}
-		actual, err := decodeAny(fieldVal)
-		if err != nil {
-			return false, bindings, fmt.Sprintf("'%s' is not decodable: %v", path, err)
-		}
-
-		if !valuesEqual(actual, expected) {
-			return false, bindings, fmt.Sprintf("'%s' expected '%v', got '%v'", path, expected, actual)
-		}
-		return true, bindings, ""
-	}
-
-	// Numeric comparisons. All four share numericComparison so a malformed
-	// operand fails closed with the same message shape.
-	if gtVal := expr.LookupPath(cue.ParsePath("greaterThan")); gtVal.Exists() {
-		ok, reason := numericComparison(fieldVal, gtVal, path, ">", func(a, e float64) bool { return a > e })
-		return ok, bindings, reason
-	}
-	if gteVal := expr.LookupPath(cue.ParsePath("greaterThanOrEqual")); gteVal.Exists() {
-		ok, reason := numericComparison(fieldVal, gteVal, path, ">=", func(a, e float64) bool { return a >= e })
-		return ok, bindings, reason
-	}
-	if ltVal := expr.LookupPath(cue.ParsePath("lessThan")); ltVal.Exists() {
-		ok, reason := numericComparison(fieldVal, ltVal, path, "<", func(a, e float64) bool { return a < e })
-		return ok, bindings, reason
-	}
-	if lteVal := expr.LookupPath(cue.ParsePath("lessThanOrEqual")); lteVal.Exists() {
-		ok, reason := numericComparison(fieldVal, lteVal, path, "<=", func(a, e float64) bool { return a <= e })
-		return ok, bindings, reason
-	}
-
-	// Check for 'in' (value in list)
-	if inVal := expr.LookupPath(cue.ParsePath("in")); inVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-
-		actual, err := decodeAny(fieldVal)
-		if err != nil {
-			return false, bindings, fmt.Sprintf("'%s' is not decodable: %v", path, err)
-		}
-
-		iter, err := inVal.List()
-		if err != nil {
-			return false, bindings, "'in' must be a list"
-		}
-
-		found := false
-		var allowedValues []string
-		for iter.Next() {
-			v, err := decodeAny(iter.Value())
+	ops := []specOp{
+		{"exists", func(op cue.Value) (bool, string) {
+			shouldExist, _ := op.Bool()
+			exists := fieldVal.Exists() && fieldVal.Kind() != cue.NullKind
+			if shouldExist && !exists {
+				return false, fmt.Sprintf("field '%s' does not exist", path)
+			}
+			if !shouldExist && exists {
+				return false, fmt.Sprintf("field '%s' should not exist", path)
+			}
+			return true, ""
+		}},
+		{"pattern", requireField(func(op cue.Value) (bool, string) {
+			fieldStr, err := fieldVal.String()
 			if err != nil {
-				return false, bindings, fmt.Sprintf("'in' list entry is not decodable: %v", err)
+				return false, fmt.Sprintf("path '%s' is not a string", path)
 			}
-			allowedValues = append(allowedValues, fmt.Sprintf("%v", v))
-			if valuesEqual(actual, v) {
-				found = true
-				break
-			}
-		}
-
-		if !found {
-			return false, bindings, fmt.Sprintf("'%s' value '%v' not in allowed list %v", path, actual, allowedValues)
-		}
-		return true, bindings, ""
-	}
-
-	// Check for 'notIn' (value not in list)
-	if notInVal := expr.LookupPath(cue.ParsePath("notIn")); notInVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-
-		actual, err := decodeAny(fieldVal)
-		if err != nil {
-			return false, bindings, fmt.Sprintf("'%s' is not decodable: %v", path, err)
-		}
-
-		iter, err := notInVal.List()
-		if err != nil {
-			return false, bindings, "'notIn' must be a list"
-		}
-
-		for iter.Next() {
-			v, err := decodeAny(iter.Value())
+			pattern, _ := op.String()
+			re, err := e.getCompiledRegex(pattern)
 			if err != nil {
-				return false, bindings, fmt.Sprintf("'notIn' list entry is not decodable: %v", err)
+				return false, fmt.Sprintf("invalid pattern: %s", err)
 			}
-			if valuesEqual(actual, v) {
-				return false, bindings, fmt.Sprintf("'%s' value '%v' is in forbidden list", path, actual)
+			if !re.MatchString(fieldStr) {
+				return false, fmt.Sprintf("'%s' does not match pattern '%s'", fieldStr, pattern)
 			}
-		}
-		return true, bindings, ""
+			return true, ""
+		})},
+		{"equals", requireField(func(op cue.Value) (bool, string) {
+			expected, err := decodeAny(op)
+			if err != nil {
+				return false, fmt.Sprintf("'equals' operand for '%s' is not decodable: %v", path, err)
+			}
+			actual, err := decodeAny(fieldVal)
+			if err != nil {
+				return false, fmt.Sprintf("'%s' is not decodable: %v", path, err)
+			}
+			if !valuesEqual(actual, expected) {
+				return false, fmt.Sprintf("'%s' expected '%v', got '%v'", path, expected, actual)
+			}
+			return true, ""
+		})},
+		{"greaterThan", numericOp(">", func(a, e float64) bool { return a > e })},
+		{"greaterThanOrEqual", numericOp(">=", func(a, e float64) bool { return a >= e })},
+		{"lessThan", numericOp("<", func(a, e float64) bool { return a < e })},
+		{"lessThanOrEqual", numericOp("<=", func(a, e float64) bool { return a <= e })},
+		{"in", requireField(func(op cue.Value) (bool, string) {
+			actual, err := decodeAny(fieldVal)
+			if err != nil {
+				return false, fmt.Sprintf("'%s' is not decodable: %v", path, err)
+			}
+			iter, err := op.List()
+			if err != nil {
+				return false, "'in' must be a list"
+			}
+			found := false
+			var allowedValues []string
+			for iter.Next() {
+				v, err := decodeAny(iter.Value())
+				if err != nil {
+					return false, fmt.Sprintf("'in' list entry is not decodable: %v", err)
+				}
+				allowedValues = append(allowedValues, fmt.Sprintf("%v", v))
+				if valuesEqual(actual, v) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false, fmt.Sprintf("'%s' value '%v' not in allowed list %v", path, actual, allowedValues)
+			}
+			return true, ""
+		})},
+		{"notIn", requireField(func(op cue.Value) (bool, string) {
+			actual, err := decodeAny(fieldVal)
+			if err != nil {
+				return false, fmt.Sprintf("'%s' is not decodable: %v", path, err)
+			}
+			iter, err := op.List()
+			if err != nil {
+				return false, "'notIn' must be a list"
+			}
+			for iter.Next() {
+				v, err := decodeAny(iter.Value())
+				if err != nil {
+					return false, fmt.Sprintf("'notIn' list entry is not decodable: %v", err)
+				}
+				if valuesEqual(actual, v) {
+					return false, fmt.Sprintf("'%s' value '%v' is in forbidden list", path, actual)
+				}
+			}
+			return true, ""
+		})},
+		{"contains", requireField(func(op cue.Value) (bool, string) {
+			fieldStr, err := fieldVal.String()
+			if err != nil {
+				return false, fmt.Sprintf("path '%s' is not a string", path)
+			}
+			substr, _ := op.String()
+			if !strings.Contains(fieldStr, substr) {
+				return false, fmt.Sprintf("'%s' does not contain '%s'", path, substr)
+			}
+			return true, ""
+		})},
+		{"hasPrefix", requireField(func(op cue.Value) (bool, string) {
+			fieldStr, err := fieldVal.String()
+			if err != nil {
+				return false, fmt.Sprintf("path '%s' is not a string", path)
+			}
+			prefix, _ := op.String()
+			if !strings.HasPrefix(fieldStr, prefix) {
+				return false, fmt.Sprintf("'%s' does not have prefix '%s'", path, prefix)
+			}
+			return true, ""
+		})},
+		{"hasSuffix", requireField(func(op cue.Value) (bool, string) {
+			fieldStr, err := fieldVal.String()
+			if err != nil {
+				return false, fmt.Sprintf("path '%s' is not a string", path)
+			}
+			suffix, _ := op.String()
+			if !strings.HasSuffix(fieldStr, suffix) {
+				return false, fmt.Sprintf("'%s' does not have suffix '%s'", path, suffix)
+			}
+			return true, ""
+		})},
+		{"unique", delegate(e.evaluateUnique)},
+		{"uniqueBy", delegate(e.evaluateUniqueBy)},
+		{"sorted", delegate(e.evaluateSorted)},
+		{"containsAll", delegate(e.evaluateContainsAll)},
+		{"subsetOf", delegate(e.evaluateSubsetOf)},
+		{"length", delegate(e.evaluateLength)},
+		{"semver", delegate(e.evaluateSemver)},
+		{"datetime", delegate(e.evaluateDatetime)},
 	}
 
-	// Check for 'contains' (string contains)
-	if containsVal := expr.LookupPath(cue.ParsePath("contains")); containsVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-
-		fieldStr, err := fieldVal.String()
-		if err != nil {
-			return false, bindings, fmt.Sprintf("path '%s' is not a string", path)
-		}
-
-		substr, _ := containsVal.String()
-		if !strings.Contains(fieldStr, substr) {
-			return false, bindings, fmt.Sprintf("'%s' does not contain '%s'", path, substr)
-		}
-		return true, bindings, ""
+	specified, ok, reason := evaluateAllSpecified(expr, ops)
+	if specified == 0 {
+		return false, bindings, "match requires one of: exists, pattern, equals, greaterThan, greaterThanOrEqual, lessThan, lessThanOrEqual, in, notIn, contains, hasPrefix, hasSuffix, unique, uniqueBy, sorted, containsAll, subsetOf, length, semver, datetime"
 	}
-
-	// Check for 'hasPrefix'
-	if prefixVal := expr.LookupPath(cue.ParsePath("hasPrefix")); prefixVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-
-		fieldStr, err := fieldVal.String()
-		if err != nil {
-			return false, bindings, fmt.Sprintf("path '%s' is not a string", path)
-		}
-
-		prefix, _ := prefixVal.String()
-		if !strings.HasPrefix(fieldStr, prefix) {
-			return false, bindings, fmt.Sprintf("'%s' does not have prefix '%s'", path, prefix)
-		}
-		return true, bindings, ""
-	}
-
-	// Check for 'hasSuffix'
-	if suffixVal := expr.LookupPath(cue.ParsePath("hasSuffix")); suffixVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-
-		fieldStr, err := fieldVal.String()
-		if err != nil {
-			return false, bindings, fmt.Sprintf("path '%s' is not a string", path)
-		}
-
-		suffix, _ := suffixVal.String()
-		if !strings.HasSuffix(fieldStr, suffix) {
-			return false, bindings, fmt.Sprintf("'%s' does not have suffix '%s'", path, suffix)
-		}
-		return true, bindings, ""
-	}
-
-	// Check for 'unique' (array elements must be distinct)
-	if uniqueVal := expr.LookupPath(cue.ParsePath("unique")); uniqueVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-		return e.evaluateUnique(fieldVal, uniqueVal, path)
-	}
-
-	// Check for 'uniqueBy' (array of objects distinct by field)
-	if uniqueByVal := expr.LookupPath(cue.ParsePath("uniqueBy")); uniqueByVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-		return e.evaluateUniqueBy(fieldVal, uniqueByVal, path)
-	}
-
-	// Check for 'sorted' (array must be in sorted order)
-	if sortedVal := expr.LookupPath(cue.ParsePath("sorted")); sortedVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-		return e.evaluateSorted(fieldVal, sortedVal, path)
-	}
-
-	// Check for 'containsAll' (array must contain every listed value)
-	if containsAllVal := expr.LookupPath(cue.ParsePath("containsAll")); containsAllVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-		return e.evaluateContainsAll(fieldVal, containsAllVal, path)
-	}
-
-	// Check for 'subsetOf' (every array element must be from the listed set)
-	if subsetOfVal := expr.LookupPath(cue.ParsePath("subsetOf")); subsetOfVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-		return e.evaluateSubsetOf(fieldVal, subsetOfVal, path)
-	}
-
-	// Check for 'length' conditions (array or string length)
-	if lengthVal := expr.LookupPath(cue.ParsePath("length")); lengthVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-		return e.evaluateLength(fieldVal, lengthVal, path)
-	}
-
-	// Check for 'semver' (semantic version comparison)
-	if semverVal := expr.LookupPath(cue.ParsePath("semver")); semverVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-		return e.evaluateSemver(fieldVal, semverVal, path)
-	}
-
-	// Check for 'datetime' (date/time comparison)
-	if datetimeVal := expr.LookupPath(cue.ParsePath("datetime")); datetimeVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-		return e.evaluateDatetime(fieldVal, datetimeVal, path)
-	}
-
-	return false, bindings, "match requires one of: exists, pattern, equals, greaterThan, lessThan, in, notIn, contains, hasPrefix, hasSuffix, unique, uniqueBy, sorted, containsAll, subsetOf, length, semver, datetime"
+	return ok, bindings, reason
 }
 
 // evaluateCompare evaluates a compare expression.
@@ -1022,69 +931,61 @@ func (e *Engine) evaluateLength(fieldVal cue.Value, lengthExpr cue.Value, path s
 
 	bindings["length"] = length
 
-	// Check various length conditions
-	if eqVal := lengthExpr.LookupPath(cue.ParsePath("equals")); eqVal.Exists() {
-		expected, _ := eqVal.Int64()
-		if int64(length) != expected {
-			return false, bindings, fmt.Sprintf("'%s' length is %d, expected %d", path, length, expected)
+	intOp := func(check func(expected int64) (bool, string)) func(cue.Value) (bool, string) {
+		return func(op cue.Value) (bool, string) {
+			expected, _ := op.Int64()
+			return check(expected)
 		}
-		return true, bindings, ""
 	}
 
-	if gtVal := lengthExpr.LookupPath(cue.ParsePath("greaterThan")); gtVal.Exists() {
-		expected, _ := gtVal.Int64()
-		if int64(length) <= expected {
-			return false, bindings, fmt.Sprintf("'%s' length is %d, expected > %d", path, length, expected)
-		}
-		return true, bindings, ""
-	}
-
-	if gteVal := lengthExpr.LookupPath(cue.ParsePath("greaterThanOrEqual")); gteVal.Exists() {
-		expected, _ := gteVal.Int64()
-		if int64(length) < expected {
-			return false, bindings, fmt.Sprintf("'%s' length is %d, expected >= %d", path, length, expected)
-		}
-		return true, bindings, ""
-	}
-
-	if ltVal := lengthExpr.LookupPath(cue.ParsePath("lessThan")); ltVal.Exists() {
-		expected, _ := ltVal.Int64()
-		if int64(length) >= expected {
-			return false, bindings, fmt.Sprintf("'%s' length is %d, expected < %d", path, length, expected)
-		}
-		return true, bindings, ""
-	}
-
-	if lteVal := lengthExpr.LookupPath(cue.ParsePath("lessThanOrEqual")); lteVal.Exists() {
-		expected, _ := lteVal.Int64()
-		if int64(length) > expected {
-			return false, bindings, fmt.Sprintf("'%s' length is %d, expected <= %d", path, length, expected)
-		}
-		return true, bindings, ""
-	}
-
-	if minVal := lengthExpr.LookupPath(cue.ParsePath("min")); minVal.Exists() {
-		min, _ := minVal.Int64()
-		if int64(length) < min {
-			return false, bindings, fmt.Sprintf("'%s' length is %d, minimum is %d", path, length, min)
-		}
-		// Check max too if provided
-		if maxVal := lengthExpr.LookupPath(cue.ParsePath("max")); maxVal.Exists() {
-			max, _ := maxVal.Int64()
-			if int64(length) > max {
-				return false, bindings, fmt.Sprintf("'%s' length is %d, maximum is %d", path, length, max)
+	ops := []specOp{
+		{"equals", intOp(func(expected int64) (bool, string) {
+			if int64(length) != expected {
+				return false, fmt.Sprintf("'%s' length is %d, expected %d", path, length, expected)
 			}
-		}
-		return true, bindings, ""
+			return true, ""
+		})},
+		{"greaterThan", intOp(func(expected int64) (bool, string) {
+			if int64(length) <= expected {
+				return false, fmt.Sprintf("'%s' length is %d, expected > %d", path, length, expected)
+			}
+			return true, ""
+		})},
+		{"greaterThanOrEqual", intOp(func(expected int64) (bool, string) {
+			if int64(length) < expected {
+				return false, fmt.Sprintf("'%s' length is %d, expected >= %d", path, length, expected)
+			}
+			return true, ""
+		})},
+		{"lessThan", intOp(func(expected int64) (bool, string) {
+			if int64(length) >= expected {
+				return false, fmt.Sprintf("'%s' length is %d, expected < %d", path, length, expected)
+			}
+			return true, ""
+		})},
+		{"lessThanOrEqual", intOp(func(expected int64) (bool, string) {
+			if int64(length) > expected {
+				return false, fmt.Sprintf("'%s' length is %d, expected <= %d", path, length, expected)
+			}
+			return true, ""
+		})},
+		{"min", intOp(func(min int64) (bool, string) {
+			if int64(length) < min {
+				return false, fmt.Sprintf("'%s' length is %d, minimum is %d", path, length, min)
+			}
+			return true, ""
+		})},
+		{"max", intOp(func(max int64) (bool, string) {
+			if int64(length) > max {
+				return false, fmt.Sprintf("'%s' length is %d, maximum is %d", path, length, max)
+			}
+			return true, ""
+		})},
 	}
 
-	if maxVal := lengthExpr.LookupPath(cue.ParsePath("max")); maxVal.Exists() {
-		max, _ := maxVal.Int64()
-		if int64(length) > max {
-			return false, bindings, fmt.Sprintf("'%s' length is %d, maximum is %d", path, length, max)
-		}
-		return true, bindings, ""
+	specified, ok, reason := evaluateAllSpecified(lengthExpr, ops)
+	if specified == 0 {
+		return false, bindings, "length requires one of: equals, greaterThan, greaterThanOrEqual, lessThan, lessThanOrEqual, min, max"
 	}
-
-	return false, bindings, "length requires one of: equals, greaterThan, greaterThanOrEqual, lessThan, lessThanOrEqual, min, max"
+	return ok, bindings, reason
 }

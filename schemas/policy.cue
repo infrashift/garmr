@@ -205,7 +205,10 @@ package policy
 }
 
 // MatchExpr matches a field at a given path against various conditions.
-// Exactly one condition operator must be specified alongside `path`.
+// At least one condition operator must be specified alongside `path`; when
+// several are specified, every one of them must pass (AND semantics). The
+// same holds inside the `length`, `semver`, and `datetime` operator blocks,
+// e.g. `datetime: {after: X, before: Y}` is a range check.
 #MatchExpr: {
 	// Path to the field in the input (dot-notation)
 	path: string

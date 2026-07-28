@@ -24,81 +24,49 @@ func (e *Engine) evaluateSemver(fieldVal cue.Value, semverExpr cue.Value, path s
 	}
 	bindings["version"] = version
 
-	// Check various semver conditions
-	if eqVal := semverExpr.LookupPath(cue.ParsePath("equals")); eqVal.Exists() {
-		expected, _ := eqVal.String()
-		expectedVer, err := parseSemver(expected)
-		if err != nil {
-			return false, bindings, fmt.Sprintf("invalid expected semver: %s", expected)
-		}
-		if compareSemverParsed(actualVer, expectedVer) != 0 {
-			return false, bindings, fmt.Sprintf("'%s' version %s != %s", path, version, expected)
-		}
-		return true, bindings, ""
+	// cmpOp builds one comparison operator; pass decides whether the
+	// compareSemverParsed result satisfies it.
+	cmpOp := func(name, symbol string, pass func(cmp int) bool) specOp {
+		return specOp{name, func(op cue.Value) (bool, string) {
+			expected, _ := op.String()
+			expectedVer, err := parseSemver(expected)
+			if err != nil {
+				return false, fmt.Sprintf("invalid expected semver: %s", expected)
+			}
+			if !pass(compareSemverParsed(actualVer, expectedVer)) {
+				if symbol == "==" {
+					return false, fmt.Sprintf("'%s' version %s != %s", path, version, expected)
+				}
+				return false, fmt.Sprintf("'%s' version %s is not %s %s", path, version, symbol, expected)
+			}
+			return true, ""
+		}}
 	}
 
-	if gtVal := semverExpr.LookupPath(cue.ParsePath("greaterThan")); gtVal.Exists() {
-		expected, _ := gtVal.String()
-		expectedVer, err := parseSemver(expected)
-		if err != nil {
-			return false, bindings, fmt.Sprintf("invalid expected semver: %s", expected)
-		}
-		if compareSemverParsed(actualVer, expectedVer) <= 0 {
-			return false, bindings, fmt.Sprintf("'%s' version %s is not > %s", path, version, expected)
-		}
-		return true, bindings, ""
+	ops := []specOp{
+		cmpOp("equals", "==", func(c int) bool { return c == 0 }),
+		cmpOp("greaterThan", ">", func(c int) bool { return c > 0 }),
+		cmpOp("greaterThanOrEqual", ">=", func(c int) bool { return c >= 0 }),
+		cmpOp("lessThan", "<", func(c int) bool { return c < 0 }),
+		cmpOp("lessThanOrEqual", "<=", func(c int) bool { return c <= 0 }),
+		{"constraint", func(op cue.Value) (bool, string) {
+			constraint, _ := op.String()
+			matched, err := matchSemverConstraint(actualVer, constraint)
+			if err != nil {
+				return false, fmt.Sprintf("invalid semver constraint %q: %v", constraint, err)
+			}
+			if !matched {
+				return false, fmt.Sprintf("'%s' version %s does not satisfy constraint %s", path, version, constraint)
+			}
+			return true, ""
+		}},
 	}
 
-	if gteVal := semverExpr.LookupPath(cue.ParsePath("greaterThanOrEqual")); gteVal.Exists() {
-		expected, _ := gteVal.String()
-		expectedVer, err := parseSemver(expected)
-		if err != nil {
-			return false, bindings, fmt.Sprintf("invalid expected semver: %s", expected)
-		}
-		if compareSemverParsed(actualVer, expectedVer) < 0 {
-			return false, bindings, fmt.Sprintf("'%s' version %s is not >= %s", path, version, expected)
-		}
-		return true, bindings, ""
+	specified, ok, reason := evaluateAllSpecified(semverExpr, ops)
+	if specified == 0 {
+		return false, bindings, "semver requires one of: equals, greaterThan, greaterThanOrEqual, lessThan, lessThanOrEqual, constraint"
 	}
-
-	if ltVal := semverExpr.LookupPath(cue.ParsePath("lessThan")); ltVal.Exists() {
-		expected, _ := ltVal.String()
-		expectedVer, err := parseSemver(expected)
-		if err != nil {
-			return false, bindings, fmt.Sprintf("invalid expected semver: %s", expected)
-		}
-		if compareSemverParsed(actualVer, expectedVer) >= 0 {
-			return false, bindings, fmt.Sprintf("'%s' version %s is not < %s", path, version, expected)
-		}
-		return true, bindings, ""
-	}
-
-	if lteVal := semverExpr.LookupPath(cue.ParsePath("lessThanOrEqual")); lteVal.Exists() {
-		expected, _ := lteVal.String()
-		expectedVer, err := parseSemver(expected)
-		if err != nil {
-			return false, bindings, fmt.Sprintf("invalid expected semver: %s", expected)
-		}
-		if compareSemverParsed(actualVer, expectedVer) > 0 {
-			return false, bindings, fmt.Sprintf("'%s' version %s is not <= %s", path, version, expected)
-		}
-		return true, bindings, ""
-	}
-
-	// Check for constraint (e.g., ">=1.0.0,<2.0.0")
-	if constraintVal := semverExpr.LookupPath(cue.ParsePath("constraint")); constraintVal.Exists() {
-		constraint, _ := constraintVal.String()
-		matched, err := matchSemverConstraint(actualVer, constraint)
-		if err != nil {
-			return false, bindings, fmt.Sprintf("invalid semver constraint %q: %v", constraint, err)
-		}
-		if !matched {
-			return false, bindings, fmt.Sprintf("'%s' version %s does not satisfy constraint %s", path, version, constraint)
-		}
-		return true, bindings, ""
-	}
-
-	return false, bindings, "semver requires one of: equals, greaterThan, greaterThanOrEqual, lessThan, lessThanOrEqual, constraint"
+	return ok, bindings, reason
 }
 
 // semverParts holds parsed semantic version components

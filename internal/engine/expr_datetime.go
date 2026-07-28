@@ -24,102 +24,86 @@ func (e *Engine) evaluateDatetime(fieldVal cue.Value, datetimeExpr cue.Value, pa
 	}
 	bindings["datetime"] = actualTime.Format(time.RFC3339)
 
-	// Check for 'after'
-	if afterVal := datetimeExpr.LookupPath(cue.ParsePath("after")); afterVal.Exists() {
-		expected, _ := afterVal.String()
-		expectedTime, err := parseDateTime(expected)
-		if err != nil {
-			return false, bindings, fmt.Sprintf("invalid expected datetime: %s", expected)
-		}
-		if !actualTime.After(expectedTime) {
-			return false, bindings, fmt.Sprintf("'%s' %s is not after %s", path, dateStr, expected)
-		}
-		return true, bindings, ""
+	// timeOp builds one absolute-time comparison operator; pass decides
+	// whether actualTime satisfies it relative to the operand, and failMsg
+	// renders the violation for the operand's raw string.
+	timeOp := func(name string, pass func(actual, expected time.Time) bool, failMsg func(expected string) string) specOp {
+		return specOp{name, func(op cue.Value) (bool, string) {
+			expected, _ := op.String()
+			expectedTime, err := parseDateTime(expected)
+			if err != nil {
+				return false, fmt.Sprintf("invalid expected datetime: %s", expected)
+			}
+			if !pass(actualTime, expectedTime) {
+				return false, failMsg(expected)
+			}
+			return true, ""
+		}}
 	}
 
-	// Check for 'before'
-	if beforeVal := datetimeExpr.LookupPath(cue.ParsePath("before")); beforeVal.Exists() {
-		expected, _ := beforeVal.String()
-		expectedTime, err := parseDateTime(expected)
-		if err != nil {
-			return false, bindings, fmt.Sprintf("invalid expected datetime: %s", expected)
-		}
-		if !actualTime.Before(expectedTime) {
-			return false, bindings, fmt.Sprintf("'%s' %s is not before %s", path, dateStr, expected)
-		}
-		return true, bindings, ""
+	ops := []specOp{
+		timeOp("after",
+			func(a, e time.Time) bool { return a.After(e) },
+			func(expected string) string {
+				return fmt.Sprintf("'%s' %s is not after %s", path, dateStr, expected)
+			}),
+		timeOp("before",
+			func(a, e time.Time) bool { return a.Before(e) },
+			func(expected string) string {
+				return fmt.Sprintf("'%s' %s is not before %s", path, dateStr, expected)
+			}),
+		timeOp("afterOrEqual",
+			func(a, e time.Time) bool { return !a.Before(e) },
+			func(expected string) string {
+				return fmt.Sprintf("'%s' %s is before %s", path, dateStr, expected)
+			}),
+		timeOp("beforeOrEqual",
+			func(a, e time.Time) bool { return !a.After(e) },
+			func(expected string) string {
+				return fmt.Sprintf("'%s' %s is after %s", path, dateStr, expected)
+			}),
+		{"withinDays", func(op cue.Value) (bool, string) {
+			days, _ := op.Int64()
+			deadline := time.Now().AddDate(0, 0, int(days))
+			if actualTime.After(deadline) {
+				return false, fmt.Sprintf("'%s' %s is more than %d days from now", path, dateStr, days)
+			}
+			return true, ""
+		}},
+		{"withinHours", func(op cue.Value) (bool, string) {
+			hours, _ := op.Int64()
+			deadline := time.Now().Add(time.Duration(hours) * time.Hour)
+			if actualTime.After(deadline) {
+				return false, fmt.Sprintf("'%s' %s is more than %d hours from now", path, dateStr, hours)
+			}
+			return true, ""
+		}},
+		{"expiresAfterDays", func(op cue.Value) (bool, string) {
+			days, _ := op.Int64()
+			minExpiry := time.Now().AddDate(0, 0, int(days))
+			if actualTime.Before(minExpiry) {
+				return false, fmt.Sprintf("'%s' %s expires in less than %d days", path, dateStr, days)
+			}
+			return true, ""
+		}},
+		{"notExpired", func(op cue.Value) (bool, string) {
+			shouldNotBeExpired, _ := op.Bool()
+			isExpired := actualTime.Before(time.Now())
+			if shouldNotBeExpired && isExpired {
+				return false, fmt.Sprintf("'%s' %s has expired", path, dateStr)
+			}
+			if !shouldNotBeExpired && !isExpired {
+				return false, fmt.Sprintf("'%s' %s has not expired", path, dateStr)
+			}
+			return true, ""
+		}},
 	}
 
-	// Check for 'afterOrEqual'
-	if afterEqVal := datetimeExpr.LookupPath(cue.ParsePath("afterOrEqual")); afterEqVal.Exists() {
-		expected, _ := afterEqVal.String()
-		expectedTime, err := parseDateTime(expected)
-		if err != nil {
-			return false, bindings, fmt.Sprintf("invalid expected datetime: %s", expected)
-		}
-		if actualTime.Before(expectedTime) {
-			return false, bindings, fmt.Sprintf("'%s' %s is before %s", path, dateStr, expected)
-		}
-		return true, bindings, ""
+	specified, ok, reason := evaluateAllSpecified(datetimeExpr, ops)
+	if specified == 0 {
+		return false, bindings, "datetime requires one of: after, before, afterOrEqual, beforeOrEqual, withinDays, withinHours, expiresAfterDays, notExpired"
 	}
-
-	// Check for 'beforeOrEqual'
-	if beforeEqVal := datetimeExpr.LookupPath(cue.ParsePath("beforeOrEqual")); beforeEqVal.Exists() {
-		expected, _ := beforeEqVal.String()
-		expectedTime, err := parseDateTime(expected)
-		if err != nil {
-			return false, bindings, fmt.Sprintf("invalid expected datetime: %s", expected)
-		}
-		if actualTime.After(expectedTime) {
-			return false, bindings, fmt.Sprintf("'%s' %s is after %s", path, dateStr, expected)
-		}
-		return true, bindings, ""
-	}
-
-	// Check for 'withinDays' (relative to now)
-	if withinDaysVal := datetimeExpr.LookupPath(cue.ParsePath("withinDays")); withinDaysVal.Exists() {
-		days, _ := withinDaysVal.Int64()
-		deadline := time.Now().AddDate(0, 0, int(days))
-		if actualTime.After(deadline) {
-			return false, bindings, fmt.Sprintf("'%s' %s is more than %d days from now", path, dateStr, days)
-		}
-		return true, bindings, ""
-	}
-
-	// Check for 'withinHours' (relative to now)
-	if withinHoursVal := datetimeExpr.LookupPath(cue.ParsePath("withinHours")); withinHoursVal.Exists() {
-		hours, _ := withinHoursVal.Int64()
-		deadline := time.Now().Add(time.Duration(hours) * time.Hour)
-		if actualTime.After(deadline) {
-			return false, bindings, fmt.Sprintf("'%s' %s is more than %d hours from now", path, dateStr, hours)
-		}
-		return true, bindings, ""
-	}
-
-	// Check for 'expiresAfterDays' (must be at least N days in the future)
-	if expiresAfterVal := datetimeExpr.LookupPath(cue.ParsePath("expiresAfterDays")); expiresAfterVal.Exists() {
-		days, _ := expiresAfterVal.Int64()
-		minExpiry := time.Now().AddDate(0, 0, int(days))
-		if actualTime.Before(minExpiry) {
-			return false, bindings, fmt.Sprintf("'%s' %s expires in less than %d days", path, dateStr, days)
-		}
-		return true, bindings, ""
-	}
-
-	// Check for 'notExpired' (must be in the future)
-	if notExpiredVal := datetimeExpr.LookupPath(cue.ParsePath("notExpired")); notExpiredVal.Exists() {
-		shouldNotBeExpired, _ := notExpiredVal.Bool()
-		isExpired := actualTime.Before(time.Now())
-		if shouldNotBeExpired && isExpired {
-			return false, bindings, fmt.Sprintf("'%s' %s has expired", path, dateStr)
-		}
-		if !shouldNotBeExpired && !isExpired {
-			return false, bindings, fmt.Sprintf("'%s' %s has not expired", path, dateStr)
-		}
-		return true, bindings, ""
-	}
-
-	return false, bindings, "datetime requires one of: after, before, afterOrEqual, beforeOrEqual, withinDays, withinHours, expiresAfterDays, notExpired"
+	return ok, bindings, reason
 }
 
 // parseDateTime parses a datetime string in various formats

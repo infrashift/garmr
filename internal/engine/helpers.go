@@ -188,6 +188,33 @@ func numericComparison(fieldVal, operandVal cue.Value, path, symbol string, cmp 
 	return true, ""
 }
 
+// specOp is one operator of a condition-operator family (match, length,
+// semver, datetime). eval receives the operand value and returns whether the
+// operator passed and, on failure, the reason.
+type specOp struct {
+	name string
+	eval func(op cue.Value) (bool, string)
+}
+
+// evaluateAllSpecified evaluates every operator present on expr and ANDs the
+// results, so a block like `datetime: {after: X, before: Y}` enforces all of
+// its operators instead of silently checking only the first. Reasons from
+// every failing operator are joined so the violation names each unmet check.
+func evaluateAllSpecified(expr cue.Value, ops []specOp) (specified int, ok bool, reason string) {
+	var failures []string
+	for _, o := range ops {
+		op := expr.LookupPath(cue.ParsePath(o.name))
+		if !op.Exists() {
+			continue
+		}
+		specified++
+		if passed, why := o.eval(op); !passed {
+			failures = append(failures, why)
+		}
+	}
+	return specified, len(failures) == 0, strings.Join(failures, "; ")
+}
+
 // getCompiledRegex returns a compiled regex from the engine's bounded cache,
 // compiling and caching it if needed.
 func (e *Engine) getCompiledRegex(pattern string) (*regexp.Regexp, error) {

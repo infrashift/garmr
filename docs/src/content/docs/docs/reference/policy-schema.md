@@ -88,6 +88,8 @@ Rules specify severity to prioritize violations:
 
 Note: several example policies in the `condition-operators` namespace target all kinds (`*`), so an evaluation against that namespace can run multiple policies at once. The expected decisions below describe the rules of the operator being illustrated.
 
+A `match` block may specify more than one operator alongside `path`; every specified operator must pass (AND semantics). The same holds inside the `length`, `semver`, and `datetime` blocks, so `datetime: {after: X, before: Y}` is a range check and `semver: {greaterThanOrEqual: "1.0.0", lessThan: "2.0.0"}` bounds a version. When several operators fail, the violation message reports each unmet check.
+
 ### exists / absent
 
 Validates field presence or absence.

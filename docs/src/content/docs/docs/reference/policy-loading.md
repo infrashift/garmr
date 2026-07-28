@@ -12,18 +12,18 @@ Garmr is designed to be deployed in containerized environments where policies ar
 
 ## Directory Structure
 
+The loader walks the tree recursively; each directory containing `.cue`
+files is loaded as a CUE package. The layout below is a convention, not a
+mechanism — directory names carry no meaning to the loader:
+
 ```
 /policies/                          # Root directory (configurable)
-├── production/                     # Namespace: production
+├── production/
 │   ├── release-gate.cue           # Policy: release-gate
-│   ├── release-gate.cue.lock      # Lock file (optional)
-│   └── security/
-│       └── sbom-policy.cue        # Policy: sbom-policy
-├── staging/                        # Namespace: staging
+│   └── release-gate.cue.lock      # Lock file (repo-side review gate)
+├── staging/
 │   └── release-gate.cue
-├── shared/                         # Namespace: shared
-│   └── definitions.cue            # Shared definitions
-└── release/                        # Namespace: release
+└── release/
     ├── definitions.cue            # Shared definitions (same CUE package)
     ├── dev-release.cue
     ├── test-release.cue
@@ -32,27 +32,27 @@ Garmr is designed to be deployed in containerized environments where policies ar
 
 ## Namespace Resolution
 
-| Mode | Behavior |
-|------|----------|
-| `directory` | Namespace from directory structure at configured depth |
-| `explicit` | Namespace must be in policy `metadata.namespace` |
-| `hybrid` | Use metadata if present, else derive from directory |
+A policy's namespace comes from exactly one place: `metadata.namespace` in
+the policy document, defaulting to `"default"` when absent. The directory
+structure never influences the namespace — organizing directories by
+namespace (as above) is a readability convention that the loader does not
+enforce or read.
 
-### Examples
-
+```cue
+my_policy: {
+	apiVersion: "policy.garmr.io/v1"
+	kind: "Policy"
+	metadata: {
+		name:      "release-gate"
+		namespace: "release"   // the only source of the namespace
+	}
+	// ...
+}
 ```
-Path: /policies/production/release-gate.cue
-Mode: directory, depth=0
-Result: namespace=production, name=release-gate
 
-Path: /policies/team-a/security/sbom.cue
-Mode: directory, depth=0
-Result: namespace=team-a, name=sbom
-
-Path: /policies/team-a/security/sbom.cue
-Mode: directory, depth=1
-Result: namespace=security, name=sbom
-```
+Policies are keyed by `namespace/name`; two documents with the same
+`metadata.name` in different directories collide unless their namespaces
+differ.
 
 ## Reloading Policies
 
@@ -112,30 +112,19 @@ Use CUE packages, as above.
 
 ## Container Deployment Example
 
-### Dockerfile
-
-```dockerfile
-FROM gcr.io/distroless/static:nonroot
-
-COPY garmr /usr/local/bin/garmr
-COPY config.cue /etc/garmr/config.cue
-
-# Policies are mounted at runtime
-VOLUME /policies
-
-EXPOSE 8080
-
-ENTRYPOINT ["/usr/local/bin/garmr", "serve", "--config", "/etc/garmr/config.cue"]
-```
+The repository's `Containerfile` builds the production image (`make
+docker-build`): it packages `garmr-server` (the server binary — there is no
+`garmr serve` subcommand; `garmr` is the CLI) with a YAML config at
+`/etc/garmr/config.yaml`.
 
 ### Podman/Docker Run
 
 ```bash
-# Create read-only policy volume
+# Policies and config mounted read-only
 podman run -d \
     --name garmr \
-    -v ./policies:/policies:ro \
-    -v ./config.cue:/etc/garmr/config.cue:ro \
+    -v ./policies:/etc/garmr/policies:ro \
+    -v ./config.yaml:/etc/garmr/config.yaml:ro \
     -p 8080:8080 \
     garmr:latest
 ```
@@ -194,7 +183,8 @@ concurrency.
 
 ### Recommendations
 
-1. **Large policy sets** — use policy sets for modular organisation.
+1. **Large policy sets** — organise with CUE packages (shared definitions
+   in a sibling file of the same package).
 2. **Reload frequency** — reload on deploy, not on a timer; each reload
    recompiles every policy into every replica.
 3. **GitOps** — use lock files as a repo-side review gate, and the policy-set

@@ -70,6 +70,11 @@ func init() {
 }
 
 func initConfig() {
+	// --config wins; GARMR_CONFIG is the env equivalent. The flag is read
+	// before viper is initialised, so AutomaticEnv can't bind it.
+	if cfgFile == "" {
+		cfgFile = os.Getenv("GARMR_CONFIG")
+	}
 	if cfgFile != "" {
 		viper.SetConfigFile(cfgFile)
 	} else {

@@ -6,10 +6,14 @@ A CUE-based policy evaluation engine for enforcing governance, security, and com
 
 Garmr provides a flexible, type-safe policy engine that uses [CUE](https://cuelang.org/) for policy definition. It supports:
 
-- **20+ condition operators** for flexible rule construction
+- **25+ condition operators** for flexible rule construction
 - **Target filtering** to apply policies to specific resource types
 - **Namespace organization** for team-based policy management
-- **Hot reload** for zero-downtime policy updates
+- **Atomic explicit reload** (`POST /v1/policies/reload`) for zero-downtime
+  policy updates — fail-closed: a broken policy tree keeps the old set serving
+- **Offline policy testing** (`garmr test`), local validation
+  (`garmr validate`), and convergence digests (`garmr policy digest`) for
+  CI/CD pipelines
 - **Audit logging** with request correlation for compliance
 - **CI/CD integration** via CLI and REST API
 
@@ -68,7 +72,7 @@ curl -X POST http://localhost:8080/v1/evaluate \
 # List loaded policies
 curl http://localhost:8080/v1/policies
 
-# Reload policies (hot reload)
+# Reload policies (explicit; the server never watches or polls the filesystem)
 curl -X POST http://localhost:8080/v1/policies/reload
 ```
 
@@ -135,9 +139,13 @@ containerSecurity: {
 | Equality | `equals` |
 | Comparison | `greaterThan`, `greaterThanOrEqual`, `lessThan`, `lessThanOrEqual` |
 | String | `contains`, `hasPrefix`, `hasSuffix`, `pattern` (regex) |
-| Set | `in`, `notIn` |
+| Membership | `in`, `notIn` |
+| Set validation | `unique`, `uniqueBy`, `sorted`, `containsAll`, `subsetOf` |
 | Logical | `all`, `any`, `not` |
-| Advanced | `forEach`, `length`, `semver`, `datetime`, `compare` (cross-field) |
+| Advanced | `forEach`, `length`, `semver`, `datetime`, `compare` (cross-field), builtin `func` calls |
+
+Multiple operators in one `match` block are ANDed — `datetime: {after: X,
+before: Y}` is a range check.
 
 ### Target Filtering
 

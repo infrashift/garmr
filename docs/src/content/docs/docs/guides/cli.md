@@ -309,7 +309,7 @@ garmr test <policy-file> [test-file] [flags]
 | `--verbose` | `-v` | Show detailed output | `false` |
 | `--recursive` | `-r` | Process directories recursively | `false` |
 | `--filter` | | Filter tests by name | |
-| `--output` | `-o` | Output format (text, json, tap) | `text` |
+| `--format` | | Output format (text, json, tap) — deliberately not `-o`, which is the root output flag | `text` |
 | `--fail-fast` | | Stop on first failure | `false` |
 
 **Examples:**
@@ -460,7 +460,8 @@ garmr eval --input deployment.json
 
 ## Configuration File
 
-Create `~/.garmr.yaml` or `./garmr.yaml`:
+Create `~/.garmr.yaml` or `./.garmr.yaml` (the file name is `.garmr.yaml`
+in both locations), or point `--config` / `GARMR_CONFIG` at any path:
 
 ```yaml
 server: "http://localhost:8080"

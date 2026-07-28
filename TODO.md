@@ -200,15 +200,21 @@ Recorded, deliberately not done before the deploy:
   of minified JS for a debug page wasn't worth the supply-chain surface.
   /openapi.json remains the supported surface; rest-api.md shows how to
   point a local viewer at it, and a test pins that /swagger-ui now 404s.
-- **Docs accuracy sweep (remainder)**: policy-loading.md's fictional
-  "Namespace Resolution" modes (`directory`/`explicit`/`hybrid` — the
-  engine only reads `metadata.namespace`); the `garmr serve` + CUE-config
-  container example; README's operator table missing the set operators and
-  the "Hot reload" phrasing; `GARMR_CONFIG` env var documented but never
-  bound; `./garmr.yaml` vs actual `.garmr.yaml` config name; `garmr test`
-  flag table says `--output` but the flag is `--format`; storage-backends'
-  include/exclude-pattern claim (patterns are never consulted on the
-  filesystem short-circuit path); `docs/demo/NLIT-2026.md` is orphaned.
+- ~~**Docs accuracy sweep (remainder)**~~ — done (2026-07-28, follow-up
+  commit). policy-loading.md's fictional namespace-resolution modes
+  replaced with the truth (metadata.namespace only; directories are a
+  convention) and its `garmr serve` + CUE-config container example
+  replaced with the real Containerfile/garmr-server/YAML story; README
+  gained the set operators, the AND-semantics note, and honest reload
+  phrasing (explicit, fail-closed — not "hot"); `GARMR_CONFIG` was made
+  real instead of deleting the doc row (the CLI now reads it when
+  --config is absent); `./.garmr.yaml` name corrected; `garmr test` flag
+  table says `--format`; storage-backends now states what the
+  include/exclude patterns actually govern (the List operation feeding
+  /health/deep, not policy loading). `docs/demo/NLIT-2026.md` was audited
+  rather than deleted: every command uses current flags and every
+  referenced fixture exists — it stays as deliberate off-site demo
+  material.
 - **Per-alloc reload fan-out**: `POST /v1/policies/reload` mutates one
   process; the Nomad README documents looping over allocs, but a
   `garmr policy reload --all-allocs` (or documented `nomad alloc exec`

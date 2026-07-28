@@ -39,9 +39,12 @@ storage:
 | `storage.root` | `GARMR_STORAGE_ROOT` | — | Root directory |
 | `policy_dir` | `GARMR_POLICY_DIR` | — | Shorthand: selects the filesystem backend rooted here |
 
-By default the backend includes `**/*.cue` and excludes `**/*_test.cue` and
-`**/testdata/**`, so `garmr test` fixtures sitting alongside policies are not
-loaded as policies.
+The backend's include/exclude patterns (`**/*.cue`, minus `**/*_test.cue`
+and `**/testdata/**`) apply to its `List` operation — which serves the
+`/health/deep` storage check. Policy **loading** takes a short-circuit for
+the filesystem backend: the engine's CUE loader reads the directory tree
+directly, and `*_test.cue` fixtures are skipped because CUE's package
+loading excludes test files, not because of these patterns.
 
 A backend that cannot be initialised, or a policy set that cannot be loaded,
 **fails startup**. Running with zero policies is not a safe default: under

@@ -86,6 +86,18 @@ func init() {
 	rootCmd.Flags().Duration("shutdown-timeout", 30*time.Second, "max time to wait for in-flight requests to drain on SIGTERM")
 	mustBind("shutdown_timeout", rootCmd.Flags().Lookup("shutdown-timeout"))
 
+	// HTTP limits. Reconcile the timeouts with any sidecar proxy in front
+	// (Envoy applies its own request/idle timeouts; the shorter side wins).
+	rootCmd.Flags().Int("max-recv-size", 16*1024*1024,
+		"max request body size in bytes (evaluate buffers the whole body; size together with the memory limit)")
+	rootCmd.Flags().Duration("read-timeout", 30*time.Second, "HTTP server read timeout")
+	rootCmd.Flags().Duration("write-timeout", 60*time.Second, "HTTP server write timeout")
+	rootCmd.Flags().Duration("idle-timeout", 120*time.Second, "HTTP server idle-connection timeout")
+	mustBind("max_recv_size", rootCmd.Flags().Lookup("max-recv-size"))
+	mustBind("read_timeout", rootCmd.Flags().Lookup("read-timeout"))
+	mustBind("write_timeout", rootCmd.Flags().Lookup("write-timeout"))
+	mustBind("idle_timeout", rootCmd.Flags().Lookup("idle-timeout"))
+
 	// Evaluation posture: fail-closed when no policy matches (default true)
 	rootCmd.Flags().Bool("require-match", true, "return DENY when no policy matches the evaluation (fail-closed)")
 	mustBind("evaluation.require_match", rootCmd.Flags().Lookup("require-match"))
@@ -219,8 +231,11 @@ func runServer(cmd *cobra.Command, args []string) error {
 	cfg := server.Config{
 		HTTPAddr:           viper.GetString("http_addr"),
 		PolicyDir:          viper.GetString("policy_dir"),
-		MaxRecvSize:        16 * 1024 * 1024, // 16MB
+		MaxRecvSize:        viper.GetInt("max_recv_size"),
 		ShutdownTimeout:    viper.GetDuration("shutdown_timeout"),
+		ReadTimeout:        viper.GetDuration("read_timeout"),
+		WriteTimeout:       viper.GetDuration("write_timeout"),
+		IdleTimeout:        viper.GetDuration("idle_timeout"),
 		Version:            version,
 		AuditEnabled:       viper.GetBool("audit.enabled"),
 		AuditPath:          viper.GetString("audit.path"),

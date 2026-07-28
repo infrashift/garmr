@@ -172,10 +172,15 @@ Recorded, deliberately not done before the deploy:
   /healthz//readyz//livez stay exempt, while /health/deep performs storage
   I/O on every call and stays gated. openapi.json, rest-api.md, and
   deploying.md all state both behaviors.
-- **Hardcoded server limits**: `MaxRecvSize` fixed at 16 MB in main.go
-  (evaluate buffers the full body via io.ReadAll), Read/Write/Idle
-  timeouts fixed in `newHTTPServer` — should be config, and reconciled
-  with Envoy timeouts.
+- ~~**Hardcoded server limits**~~ — done (2026-07-28, follow-up commit).
+  `max_recv_size`, `read_timeout`, `write_timeout`, `idle_timeout` are now
+  flags + viper keys + Config fields, with the old hardcoded values as
+  defaults (an empty Config changes nothing — pinned by test). The
+  configuration reference gained an "HTTP Limits & Timeouts" section that
+  states the memory pairing (evaluate buffers the whole body: 16 MiB ×
+  concurrency vs the container limit) and the Envoy reconciliation rule
+  (keep write_timeout ≥ the proxy's request timeout, idle_timeout above
+  the proxy's idle timeout).
 - ~~**Metrics gaps**~~ — done (2026-07-28, follow-up commit).
   `garmr_policy_reloads_total{result}` counts reload outcomes (recorded in
   `ReloadPoliciesFromDir`, covering the endpoint and backend paths — alert

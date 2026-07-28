@@ -42,11 +42,22 @@ var openAPISpec []byte
 // mesh's job. The TLS listener and its config knobs were removed deliberately;
 // anyone deploying outside a mesh should front the server with a TLS proxy.
 type Config struct {
-	HTTPAddr        string
-	PolicyDir       string
+	HTTPAddr  string
+	PolicyDir string
+	// MaxRecvSize caps request bodies in bytes (default 16 MiB). Evaluate
+	// buffers the whole body before parsing, so this bounds per-request
+	// memory — size it together with the container's memory limit.
 	MaxRecvSize     int
 	ShutdownTimeout time.Duration // graceful shutdown timeout (default 30s)
-	Version         string        // reported in /health and the health handler; injected via ldflags in main
+	// HTTP server timeouts (defaults: read 30s, write 60s, idle 120s).
+	// Reconcile these with the sidecar in front: Envoy/Consul Connect
+	// applies its own request and idle timeouts, and the shorter of the
+	// two wins in ways that are painful to debug — keep the app's write
+	// timeout at or above the proxy's request timeout.
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	IdleTimeout  time.Duration
+	Version      string // reported in /health and the health handler; injected via ldflags in main
 	// Audit logging
 	AuditEnabled    bool
 	AuditPath       string
@@ -554,9 +565,9 @@ func (s *Server) newHTTPServer() *http.Server {
 	srv := &http.Server{
 		Addr:         s.config.HTTPAddr,
 		Handler:      s.buildHandler(),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadTimeout:  durationOr(s.config.ReadTimeout, 30*time.Second),
+		WriteTimeout: durationOr(s.config.WriteTimeout, 60*time.Second),
+		IdleTimeout:  durationOr(s.config.IdleTimeout, 120*time.Second),
 	}
 
 	s.mu.Lock()
@@ -564,6 +575,14 @@ func (s *Server) newHTTPServer() *http.Server {
 	s.mu.Unlock()
 
 	return srv
+}
+
+// durationOr returns d, or def when d is unset.
+func durationOr(d, def time.Duration) time.Duration {
+	if d > 0 {
+		return d
+	}
+	return def
 }
 
 // serve blocks serving on srv. Only ever called from the Start goroutine.

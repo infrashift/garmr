@@ -22,6 +22,31 @@ http_addr: ":8080"
 |---------|---------|-------------|
 | `http_addr` | `:8080` | Address for the HTTP/REST server |
 
+## HTTP Limits & Timeouts
+
+```yaml
+max_recv_size: 16777216   # bytes
+read_timeout: "30s"
+write_timeout: "60s"
+idle_timeout: "120s"
+shutdown_timeout: "30s"
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `max_recv_size` | `16777216` (16 MiB) | Max request body size. Evaluate buffers the whole body before parsing, so this bounds per-request memory — size it together with the container's memory limit (e.g. a 256 MiB limit tolerates only ~16 concurrent max-size requests at the default). Over-limit requests get `413`. |
+| `read_timeout` | `30s` | HTTP server read timeout |
+| `write_timeout` | `60s` | HTTP server write timeout |
+| `idle_timeout` | `120s` | Idle keep-alive connection timeout |
+| `shutdown_timeout` | `30s` | Drain budget after SIGTERM |
+
+**Behind a sidecar, reconcile with the proxy's timeouts.** Envoy/Consul
+Connect applies its own request and idle timeouts, and whichever side is
+shorter wins in ways that are painful to debug (the caller sees the proxy's
+error, not Garmr's). Keep `write_timeout` at or above the proxy's request
+timeout, and `idle_timeout` above the proxy's idle timeout so connection
+reuse isn't broken from the app side.
+
 ## Policy Configuration
 
 Specify the directory where Garmr loads policy files (CUE format).
@@ -195,6 +220,12 @@ policy_dir: "/etc/garmr/policies"
 
 # Graceful shutdown drain budget
 shutdown_timeout: "30s"
+
+# HTTP limits (defaults shown; reconcile timeouts with the sidecar proxy)
+# max_recv_size: 16777216
+# read_timeout: "30s"
+# write_timeout: "60s"
+# idle_timeout: "120s"
 
 # Authentication & caller identity (optional)
 # auth:

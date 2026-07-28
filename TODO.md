@@ -188,9 +188,13 @@ Recorded, deliberately not done before the deploy:
   recorder level and end-to-end (reload dirA → dirB, team-a disappears
   from the exposition; failed reload increments the failure counter and
   leaves the gauge untouched).
-- **Swagger UI loads swagger-ui-dist from unpkg.com** — fails closed in an
-  egress-restricted mesh (page just breaks), but should be vendored or
-  dropped.
+- ~~**Swagger UI loads swagger-ui-dist from unpkg.com**~~ — done
+  (2026-07-28, follow-up commit): dropped rather than vendored. The page
+  silently broke in the egress-restricted target deployment, nobody
+  browses a sidecar-fronted machine-caller service, and vendoring ~1.3MB
+  of minified JS for a debug page wasn't worth the supply-chain surface.
+  /openapi.json remains the supported surface; rest-api.md shows how to
+  point a local viewer at it, and a test pins that /swagger-ui now 404s.
 - **Docs accuracy sweep (remainder)**: policy-loading.md's fictional
   "Namespace Resolution" modes (`directory`/`explicit`/`hybrid` — the
   engine only reads `metadata.namespace`); the `garmr serve` + CUE-config

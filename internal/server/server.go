@@ -513,8 +513,6 @@ func (s *Server) buildHandler() http.Handler {
 
 	// OpenAPI / Swagger endpoints
 	mux.HandleFunc("/openapi.json", s.handleOpenAPI)
-	mux.HandleFunc("/swagger-ui", s.handleSwaggerUI)
-	mux.HandleFunc("/swagger-ui/", s.handleSwaggerUI)
 
 	// Middleware chain, innermost first. Reading outward the request passes
 	// through: otel -> recovery -> CORS -> rate limit -> auth -> identity -> mux.
@@ -1085,46 +1083,14 @@ func severityToString(s engine.Severity) string {
 	}
 }
 
-// handleOpenAPI serves the OpenAPI specification
+// handleOpenAPI serves the OpenAPI specification. There is deliberately no
+// bundled Swagger UI page: the old one loaded swagger-ui-dist from
+// unpkg.com, which an egress-restricted mesh silently breaks — point any
+// local OpenAPI viewer at this spec instead.
 func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(openAPISpec)
 }
-
-// handleSwaggerUI serves a simple Swagger UI page
-func (s *Server) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html")
-	_, _ = w.Write([]byte(swaggerUIHTML))
-}
-
-// Swagger UI HTML (uses CDN)
-var swaggerUIHTML = `<!DOCTYPE html>
-<html>
-<head>
-  <title>Garmr - API Documentation</title>
-  <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
-  <style>
-    html { box-sizing: border-box; overflow-y: scroll; }
-    *, *:before, *:after { box-sizing: inherit; }
-    body { margin: 0; background: #fafafa; }
-    .topbar { display: none; }
-  </style>
-</head>
-<body>
-  <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-  <script>
-    window.onload = function() {
-      SwaggerUIBundle({
-        url: "/openapi.json",
-        dom_id: '#swagger-ui',
-        presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
-        layout: "BaseLayout"
-      });
-    };
-  </script>
-</body>
-</html>`
 
 // recoveryMiddleware recovers from panics in downstream handlers,
 // logs them with the request ID and stack trace, and returns a 500.

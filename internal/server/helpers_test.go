@@ -76,22 +76,18 @@ func TestHandleOpenAPI(t *testing.T) {
 	}
 }
 
-func TestHandleSwaggerUI(t *testing.T) {
+func TestSwaggerUIRemoved(t *testing.T) {
 	srv := newMetricsTestServer(t)
 
+	// The bundled UI loaded its JS from unpkg.com, which an
+	// egress-restricted mesh silently breaks; the route was removed and
+	// /openapi.json is the supported surface.
 	for _, path := range []string{"/swagger-ui", "/swagger-ui/"} {
 		t.Run(path, func(t *testing.T) {
 			rr := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
-			if rr.Code != http.StatusOK {
-				t.Fatalf("expected 200, got %d", rr.Code)
-			}
-			if ct := rr.Header().Get("Content-Type"); ct != "text/html" {
-				t.Errorf("expected text/html, got %q", ct)
-			}
-			body, _ := io.ReadAll(rr.Body)
-			if !strings.Contains(string(body), "swagger-ui") {
-				t.Errorf("expected swagger-ui payload, got %d bytes", len(body))
+			if rr.Code != http.StatusNotFound {
+				t.Fatalf("expected 404 for removed route, got %d", rr.Code)
 			}
 		})
 	}

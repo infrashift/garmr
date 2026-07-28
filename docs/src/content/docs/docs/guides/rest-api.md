@@ -14,14 +14,19 @@ Complete HTTP API reference for Garmr.
 http://localhost:8080
 ```
 
-## OpenAPI / Swagger
+## OpenAPI Specification
 
-Interactive API documentation is available at:
+The OpenAPI 3.0 specification is embedded in the server binary (source: `internal/server/openapi.json`) and served at `/openapi.json`.
 
-- **Swagger UI**: [http://localhost:8080/swagger-ui](http://localhost:8080/swagger-ui)
-- **OpenAPI Spec**: [http://localhost:8080/openapi.json](http://localhost:8080/openapi.json)
+There is deliberately no bundled Swagger UI page: the server serves machine callers inside an egress-restricted mesh, and the old page loaded its JavaScript from a CDN, which silently broke there. To browse the API interactively, point any local OpenAPI viewer at the spec:
 
-The OpenAPI 3.0 specification is embedded in the server binary (source: `internal/server/openapi.json`) and served at `/openapi.json` — there is no separate spec file to fetch from the repository.
+```bash
+# Run Swagger UI locally against a running server
+docker run --rm -p 8081:8080 -e SWAGGER_JSON_URL=http://localhost:8080/openapi.json swaggerapi/swagger-ui
+
+# Or render the committed spec straight from the repo
+npx @redocly/cli preview-docs internal/server/openapi.json
+```
 
 ## Authentication
 

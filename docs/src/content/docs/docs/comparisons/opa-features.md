@@ -76,7 +76,7 @@ This document compares their feature sets side-by-side and highlights capabiliti
 | Request body size limits | Configurable | Not built-in | Garmr advantage |
 | TLS | Not built-in (mesh/proxy terminates TLS) | Configurable cert/key | OPA terminates TLS itself; Garmr delegates to the mesh |
 | Health checks | K8s probes (/healthz, /readyz, /livez) + legacy | /health with bundle awareness | Both provide health checks |
-| OpenAPI / Swagger | Built-in spec + Swagger UI | Not built-in | Garmr advantage |
+| OpenAPI / Swagger | Built-in spec served at /openapi.json | Not built-in | Garmr advantage |
 | Audit logging | Structured JSON with request ID correlation | Decision logs (remote push) | OPA's remote push is more mature |
 
 ### Policy Management

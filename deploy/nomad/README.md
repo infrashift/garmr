@@ -70,13 +70,14 @@ EXPECTED_DIGEST=$(garmr policy digest policies/)
 nomad job run deploy/nomad/garmr-service.nomad.hcl
 
 # (b) Reload in place — no restart, but the endpoint mutates ONE process,
-#     so hit every alloc, not the service VIP:
-nomad job allocs -json garmr | jq -r '.[] | select(.ClientStatus=="running") | .ID' |
-  while read -r alloc; do
-    nomad alloc exec "$alloc" wget -q -O- --post-data='' http://127.0.0.1:8080/v1/policies/reload
-  done
+#     so every alloc must be hit, not the service VIP. `garmr policy
+#     reload --servers` does the fan-out, verifies every instance against
+#     the checkout's digest, and fails if any instance errors or diverges:
+ADDRS=$(nomad service info -json garmr |
+  jq -r '.[] | "http://\(.Address):\(.Port)"' | paste -sd,)
+garmr policy reload --servers "$ADDRS" --expect-digest "$EXPECTED_DIGEST"
 
-# ---- Verify convergence (either path) ----
+# ---- Verify convergence (rollout path; reload verifies inline) ----
 ACTUAL=$(curl -s http://garmr.service.consul:8080/v1/policies | jq -r .digest)
 test "$EXPECTED_DIGEST" = "$ACTUAL"
 ```

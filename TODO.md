@@ -215,11 +215,18 @@ Recorded, deliberately not done before the deploy:
   rather than deleted: every command uses current flags and every
   referenced fixture exists — it stays as deliberate off-site demo
   material.
-- **Per-alloc reload fan-out**: `POST /v1/policies/reload` mutates one
-  process; the Nomad README documents looping over allocs, but a
-  `garmr policy reload --all-allocs` (or documented `nomad alloc exec`
-  wrapper) would remove the sharp edge. Same for `DELETE /v1/policies`
-  diverging replicas until the next reload/rollout.
+- ~~**Per-alloc reload fan-out**~~ — done (2026-07-28, follow-up commit).
+  `garmr policy reload --servers a,b,c --expect-digest <hex>` fans out to
+  every instance, verifies each against the checkout's digest, and exits
+  nonzero on any failure, digest mismatch, or divergence between
+  instances (single-instance behavior and JSON shape unchanged). Fixed
+  along the way: a failed reload used to print ✗ and exit 0 — it exits 1
+  now, pinned by test. The Nomad README's shell loop is replaced with the
+  one-command fan-out (addresses from `nomad service info`).
+  `DELETE /v1/policies` divergence is addressed with honesty rather than
+  fan-out: its help text now states it mutates one instance's memory,
+  comes back on the next reload/restart, and that removing a policy for
+  real means deleting it from git and deploying.
 - **Audit log shipping**: the audit file (only record of the mesh-verified
   `principal`) lives on local disk and nothing ships it off-node.
 

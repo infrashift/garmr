@@ -207,19 +207,35 @@ garmr policy delete <name> [flags]
 
 #### garmr policy reload
 
-Reload policies from disk.
+Reload policies from disk on one or more instances. The reload endpoint
+mutates a single server process — behind a load balancer or mesh, pass
+every instance via `--servers` so all of them converge. Exits nonzero if
+any instance fails, if `--expect-digest` doesn't match, or if instances
+end up with diverging digests.
 
 ```bash
-garmr policy reload
+garmr policy reload [flags]
 ```
+
+**Flags:**
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--servers` | Reload every listed instance (comma-separated or repeated) | the `--server` address |
+| `--expect-digest` | Fail unless every instance reports this policy-set digest | |
 
 **Examples:**
 
 ```bash
-# Reload policies
+# Reload the single configured instance
 garmr policy reload
 
-# Check result
+# Fan out to every instance with convergence enforced
+garmr policy reload \
+  --servers http://10.0.0.11:8080,http://10.0.0.12:8080 \
+  --expect-digest "$(garmr policy digest policies/)"
+
+# Machine-readable result
 garmr policy reload -o json
 ```
 

@@ -203,8 +203,14 @@ Examples:
 
 var policyDeleteCmd = &cobra.Command{
 	Use:   "delete [name]",
-	Short: "Delete a policy",
+	Short: "Delete a policy from one instance's memory",
 	Long: `Delete a policy from the Garmr server.
+
+This removes the policy from the memory of the ONE instance that receives
+the request: other instances keep serving it, and the next reload or
+restart brings it back everywhere. To remove a policy permanently, delete
+it from the policy source (git) and deploy — the filesystem is the source
+of truth, not this endpoint.
 
 Examples:
   garmr policy delete my-policy
@@ -215,11 +221,28 @@ Examples:
 
 var policyReloadCmd = &cobra.Command{
 	Use:   "reload",
-	Short: "Reload policies from disk",
+	Short: "Reload policies from disk on one or more instances",
 	Long: `Trigger a reload of policies from the configured directory.
 
+The reload endpoint mutates a single server process. Behind a load
+balancer or service mesh, pass every instance's address via --servers so
+all of them converge — calling the service VIP reloads whichever instance
+happened to receive the request and leaves the rest serving the old set.
+
+Reload fails closed on the server: a broken or empty policy tree returns
+an error and the previous policy set keeps serving. This command exits
+nonzero if any instance fails, if --expect-digest does not match, or if
+the instances end up with diverging digests.
+
 Examples:
-  garmr policy reload`,
+  # Single instance (the --server address)
+  garmr policy reload
+
+  # Every alloc of a Nomad job, with convergence enforced against the
+  # digest of the git checkout that was just synced
+  garmr policy reload \
+    --servers http://10.0.0.11:8080,http://10.0.0.12:8080 \
+    --expect-digest "$(garmr policy digest policies/)"`,
 	RunE: runPolicyReload,
 }
 
@@ -242,6 +265,12 @@ func init() {
 	// Delete flags
 	policyDeleteCmd.Flags().StringP("namespace", "n", "default", "policy namespace")
 	policyDeleteCmd.Flags().Bool("force", false, "skip confirmation")
+
+	// Reload flags
+	policyReloadCmd.Flags().StringSlice("servers", nil,
+		"reload every listed instance (comma-separated or repeated); default is the single --server address")
+	policyReloadCmd.Flags().String("expect-digest", "",
+		"fail unless every instance reports this policy-set digest (compute with 'garmr policy digest')")
 
 	// Lock flags
 	policyLockCmd.Flags().String("version", "", "version to embed in lock file")
@@ -779,33 +808,96 @@ func runPolicyDelete(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// reloadOutcome is one instance's reload result in the fan-out.
+type reloadOutcome struct {
+	Server string               `json:"server"`
+	Result *client.ReloadResult `json:"result,omitempty"`
+	Error  string               `json:"error,omitempty"`
+}
+
 func runPolicyReload(cmd *cobra.Command, args []string) error {
-	c, ctx, cleanup, err := newServerClient()
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-
-	fmt.Println("Reloading policies...")
-
-	result, err := c.ReloadPolicies(ctx)
-	if err != nil {
-		return fmt.Errorf("reload failed: %w", err)
+	servers, _ := cmd.Flags().GetStringSlice("servers")
+	expectDigest, _ := cmd.Flags().GetString("expect-digest")
+	if len(servers) == 0 {
+		servers = []string{viper.GetString("server")}
 	}
 
-	format := viper.GetString("output")
-	if format == "json" {
-		data, _ := json.MarshalIndent(result, "", "  ")
-		fmt.Println(string(data))
-	} else {
-		if result.Success {
-			fmt.Printf("✓ Reloaded %d policies in %dms\n", result.PoliciesLoaded, result.ReloadTimeMs)
-			fmt.Printf("  Storage: %s\n", result.StorageType)
-			fmt.Printf("  Digest:  %s\n", result.Digest)
+	outcomes := make([]reloadOutcome, 0, len(servers))
+	failed := false
+	digests := make(map[string]bool)
+
+	for _, addr := range servers {
+		outcomes = append(outcomes, reloadInstance(addr, expectDigest))
+		o := &outcomes[len(outcomes)-1]
+		if o.Error != "" || o.Result == nil || !o.Result.Success {
+			failed = true
+			continue
+		}
+		digests[o.Result.Digest] = true
+	}
+	if len(digests) > 1 {
+		failed = true
+	}
+
+	if viper.GetString("output") == "json" {
+		// Single-instance keeps the historical shape (the bare result);
+		// fan-out emits the per-instance outcome list.
+		if len(outcomes) == 1 && outcomes[0].Result != nil {
+			data, _ := json.MarshalIndent(outcomes[0].Result, "", "  ")
+			fmt.Println(string(data))
 		} else {
-			fmt.Printf("✗ Reload failed: %s\n", result.Error)
+			data, _ := json.MarshalIndent(outcomes, "", "  ")
+			fmt.Println(string(data))
+		}
+	} else {
+		for _, o := range outcomes {
+			switch {
+			case o.Result != nil && o.Result.Success && o.Error == "":
+				fmt.Printf("✓ %s: Reloaded %d policies in %dms\n", o.Server, o.Result.PoliciesLoaded, o.Result.ReloadTimeMs)
+				fmt.Printf("  Storage: %s\n", o.Result.StorageType)
+				fmt.Printf("  Digest:  %s\n", o.Result.Digest)
+			case o.Result != nil && o.Error != "":
+				fmt.Printf("✗ %s: %s\n", o.Server, o.Error)
+			case o.Result != nil:
+				fmt.Printf("✗ %s: Reload failed: %s\n", o.Server, o.Result.Error)
+			default:
+				fmt.Printf("✗ %s: %s\n", o.Server, o.Error)
+			}
+		}
+		if len(digests) > 1 {
+			fmt.Printf("✗ instances diverged: %d distinct digests\n", len(digests))
 		}
 	}
 
+	if failed {
+		osExit(1)
+	}
 	return nil
+}
+
+// reloadInstance reloads one server and applies the digest expectation.
+func reloadInstance(addr, expectDigest string) reloadOutcome {
+	outcome := reloadOutcome{Server: addr}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	c, err := client.NewClient(client.Config{Address: addr})
+	if err != nil {
+		outcome.Error = err.Error()
+		return outcome
+	}
+	defer func() { _ = c.Close() }()
+
+	result, err := c.ReloadPolicies(ctx)
+	if err != nil {
+		outcome.Error = err.Error()
+		return outcome
+	}
+	outcome.Result = result
+
+	if result.Success && expectDigest != "" && result.Digest != expectDigest {
+		outcome.Error = fmt.Sprintf("digest %s does not match expected %s", result.Digest, expectDigest)
+	}
+	return outcome
 }

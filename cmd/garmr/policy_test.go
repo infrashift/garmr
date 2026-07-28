@@ -501,6 +501,137 @@ func TestRunPolicyReload_Success(t *testing.T) {
 	}
 }
 
+func reloadFanoutFlagSet(t *testing.T) *cobraCmd {
+	t.Helper()
+	return newTestCmd(t,
+		flagSpec{Kind: "bool", Name: "force"},
+		flagSpec{Kind: "stringSlice", Name: "servers"},
+		flagSpec{Kind: "string", Name: "expect-digest"},
+	)
+}
+
+func TestRunPolicyReload_FanOutConverges(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "p.cue"), []byte(testDirPolicy), 0644); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestServerWithPolicyDir(t, dir)
+	b := newTestServerWithPolicyDir(t, dir)
+
+	cmd := reloadFanoutFlagSet(t)
+	if err := cmd.Flags().Set("servers", a.URL+","+b.URL); err != nil {
+		t.Fatal(err)
+	}
+	rec := stubExit(t)
+	stdout, _ := captureOutput(t, func() {
+		if err := runPolicyReload(cmd, nil); err != nil {
+			t.Fatalf("runPolicyReload: %v", err)
+		}
+	})
+	if rec.Called {
+		t.Fatalf("unexpected exit %d, output: %q", rec.Code, stdout)
+	}
+	if !strings.Contains(stdout, a.URL) || !strings.Contains(stdout, b.URL) {
+		t.Errorf("expected both instances in output, got %q", stdout)
+	}
+	if strings.Count(stdout, "Reloaded") != 2 {
+		t.Errorf("expected two successful reloads, got %q", stdout)
+	}
+}
+
+func TestRunPolicyReload_FanOutDivergenceFails(t *testing.T) {
+	dirA := t.TempDir()
+	os.WriteFile(filepath.Join(dirA, "p.cue"), []byte(testDirPolicy), 0644)
+	dirB := t.TempDir()
+	os.WriteFile(filepath.Join(dirB, "p.cue"),
+		[]byte(strings.ReplaceAll(testDirPolicy, "pass-policy", "other-policy")), 0644)
+
+	a := newTestServerWithPolicyDir(t, dirA)
+	b := newTestServerWithPolicyDir(t, dirB)
+
+	cmd := reloadFanoutFlagSet(t)
+	if err := cmd.Flags().Set("servers", a.URL+","+b.URL); err != nil {
+		t.Fatal(err)
+	}
+	rec := stubExit(t)
+	stdout, _ := captureOutput(t, func() {
+		_ = runPolicyReload(cmd, nil)
+	})
+	if rec.Code != 1 {
+		t.Fatalf("expected exit 1 on divergence, got %d: %q", rec.Code, stdout)
+	}
+	if !strings.Contains(stdout, "diverged") {
+		t.Errorf("expected divergence message, got %q", stdout)
+	}
+}
+
+func TestRunPolicyReload_ExpectDigest(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "p.cue"), []byte(testDirPolicy), 0644); err != nil {
+		t.Fatal(err)
+	}
+	newTestServerWithPolicyDir(t, dir)
+
+	// The digest the server will land on is the local digest of the same dir.
+	digestCmd := newTestCmd(t)
+	digestOut, _ := captureOutput(t, func() {
+		if err := runPolicyDigest(digestCmd, []string{dir}); err != nil {
+			t.Fatalf("runPolicyDigest: %v", err)
+		}
+	})
+	expected := strings.TrimSpace(digestOut)
+
+	cmd := reloadFanoutFlagSet(t)
+	if err := cmd.Flags().Set("expect-digest", expected); err != nil {
+		t.Fatal(err)
+	}
+	rec := stubExit(t)
+	_, _ = captureOutput(t, func() {
+		if err := runPolicyReload(cmd, nil); err != nil {
+			t.Fatalf("runPolicyReload: %v", err)
+		}
+	})
+	if rec.Called {
+		t.Fatalf("matching digest must not fail, exit %d", rec.Code)
+	}
+
+	// A wrong expectation fails.
+	cmd = reloadFanoutFlagSet(t)
+	if err := cmd.Flags().Set("expect-digest", strings.Repeat("0", 64)); err != nil {
+		t.Fatal(err)
+	}
+	rec = stubExit(t)
+	stdout, _ := captureOutput(t, func() {
+		_ = runPolicyReload(cmd, nil)
+	})
+	if rec.Code != 1 || !strings.Contains(stdout, "does not match") {
+		t.Fatalf("expected digest-mismatch failure, exit %d: %q", rec.Code, stdout)
+	}
+}
+
+func TestRunPolicyReload_FailureExitsNonzero(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "p.cue"), []byte(testDirPolicy), 0644); err != nil {
+		t.Fatal(err)
+	}
+	newTestServerWithPolicyDir(t, dir)
+
+	// Break the tree after boot: the reload must fail and the command must
+	// exit nonzero (it used to print the failure and exit 0).
+	if err := os.WriteFile(filepath.Join(dir, "p.cue"), []byte("package policy\n\nbroken: {{{"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := reloadFanoutFlagSet(t)
+	rec := stubExit(t)
+	stdout, _ := captureOutput(t, func() {
+		_ = runPolicyReload(cmd, nil)
+	})
+	if rec.Code != 1 {
+		t.Fatalf("expected exit 1 on reload failure, got %d: %q", rec.Code, stdout)
+	}
+}
+
 func TestRunPolicyReload_JSONOutput(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "p.cue"), []byte(testDirPolicy), 0644)

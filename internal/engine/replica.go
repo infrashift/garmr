@@ -108,3 +108,42 @@ func (s *policySet) forEachExclusive(fn func(i int, r *policyReplica) error) err
 	}
 	return firstErr
 }
+
+// mutateAll applies a mutation to every replica atomically: prepare runs
+// against each replica first, and the returned commit functions are applied
+// only if every prepare succeeded.
+//
+// forEachExclusive cannot give this guarantee — it applies fn to all replicas
+// and returns the first error, so replicas that already succeeded keep the
+// mutation. A non-deterministic failure (transient I/O, memory pressure)
+// therefore left some replicas holding a policy and others not, and since
+// evaluations check out an arbitrary replica, two identical requests could
+// return different decisions.
+func (s *policySet) mutateAll(prepare func(i int, r *policyReplica) (commit func(), err error)) error {
+	drained := make([]*policyReplica, s.k)
+	for i := 0; i < s.k; i++ {
+		drained[i] = <-s.replicas
+	}
+	defer func() {
+		for _, r := range drained {
+			s.replicas <- r
+		}
+	}()
+
+	commits := make([]func(), 0, s.k)
+	for i, r := range drained {
+		commit, err := prepare(i, r)
+		if err != nil {
+			// Abandon every prepared commit: no replica is mutated.
+			return err
+		}
+		if commit != nil {
+			commits = append(commits, commit)
+		}
+	}
+
+	for _, commit := range commits {
+		commit()
+	}
+	return nil
+}

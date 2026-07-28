@@ -32,25 +32,30 @@ func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string)
 	key := policyKey(namespace, name)
 	hash := sha256.Sum256([]byte(source))
 
+	// Two-phase: compile into every replica first, publish only if all
+	// succeeded. Mutating as we go would leave a partially-loaded set on a
+	// non-deterministic failure, and evaluations would then get different
+	// answers depending on which replica they checked out.
 	var ruleCount, nsCount int
-	err := e.set.forEachExclusive(func(i int, r *policyReplica) error {
+	err := e.set.mutateAll(func(i int, r *policyReplica) (func(), error) {
 		compiled, err := e.compilePolicySource(r, name, namespace, source)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		compiled.LoadedAt = time.Now()
 		compiled.Hash = hex.EncodeToString(hash[:])
-		r.policies[key] = compiled
 
 		if i == 0 {
 			ruleCount = len(compiled.Rules)
-			for _, p := range r.policies {
-				if p.Namespace == namespace {
+			nsCount = 1 // this policy
+			for k, p := range r.policies {
+				if p.Namespace == namespace && k != key {
 					nsCount++
 				}
 			}
 		}
-		return nil
+
+		return func() { r.policies[key] = compiled }, nil
 	})
 	if err != nil {
 		e.observability().Metrics().RecordPolicyLoadError(name, namespace, "compilation")

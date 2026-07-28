@@ -54,7 +54,9 @@ func (e *Engine) DeletePolicy(namespace, name string) bool {
 
 	key := policyKey(namespace, name)
 	found := false
-	e.set.forEachExclusive(func(i int, r *policyReplica) error {
+	// Cannot fail, so forEachExclusive is fine here; the error is discarded
+	// deliberately rather than by omission.
+	_ = e.set.forEachExclusive(func(i int, r *policyReplica) error {
 		if _, ok := r.policies[key]; ok {
 			delete(r.policies, key)
 			if i == 0 {
@@ -71,7 +73,8 @@ func (e *Engine) ClearPolicies() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	e.set.forEachExclusive(func(i int, r *policyReplica) error {
+	// Cannot fail; see DeletePolicy.
+	_ = e.set.forEachExclusive(func(i int, r *policyReplica) error {
 		r.policies = make(map[string]*CompiledPolicy)
 		return nil
 	})
@@ -89,14 +92,19 @@ func (e *Engine) ReloadPoliciesFromDir(ctx context.Context, dir string) (int, er
 	}
 
 	count := 0
-	if err := newSet.forEachExclusive(func(i int, r *policyReplica) error {
-		if err := e.loadDirIntoReplica(ctx, dir, r, i != 0); err != nil {
-			return err
+	if err := newSet.mutateAll(func(i int, r *policyReplica) (func(), error) {
+		pending := make(map[string]*CompiledPolicy)
+		if err := e.loadDirIntoReplica(ctx, dir, r, i != 0, pending); err != nil {
+			return nil, err
 		}
 		if i == 0 {
-			count = len(r.policies)
+			count = len(pending)
 		}
-		return nil
+		return func() {
+			for k, v := range pending {
+				r.policies[k] = v
+			}
+		}, nil
 	}); err != nil {
 		return 0, err
 	}
@@ -117,8 +125,17 @@ func (e *Engine) LoadPoliciesFromDir(ctx context.Context, dir string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	return e.set.forEachExclusive(func(i int, r *policyReplica) error {
-		return e.loadDirIntoReplica(ctx, dir, r, i != 0)
+	// Two-phase so a failure partway through leaves every replica identical.
+	return e.set.mutateAll(func(i int, r *policyReplica) (func(), error) {
+		pending := make(map[string]*CompiledPolicy)
+		if err := e.loadDirIntoReplica(ctx, dir, r, i != 0, pending); err != nil {
+			return nil, err
+		}
+		return func() {
+			for k, v := range pending {
+				r.policies[k] = v
+			}
+		}, nil
 	})
 }
 
@@ -126,9 +143,9 @@ func (e *Engine) LoadPoliciesFromDir(ctx context.Context, dir string) error {
 // replica, compiling everything with the replica's own context. When quiet is
 // true, logs and metrics are suppressed — used when replaying the same load
 // onto the remaining replicas of a set.
-func (e *Engine) loadDirIntoReplica(ctx context.Context, dir string, r *policyReplica, quiet bool) error {
+func (e *Engine) loadDirIntoReplica(ctx context.Context, dir string, r *policyReplica, quiet bool, pending map[string]*CompiledPolicy) error {
 	// Load from the directory itself
-	if err := e.loadSingleDirIntoReplica(dir, r, quiet); err != nil && !quiet {
+	if err := e.loadSingleDirIntoReplica(dir, r, quiet, pending); err != nil && !quiet {
 		e.logger.Debug("no policies in root, scanning subdirectories", zap.String("dir", dir))
 	}
 
@@ -153,7 +170,7 @@ func (e *Engine) loadDirIntoReplica(ctx context.Context, dir string, r *policyRe
 
 		hasCueFiles, _ := e.hasCueFiles(subdir)
 		if hasCueFiles {
-			if err := e.loadSingleDirIntoReplica(subdir, r, quiet); err != nil {
+			if err := e.loadSingleDirIntoReplica(subdir, r, quiet, pending); err != nil {
 				if !quiet {
 					e.logger.Warn("failed to load policies from subdirectory",
 						zap.String("dir", subdir),
@@ -164,7 +181,7 @@ func (e *Engine) loadDirIntoReplica(ctx context.Context, dir string, r *policyRe
 			}
 		} else {
 			// Recursively check deeper directories
-			if err := e.loadDirIntoReplica(ctx, subdir, r, quiet); err != nil && !quiet {
+			if err := e.loadDirIntoReplica(ctx, subdir, r, quiet, pending); err != nil && !quiet {
 				e.logger.Debug("no policies in subdirectory", zap.String("dir", subdir))
 			}
 		}
@@ -175,8 +192,8 @@ func (e *Engine) loadDirIntoReplica(ctx context.Context, dir string, r *policyRe
 
 // loadSingleDirIntoReplica loads policies from a single directory (non-recursive)
 // into a replica using the replica's context.
-func (e *Engine) loadSingleDirIntoReplica(dir string, r *policyReplica, quiet bool) error {
-	keys, err := e.loadInstancesIntoReplica([]string{"."}, dir, r, quiet)
+func (e *Engine) loadSingleDirIntoReplica(dir string, r *policyReplica, quiet bool, pending map[string]*CompiledPolicy) error {
+	keys, err := e.loadInstancesIntoReplica([]string{"."}, dir, r, quiet, pending)
 	if err != nil {
 		return err
 	}
@@ -186,10 +203,14 @@ func (e *Engine) loadSingleDirIntoReplica(dir string, r *policyReplica, quiet bo
 	return nil
 }
 
-// loadInstancesIntoReplica loads the given CUE package/file args (resolved
-// relative to dir) into a replica using the replica's context. It returns
-// the namespace/name keys of the policies loaded.
-func (e *Engine) loadInstancesIntoReplica(args []string, dir string, r *policyReplica, quiet bool) ([]string, error) {
+// loadInstancesIntoReplica compiles the given CUE package/file args (resolved
+// relative to dir) in a replica's context, staging the results into pending
+// rather than publishing them to r.policies. It returns the namespace/name
+// keys of the policies loaded.
+//
+// Staging is what lets callers make a load atomic across replicas: nothing is
+// visible to evaluations until every replica has compiled successfully.
+func (e *Engine) loadInstancesIntoReplica(args []string, dir string, r *policyReplica, quiet bool, pending map[string]*CompiledPolicy) ([]string, error) {
 	cfg := &load.Config{
 		Dir: dir,
 	}
@@ -256,7 +277,7 @@ func (e *Engine) loadInstancesIntoReplica(args []string, dir string, r *policyRe
 
 			compiled.LoadedAt = time.Now()
 			key := policyKey(ns, name)
-			r.policies[key] = compiled
+			pending[key] = compiled
 			keys = append(keys, key)
 			namespaceCounts[ns]++
 
@@ -292,16 +313,21 @@ func (e *Engine) LoadPoliciesFromFile(ctx context.Context, path string) ([]strin
 	defer e.mu.Unlock()
 
 	var keys []string
-	err = e.set.forEachExclusive(func(i int, r *policyReplica) error {
+	err = e.set.mutateAll(func(i int, r *policyReplica) (func(), error) {
+		pending := make(map[string]*CompiledPolicy)
 		loaded, err := e.loadInstancesIntoReplica(
-			[]string{"./" + filepath.Base(abs)}, filepath.Dir(abs), r, i != 0)
+			[]string{"./" + filepath.Base(abs)}, filepath.Dir(abs), r, i != 0, pending)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if i == 0 {
 			keys = loaded
 		}
-		return nil
+		return func() {
+			for k, v := range pending {
+				r.policies[k] = v
+			}
+		}, nil
 	})
 	if err != nil {
 		return nil, err

@@ -38,13 +38,12 @@ garmr eval --input <file> [flags]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--input` | `-i` | Input file (required, `-` for stdin) | |
+| `--input` | `-i` | Input file (`-` for stdin). One of `--input` or `--data` is required. | |
 | `--data` | `-d` | Inline JSON/YAML data | |
 | `--format` | `-f` | Input format (json, yaml, auto) | `auto` |
 | `--policy` | `-p` | Specific policies to evaluate (namespace/name, repeatable) | |
 | `--namespace` | `-n` | Policy namespace to evaluate (single value) | |
 | `--request-id` | | Request ID for audit correlation | |
-| `--trace` | | Enable evaluation trace | `false` |
 | `--verbose` | `-v` | Show rule details. Default shows details on fail, hides on pass. `--verbose=false` always hides. | unset |
 
 **Examples:**
@@ -330,10 +329,10 @@ garmr test policies/ --recursive
 garmr test policies/ --filter "valid release"
 
 # TAP output for CI
-garmr test policies/ -o tap
+garmr test policies/ --format tap
 
 # JSON output
-garmr test policies/ -o json
+garmr test policies/ --format json
 
 # Verbose output
 garmr test policies/ -v
@@ -390,18 +389,17 @@ garmr docs generate <policy-dir> [flags]
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--format` | `-f` | Output format (only `generic-markdown` is currently supported) | `generic-markdown` |
-| `--output` | `-o` | Output directory | `./docs/policies` |
+| `--out-dir` | | Output directory | `./docs/policies` |
 | `--recursive` | `-r` | Process recursively | `true` |
-| `--author` | | Author for front matter | |
 
 **Examples:**
 
 ```bash
 # Generate docs from examples
-garmr docs generate ./example-policies --output ./out/docs
+garmr docs generate ./example-policies --out-dir ./out/docs
 
 # Specify format
-garmr docs generate ./policies --format generic-markdown --output ./docs
+garmr docs generate ./policies --format generic-markdown --out-dir ./docs
 ```
 
 ---
@@ -563,5 +561,5 @@ garmr policy list
 garmr policy list -n security
 
 # Generate documentation
-garmr docs generate ./example-policies --output ./out/docs
+garmr docs generate ./example-policies --out-dir ./out/docs
 ```

@@ -53,7 +53,7 @@ Examples:
   garmr test policies/ --filter "valid release"
 
   # Output JSON results
-  garmr test policies/ --output json
+  garmr test policies/ --format json
 `,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runTest,
@@ -69,13 +69,16 @@ var (
 )
 
 func init() {
-	testCmd.Flags().BoolVarP(&testVerbose, "verbose", "v", false,
-		"Show detailed test output")
+	// No -v shorthand: the root command already owns -v/--verbose, and a
+	// local one shadowed it. runTest reads the inherited flag instead.
 	testCmd.Flags().BoolVarP(&testRecursive, "recursive", "r", false,
 		"Process directories recursively")
 	testCmd.Flags().StringVar(&testFilter, "filter", "",
 		"Filter tests by name (substring match)")
-	testCmd.Flags().StringVarP(&testOutput, "output", "o", "text",
+	// --format, not -o: the root -o/--output takes table|json|yaml, a
+	// different value space from this command's text|json|tap, so sharing
+	// the shorthand made `garmr test -o table` silently invalid.
+	testCmd.Flags().StringVar(&testOutput, "format", "text",
 		"Output format: text, json, tap")
 	testCmd.Flags().BoolVar(&testFailFast, "fail-fast", false,
 		"Stop on first test failure")
@@ -83,6 +86,9 @@ func init() {
 
 func runTest(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
+
+	// Inherited from the root command's persistent flags.
+	testVerbose, _ = cmd.Flags().GetBool("verbose")
 	runner, err := qtesting.NewRunner(testVerbose)
 	if err != nil {
 		return fmt.Errorf("creating test runner: %w", err)

@@ -49,7 +49,10 @@ Examples:
 
   # Start in development mode
   garmr-server --dev`,
-	RunE: runServer,
+	// A runtime failure (port in use, unloadable policy directory) is not a
+	// usage error; printing the full flag list buries the actual reason.
+	SilenceUsage: true,
+	RunE:         runServer,
 }
 
 func init() {

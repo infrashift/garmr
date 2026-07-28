@@ -35,13 +35,13 @@ Supported output formats:
 
 Examples:
   # Generate docs for all policies in a directory
-  garmr docs generate ./example-policies --output ./out/docs
+  garmr docs generate ./example-policies --out-dir ./out/docs
 
   # Generate docs with specific format
-  garmr docs generate ./example-policies --format generic-markdown --output ./out/docs
+  garmr docs generate ./example-policies --format generic-markdown --out-dir ./out/docs
 
   # Generate recursively
-  garmr docs generate ./policies --recursive --output ./docs
+  garmr docs generate ./policies --recursive --out-dir ./docs
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: runDocsGenerate,
@@ -52,18 +52,17 @@ var (
 	docsFormat    string
 	docsOutput    string
 	docsRecursive bool
-	docsAuthor    string
 )
 
 func init() {
 	docsGenerateCmd.Flags().StringVarP(&docsFormat, "format", "f", "generic-markdown",
 		"Output format (only generic-markdown is supported)")
-	docsGenerateCmd.Flags().StringVarP(&docsOutput, "output", "o", "./docs/policies",
+	// --out-dir, not -o: the root command already owns -o/--output for the
+	// response format, and a local -o here silently shadowed it.
+	docsGenerateCmd.Flags().StringVar(&docsOutput, "out-dir", "./docs/policies",
 		"Output directory for generated docs")
 	docsGenerateCmd.Flags().BoolVarP(&docsRecursive, "recursive", "r", true,
 		"Process directories recursively")
-	docsGenerateCmd.Flags().StringVar(&docsAuthor, "author", "",
-		"Author name for front matter")
 
 	docsCmd.AddCommand(docsGenerateCmd)
 }
@@ -530,16 +529,16 @@ This documentation covers all policies loaded in Garmr.
 
 ## Namespaces
 
-{{- range .Namespaces }}
-{{ $policies := index $.ByNamespace . }}
-### [{{ . }}](./{{ . }}/README.md)
+{{- range $ns := .Namespaces }}
+{{ $policies := index $.ByNamespace $ns }}
+### [{{ $ns }}](./{{ $ns }}/README.md)
 
 {{ len $policies }} policies
 
 | Policy | Rules | Enforcement |
 |--------|-------|-------------|
 {{- range $policies }}
-| [{{ .Name }}](./{{ . }}/{{ .Name }}.md) | {{ len .Rules }} | ` + "`{{ .Enforcement }}`" + ` |
+| [{{ .Name }}](./{{ $ns }}/{{ .Name }}.md) | {{ len .Rules }} | ` + "`{{ .Enforcement }}`" + ` |
 {{- end }}
 
 {{- end }}

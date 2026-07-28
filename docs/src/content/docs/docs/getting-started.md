@@ -301,10 +301,10 @@ Generate markdown documentation from policies (runs locally, no server needed):
 
 ```bash
 # Generate docs for all policies (recursive by default)
-./bin/garmr docs generate ./example-policies --output ./docs/policies
+./bin/garmr docs generate ./example-policies --out-dir ./docs/policies
 
 # Explicit format (only generic-markdown is currently supported)
-./bin/garmr docs generate ./example-policies --format generic-markdown --output ./docs/policies
+./bin/garmr docs generate ./example-policies --format generic-markdown --out-dir ./docs/policies
 ```
 
 ## Configuration File Reference

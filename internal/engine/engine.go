@@ -175,7 +175,6 @@ package policy
 #Target: {
 	// A resource is either a kind shorthand ("pod", "*") or a full selector.
 	resources: [...(string | #ResourceSelector)]
-	conditions?: [..._]
 }
 
 #ResourceSelector: {
@@ -198,14 +197,12 @@ package policy
 	remediation?: string
 	category?: string
 	tags?: [...string]
-	continueOnFail?: bool | *true
 }
 
 #Enforcement: {
 	action: "deny" | "warn" | "audit"
 	dryRun: bool | *false
 	exceptions?: [...#Exception]
-	webhook?: _
 }
 
 #Exception: {

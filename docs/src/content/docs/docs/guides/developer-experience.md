@@ -611,12 +611,19 @@ fi
 
 ## Debugging Policies
 
-### Enable Tracing
+### Inspect what actually ran
 
 ```bash
-# Get detailed evaluation trace
-garmr eval --input resource.json --trace -o json | jq '.trace'
+# Which rules ran, which were skipped, and whether fail-fast stopped early
+garmr eval --input resource.json -o json | jq '.summary, .evaluation_mode'
+
+# Include passing rules, not just violations
+garmr eval --input resource.json --verbose
 ```
+
+A per-rule execution trace is not available. `--trace` existed as a flag but
+never emitted anything and has been removed; see `TODO.md` for what a real
+implementation would need.
 
 ### Check Policy Loading
 

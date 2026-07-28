@@ -184,8 +184,7 @@ var policyReloadCmd = &cobra.Command{
 	Long: `Trigger a reload of policies from the configured directory.
 
 Examples:
-  garmr policy reload
-  garmr policy reload --force`,
+  garmr policy reload`,
 	RunE: runPolicyReload,
 }
 
@@ -200,7 +199,6 @@ func init() {
 
 	// List flags
 	policyListCmd.Flags().StringP("namespace", "n", "", "filter by namespace")
-	policyListCmd.Flags().StringSlice("label", nil, "filter by labels (key=value)")
 
 	// Get flags
 	policyGetCmd.Flags().StringP("namespace", "n", "default", "policy namespace")
@@ -208,9 +206,6 @@ func init() {
 	// Delete flags
 	policyDeleteCmd.Flags().StringP("namespace", "n", "default", "policy namespace")
 	policyDeleteCmd.Flags().Bool("force", false, "skip confirmation")
-
-	// Reload flags
-	policyReloadCmd.Flags().Bool("force", false, "force reload even if unchanged")
 
 	// Lock flags
 	policyLockCmd.Flags().String("version", "", "version to embed in lock file")

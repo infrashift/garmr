@@ -86,8 +86,6 @@ package policy
 	// A plain string is shorthand for {kind: <string>}.
 	resources: [...(string | #ResourceSelector)]
 
-	// Pre-conditions that must be true for policy to apply
-	conditions?: [...#Condition]
 }
 
 // ResourceSelector identifies resources by type and attributes.
@@ -149,10 +147,6 @@ package policy
 	// Tags for filtering (e.g., ["pci-dss", "soc2", "slsa"])
 	tags?: [...string]
 
-	// Whether to continue evaluation after this rule fails
-	// Default: true (continue evaluating other rules)
-	// Set to false for critical gates that should halt evaluation
-	continueOnFail?: bool | *true
 }
 
 // Severity levels from informational to critical.
@@ -439,9 +433,6 @@ package policy
 
 	// Exceptions to enforcement
 	exceptions?: [...#Exception]
-
-	// Webhook for external decision
-	webhook?: #Webhook
 }
 
 #EnforcementAction: "deny" | "warn" | "audit"
@@ -460,24 +451,6 @@ package policy
 
 	// Jira/issue tracker reference
 	ticket?: string
-}
-
-// Webhook for external policy decisions.
-#Webhook: {
-	url:     string & =~"^https?://"
-	timeout: string | *"5s"
-
-	// Retry configuration
-	retry?: {
-		attempts: int & >=0 & <=5 | *3
-		backoff:  string | *"1s"
-	}
-
-	// TLS configuration
-	tls?: {
-		insecure?: bool
-		ca?:       string // Base64 encoded CA cert
-	}
 }
 
 // PolicyRef references another policy.

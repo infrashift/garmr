@@ -624,7 +624,6 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		Input         map[string]interface{} `json:"input" yaml:"input"`
 		Namespace     string                 `json:"namespace" yaml:"namespace"`
 		Policies      []string               `json:"policies" yaml:"policies"`
-		Trace         bool                   `json:"trace" yaml:"trace"`
 		IncludePassed bool                   `json:"include_passed" yaml:"include_passed"`
 	}
 
@@ -649,9 +648,6 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if trace, ok := parsed["trace"].(bool); ok {
-		req.Trace = trace
-	}
 	if includePassed, ok := parsed["include_passed"].(bool); ok {
 		req.IncludePassed = includePassed
 	}
@@ -666,7 +662,6 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		Namespace: req.Namespace,
 		Policies:  req.Policies,
 		Options: engine.EvaluateOptions{
-			Trace:         req.Trace,
 			IncludePassed: req.IncludePassed,
 		},
 	}
@@ -705,15 +700,21 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 
-	// Convert to HTTP response
-	resp := map[string]interface{}{
-		"decision":   decisionToString(result.Decision),
-		"request_id": requestID,
-		"results":    make([]map[string]interface{}, len(result.Results)),
-	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Request-Id", requestID)
+	json.NewEncoder(w).Encode(evaluateResponseBody(result, requestID))
+}
 
+// evaluateResponseBody converts an engine response into the JSON body shape.
+//
+// Kept pure and separate from the handler so it can be unit-tested directly.
+// It also carries the fields the engine has always computed but the API never
+// returned: summary, evaluation_mode, terminated_early and termination_rule,
+// which `garmr eval --help` promises.
+func evaluateResponseBody(result *engine.EvaluateResponse, requestID string) map[string]interface{} {
+	results := make([]map[string]interface{}, len(result.Results))
 	for i, r := range result.Results {
-		resp["results"].([]map[string]interface{})[i] = map[string]interface{}{
+		results[i] = map[string]interface{}{
 			"policy_name":      r.PolicyName,
 			"policy_namespace": r.PolicyNamespace,
 			"rule_id":          r.RuleID,
@@ -725,6 +726,39 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	resp := map[string]interface{}{
+		"decision":   decisionToString(result.Decision),
+		"request_id": requestID,
+		"results":    results,
+		"summary": map[string]interface{}{
+			"total_rules": result.Summary.TotalRules,
+			"passed":      result.Summary.Passed,
+			"failed":      result.Summary.Failed,
+			"skipped":     result.Summary.Skipped,
+		},
+		"evaluation_mode": map[string]interface{}{
+			"dry_run":              result.EvaluationMode.DryRun,
+			"fail_fast":            result.EvaluationMode.FailFast,
+			"short_circuited":      result.EvaluationMode.ShortCircuited,
+			"total_rules_in_scope": result.EvaluationMode.TotalRulesInScope,
+			"rules_evaluated":      result.EvaluationMode.RulesEvaluated,
+			"rules_skipped":        result.EvaluationMode.RulesSkipped,
+		},
+		"terminated_early": result.TerminatedEarly,
+	}
+
+	if result.TerminationRule != nil {
+		tr := result.TerminationRule
+		resp["termination_rule"] = map[string]interface{}{
+			"policy_name":      tr.PolicyName,
+			"policy_namespace": tr.PolicyNamespace,
+			"rule_id":          tr.RuleID,
+			"description":      tr.RuleDescription,
+			"severity":         severityToString(tr.Severity),
+			"message":          tr.Message,
+		}
+	}
+
 	if result.Metrics != nil {
 		resp["metrics"] = map[string]interface{}{
 			"evaluation_time_ns": result.Metrics.EvaluationTimeNs,
@@ -733,9 +767,7 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Request-Id", requestID)
-	json.NewEncoder(w).Encode(resp)
+	return resp
 }
 
 // getNestedString safely extracts a nested string value.

@@ -341,6 +341,13 @@ func shouldSwapPriorityThenSeverity(a, b CompiledRule) bool {
 func (e *Engine) extractTarget(val cue.Value) (TargetSpec, error) {
 	var target TargetSpec
 
+	// 'conditions' was declared in the schema but never read here, so a
+	// policy narrowed by conditions matched EVERYTHING. That is fail-open,
+	// so reject it rather than continuing to ignore it.
+	if val.LookupPath(cue.ParsePath("conditions")).Exists() {
+		return target, fmt.Errorf("spec.target.conditions is not supported; scope the policy with target.resources selectors, or express the condition as a rule")
+	}
+
 	resourcesVal := val.LookupPath(cue.ParsePath("resources"))
 	if resourcesVal.Exists() {
 		iter, err := resourcesVal.List()
@@ -472,10 +479,11 @@ func (e *Engine) extractRule(val cue.Value) (CompiledRule, error) {
 		}
 	}
 
-	// Extract continueOnFail (default: true)
-	rule.ContinueOnFail = true
-	if v := val.LookupPath(cue.ParsePath("continueOnFail")); v.Exists() {
-		rule.ContinueOnFail, _ = v.Bool()
+	// 'continueOnFail' was extracted but never consulted during evaluation,
+	// so `continueOnFail: false` silently did nothing. Reject it and point
+	// authors at the mechanism that does work.
+	if val.LookupPath(cue.ParsePath("continueOnFail")).Exists() {
+		return rule, fmt.Errorf("rule %s: 'continueOnFail' is not supported; use spec.evaluation.failFast to stop on the first failure", rule.ID)
 	}
 
 	rule.Expression = val.LookupPath(cue.ParsePath("expr"))
@@ -492,6 +500,12 @@ func (e *Engine) extractRule(val cue.Value) (CompiledRule, error) {
 
 func (e *Engine) extractEnforcement(val cue.Value) (EnforcementSpec, error) {
 	var enf EnforcementSpec
+
+	// 'webhook' was declared in the schema and never read, so it implied a
+	// callout on violation that never happened.
+	if val.LookupPath(cue.ParsePath("webhook")).Exists() {
+		return enf, fmt.Errorf("spec.enforcement.webhook is not supported; Garmr does not call out on a violation. Consume the evaluation response instead")
+	}
 
 	if v := val.LookupPath(cue.ParsePath("action")); v.Exists() {
 		enf.Action, _ = v.String()

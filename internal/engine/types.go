@@ -10,11 +10,9 @@ import (
 
 // Common errors
 var (
-	ErrPolicyNotFound    = errors.New("policy not found")
-	ErrInvalidPolicy     = errors.New("invalid policy")
-	ErrInvalidInput      = errors.New("invalid input")
-	ErrEvaluationFailed  = errors.New("evaluation failed")
-	ErrCompilationFailed = errors.New("compilation failed")
+	ErrPolicyNotFound = errors.New("policy not found")
+	ErrInvalidPolicy  = errors.New("invalid policy")
+	ErrInvalidInput   = errors.New("invalid input")
 )
 
 // Decision represents the overall evaluation decision.
@@ -92,16 +90,15 @@ type CompiledPolicy struct {
 
 // CompiledRule is a pre-compiled rule within a policy.
 type CompiledRule struct {
-	ID             string
-	Description    string
-	Severity       Severity
-	Priority       *int // nil means not specified (use definition order)
-	Expression     cue.Value
-	Message        string
-	Remediation    string
-	Category       string
-	Tags           []string
-	ContinueOnFail bool
+	ID          string
+	Description string
+	Severity    Severity
+	Priority    *int // nil means not specified (use definition order)
+	Expression  cue.Value
+	Message     string
+	Remediation string
+	Category    string
+	Tags        []string
 	// Internal: original position in the rules list for stable sorting
 	DefinitionOrder int
 }
@@ -128,19 +125,9 @@ const (
 	EvalOrderPriorityThenSev EvaluationOrder = "priority-then-severity"
 )
 
-// DefaultPriorities for rule categories
-const (
-	PriorityPromotion  = 100
-	PrioritySecurity   = 200
-	PriorityQuality    = 300
-	PriorityCompliance = 400
-	PriorityAdvisory   = 500
-)
-
 // TargetSpec defines what resources a policy applies to.
 type TargetSpec struct {
-	Resources  []ResourceSelector
-	Conditions []cue.Value
+	Resources []ResourceSelector
 }
 
 // ResourceSelector identifies resources.
@@ -178,9 +165,7 @@ type EvaluateRequest struct {
 
 // EvaluateOptions controls evaluation behavior.
 type EvaluateOptions struct {
-	Trace          bool
 	IncludePassed  bool
-	Instrument     bool
 	DryRunOverride *bool
 
 	// Category/tag filtering (applied in addition to policy-level config)
@@ -195,7 +180,6 @@ type EvaluateResponse struct {
 	Decision Decision
 	Results  []RuleResult
 	Metrics  *Metrics
-	Trace    []TraceEvent
 
 	// Evaluation metadata
 	EvaluationMode EvaluationMode
@@ -281,17 +265,6 @@ type Metrics struct {
 	EvaluationTimeNs  int64
 	PoliciesEvaluated int
 	RulesEvaluated    int
-	CompileTimeNs     int64
-	CacheHit          bool
-}
-
-// TraceEvent captures evaluation trace information.
-type TraceEvent struct {
-	Timestamp time.Time
-	Operation string
-	Location  string
-	Message   string
-	Locals    map[string]any
 }
 
 // ValidationError represents a policy validation error. The JSON tags define

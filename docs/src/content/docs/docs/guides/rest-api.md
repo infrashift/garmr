@@ -165,7 +165,6 @@ Evaluate input against loaded policies.
   },
   "namespace": "security",
   "policies": ["security/container-security"],
-  "trace": false,
   "include_passed": false
 }
 ```
@@ -175,7 +174,6 @@ Evaluate input against loaded policies.
 | `input` | object | Resource to evaluate (required) | |
 | `namespace` | string | Policy namespace filter | (all) |
 | `policies` | []string | Specific policies to evaluate | (all matching) |
-| `trace` | bool | Include evaluation trace | `false` |
 | `include_passed` | bool | Include passed rules | `false` |
 
 **Response:**
@@ -195,6 +193,21 @@ Evaluate input against loaded policies.
       "message": "Container is running as root"
     }
   ],
+  "summary": {
+    "total_rules": 8,
+    "passed": 7,
+    "failed": 1,
+    "skipped": 0
+  },
+  "evaluation_mode": {
+    "dry_run": false,
+    "fail_fast": false,
+    "short_circuited": false,
+    "total_rules_in_scope": 8,
+    "rules_evaluated": 8,
+    "rules_skipped": 0
+  },
+  "terminated_early": false,
   "metrics": {
     "evaluation_time_ns": 5234567,
     "policies_evaluated": 2,
@@ -208,7 +221,26 @@ Evaluate input against loaded policies.
 | `decision` | string | `allow`, `deny`, or `warn` |
 | `request_id` | string | Request ID (from header or generated) |
 | `results` | []object | Rule evaluation results |
+| `summary` | object | Rule outcome counts: `total_rules`, `passed`, `failed`, `skipped` |
+| `evaluation_mode` | object | How the evaluation ran, and how much of the rule set it reached |
+| `terminated_early` | bool | True when fail-fast stopped the evaluation |
+| `termination_rule` | object | The rule that triggered fail-fast; present only when `terminated_early` is true |
 | `metrics` | object | Evaluation metrics |
+
+A partial evaluation is not the same as a clean one: check
+`evaluation_mode.rules_skipped` and `terminated_early` before treating an
+`allow` as full coverage.
+
+**System results.** Two failures come from the engine rather than a policy,
+and use the reserved `__system__` namespace so they cannot be confused with a
+policy verdict:
+
+| `policy_name` | Meaning |
+|---------------|---------|
+| `policy-match` | No policy targeted the input, and `require_match` is on |
+| `policy-timeout` | A policy exceeded `spec.evaluation.timeout`, or could not be evaluated |
+
+Both deny. Rules that never ran are not evidence of compliance.
 
 **Response Headers:**
 

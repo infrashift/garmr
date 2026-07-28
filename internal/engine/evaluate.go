@@ -39,10 +39,6 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 		Metrics:  &Metrics{},
 	}
 
-	if req.Options.Trace {
-		resp.Trace = []TraceEvent{}
-	}
-
 	// Convert input to CUE value using the replica's context
 	inputVal := rep.ctx.Encode(req.Input)
 	if inputVal.Err() != nil {
@@ -213,6 +209,15 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 	}
 
 	resp.Summary.Skipped = totalRulesInScope - rulesEvaluated
+
+	// Always report the scope counts, not only when something terminated
+	// early. A caller cannot tell a full evaluation from a partial one
+	// otherwise, which is the whole point of exposing evaluation_mode.
+	if resp.EvaluationMode.TotalRulesInScope == 0 {
+		resp.EvaluationMode.TotalRulesInScope = totalRulesInScope
+		resp.EvaluationMode.RulesEvaluated = rulesEvaluated
+		resp.EvaluationMode.RulesSkipped = totalRulesInScope - rulesEvaluated
+	}
 
 	resp.Metrics.EvaluationTimeNs = time.Since(start).Nanoseconds()
 

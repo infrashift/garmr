@@ -97,8 +97,8 @@ func TestClient_Evaluate_WithOptions(t *testing.T) {
 		if body["namespace"] != "prod" {
 			t.Errorf("expected namespace=prod, got %v", body["namespace"])
 		}
-		if body["trace"] != true {
-			t.Errorf("expected trace=true")
+		if _, present := body["trace"]; present {
+			t.Error("request body still carries a 'trace' field; the flag was removed")
 		}
 
 		json.NewEncoder(w).Encode(map[string]any{
@@ -121,7 +121,6 @@ func TestClient_Evaluate_WithOptions(t *testing.T) {
 	c, _ := NewClient(Config{Address: server.URL})
 	result, err := c.Evaluate(context.Background(), map[string]any{"key": "value"}, EvaluateOptions{
 		Namespace: "prod",
-		Trace:     true,
 	})
 	if err != nil {
 		t.Fatal(err)

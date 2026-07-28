@@ -47,18 +47,22 @@ func runHealth(cmd *cobra.Command, args []string) error {
 		defer cancel()
 	}
 
+	// A bad address is a configuration error: waiting will never fix it.
 	c, err := client.NewClient(cfg)
 	if err != nil {
-		if wait {
-			return waitForHealth(ctx, cfg)
-		}
-		fmt.Printf("✗ Server unreachable: %v\n", err)
+		fmt.Printf("✗ %v\n", err)
 		osExit(1)
 	}
 	defer c.Close()
 
+	// --wait applies to the health check, not to client construction. It used
+	// to be checked only on a NewClient error, which could never happen, so
+	// `garmr health --wait` against a down server exited immediately.
 	result, err := c.Health(ctx)
 	if err != nil {
+		if wait {
+			return waitForHealth(ctx, cfg)
+		}
 		fmt.Printf("✗ Health check failed: %v\n", err)
 		osExit(1)
 	}

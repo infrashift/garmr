@@ -36,7 +36,9 @@
   "paths": {
     "/health": {
       "get": {
-        "tags": ["health"],
+        "tags": [
+          "health"
+        ],
         "summary": "Health check",
         "description": "Returns the health status of the server",
         "operationId": "getHealth",
@@ -66,7 +68,9 @@
     },
     "/ready": {
       "get": {
-        "tags": ["health"],
+        "tags": [
+          "health"
+        ],
         "summary": "Readiness check",
         "description": "Returns the readiness status of the server (Kubernetes-style probe)",
         "operationId": "getReady",
@@ -96,7 +100,9 @@
     },
     "/v1/evaluate": {
       "post": {
-        "tags": ["evaluation"],
+        "tags": [
+          "evaluation"
+        ],
         "summary": "Evaluate input against policies",
         "description": "Evaluates the provided input against loaded policies and returns the decision with any violations",
         "operationId": "evaluate",
@@ -241,7 +247,9 @@
     },
     "/v1/validate": {
       "post": {
-        "tags": ["policies"],
+        "tags": [
+          "policies"
+        ],
         "summary": "Validate policy syntax",
         "description": "Validates a CUE policy without loading it",
         "operationId": "validatePolicy",
@@ -281,7 +289,9 @@
     },
     "/v1/policies": {
       "get": {
-        "tags": ["policies"],
+        "tags": [
+          "policies"
+        ],
         "summary": "List loaded policies",
         "description": "Returns a list of all policies currently loaded in the server",
         "operationId": "listPolicies",
@@ -311,7 +321,9 @@
         }
       },
       "delete": {
-        "tags": ["policies"],
+        "tags": [
+          "policies"
+        ],
         "summary": "Delete a policy",
         "description": "Deletes a loaded policy by name and namespace",
         "operationId": "deletePolicy",
@@ -351,7 +363,9 @@
     },
     "/v1/policies/reload": {
       "post": {
-        "tags": ["policies"],
+        "tags": [
+          "policies"
+        ],
         "summary": "Reload policies",
         "description": "Atomically reloads all policies from disk (hot reload)",
         "operationId": "reloadPolicies",
@@ -400,7 +414,11 @@
             "example": "5m30s"
           }
         },
-        "required": ["healthy", "version", "uptime"]
+        "required": [
+          "healthy",
+          "version",
+          "uptime"
+        ]
       },
       "ReadyResponse": {
         "type": "object",
@@ -417,7 +435,9 @@
             "description": "Status of individual readiness checks"
           }
         },
-        "required": ["ready"]
+        "required": [
+          "ready"
+        ]
       },
       "EvaluateRequest": {
         "type": "object",
@@ -438,12 +458,9 @@
               "type": "string"
             },
             "description": "Specific policies to evaluate (namespace/name format)",
-            "example": ["security/container-security"]
-          },
-          "trace": {
-            "type": "boolean",
-            "description": "Include evaluation trace",
-            "default": false
+            "example": [
+              "security/container-security"
+            ]
           },
           "include_passed": {
             "type": "boolean",
@@ -451,14 +468,20 @@
             "default": false
           }
         },
-        "required": ["input"]
+        "required": [
+          "input"
+        ]
       },
       "EvaluateResponse": {
         "type": "object",
         "properties": {
           "decision": {
             "type": "string",
-            "enum": ["allow", "deny", "warn"],
+            "enum": [
+              "allow",
+              "deny",
+              "warn"
+            ],
             "description": "Overall policy decision"
           },
           "request_id": {
@@ -474,9 +497,64 @@
           },
           "metrics": {
             "$ref": "#/components/schemas/EvaluationMetrics"
+          },
+          "summary": {
+            "type": "object",
+            "description": "Rule outcome counts for this evaluation.",
+            "properties": {
+              "total_rules": {
+                "type": "integer"
+              },
+              "passed": {
+                "type": "integer"
+              },
+              "failed": {
+                "type": "integer"
+              },
+              "skipped": {
+                "type": "integer"
+              }
+            }
+          },
+          "evaluation_mode": {
+            "type": "object",
+            "description": "How the evaluation ran, and how much of the rule set it reached.",
+            "properties": {
+              "dry_run": {
+                "type": "boolean"
+              },
+              "fail_fast": {
+                "type": "boolean"
+              },
+              "short_circuited": {
+                "type": "boolean"
+              },
+              "total_rules_in_scope": {
+                "type": "integer"
+              },
+              "rules_evaluated": {
+                "type": "integer"
+              },
+              "rules_skipped": {
+                "type": "integer"
+              }
+            }
+          },
+          "terminated_early": {
+            "type": "boolean",
+            "description": "True when fail-fast stopped the evaluation early."
+          },
+          "termination_rule": {
+            "type": "object",
+            "description": "The rule whose failure triggered fail-fast termination, when terminated_early is true."
           }
         },
-        "required": ["decision", "request_id", "results", "metrics"]
+        "required": [
+          "decision",
+          "request_id",
+          "results",
+          "metrics"
+        ]
       },
       "RuleResult": {
         "type": "object",
@@ -499,7 +577,13 @@
           },
           "severity": {
             "type": "string",
-            "enum": ["critical", "high", "medium", "low", "info"],
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ],
             "description": "Rule severity"
           },
           "passed": {
@@ -511,7 +595,13 @@
             "description": "Failure message (if rule failed)"
           }
         },
-        "required": ["policy_name", "policy_namespace", "rule_id", "severity", "passed"]
+        "required": [
+          "policy_name",
+          "policy_namespace",
+          "rule_id",
+          "severity",
+          "passed"
+        ]
       },
       "EvaluationMetrics": {
         "type": "object",
@@ -539,7 +629,9 @@
             "description": "CUE policy content to validate"
           }
         },
-        "required": ["policy"]
+        "required": [
+          "policy"
+        ]
       },
       "ValidateResponse": {
         "type": "object",
@@ -563,7 +655,9 @@
             "description": "Validation warnings (if any)"
           }
         },
-        "required": ["valid"]
+        "required": [
+          "valid"
+        ]
       },
       "ValidationError": {
         "type": "object",
@@ -614,7 +708,11 @@
           },
           "enforcement": {
             "type": "string",
-            "enum": ["deny", "warn", "audit"],
+            "enum": [
+              "deny",
+              "warn",
+              "audit"
+            ],
             "description": "Enforcement action"
           },
           "target": {
@@ -659,7 +757,9 @@
             "description": "Whether the policy was found and deleted"
           }
         },
-        "required": ["deleted"]
+        "required": [
+          "deleted"
+        ]
       },
       "ErrorResponse": {
         "type": "object",
@@ -678,7 +778,9 @@
             "description": "Additional error details"
           }
         },
-        "required": ["error"]
+        "required": [
+          "error"
+        ]
       }
     }
   }

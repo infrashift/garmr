@@ -27,6 +27,35 @@ type cobraCmd = cobra.Command
 // Policy fixtures reused across command tests. Shapes match the engine's
 // #Policy schema (see internal/engine).
 const (
+	// testDirPolicy is testPassPolicy in the on-disk format the directory
+	// loader expects: a package clause and a named top-level document. The
+	// bare-document form is invisible to the loader (its top-level fields are
+	// apiVersion/kind/..., none of which declare kind: "Policy"), so a dir
+	// seeded with it reloads to zero policies — which now fails closed.
+	testDirPolicy = `package policy
+
+pass_policy: {
+	apiVersion: "policy.garmr.io/v1"
+	kind:       "Policy"
+	metadata: {
+		name:      "pass-policy"
+		namespace: "default"
+	}
+	spec: {
+		description: "Policy that passes when status is active"
+		target: resources: [{kind: "*"}]
+		rules: [{
+			id:          "r1"
+			description: "always pass"
+			severity:    "low"
+			expr: {match: {path: "status", equals: "active"}}
+			message:     "status must be active"
+		}]
+		enforcement: action: "deny"
+	}
+}
+`
+
 	testPassPolicy = `
 apiVersion: "policy.garmr.io/v1"
 kind:       "Policy"

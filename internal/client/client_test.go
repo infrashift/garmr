@@ -243,15 +243,15 @@ func TestClient_ListPolicies(t *testing.T) {
 	defer server.Close()
 
 	c, _ := NewClient(Config{Address: server.URL})
-	policies, err := c.ListPolicies(context.Background(), "")
+	list, err := c.ListPolicies(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(policies) != 2 {
-		t.Errorf("expected 2 policies, got %d", len(policies))
+	if len(list.Policies) != 2 {
+		t.Errorf("expected 2 policies, got %d", len(list.Policies))
 	}
-	if policies[0].Name != "p1" {
-		t.Errorf("expected first policy name=p1, got %s", policies[0].Name)
+	if list.Policies[0].Name != "p1" {
+		t.Errorf("expected first policy name=p1, got %s", list.Policies[0].Name)
 	}
 }
 
@@ -270,12 +270,12 @@ func TestClient_ListPolicies_WithNamespace(t *testing.T) {
 	defer server.Close()
 
 	c, _ := NewClient(Config{Address: server.URL})
-	policies, err := c.ListPolicies(context.Background(), "prod")
+	list, err := c.ListPolicies(context.Background(), "prod")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(policies) != 1 {
-		t.Errorf("expected 1 policy, got %d", len(policies))
+	if len(list.Policies) != 1 {
+		t.Errorf("expected 1 policy, got %d", len(list.Policies))
 	}
 }
 

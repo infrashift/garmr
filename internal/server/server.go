@@ -864,11 +864,16 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 				"name":       p.Name,
 				"namespace":  p.Namespace,
 				"rule_count": len(p.Rules),
+				"hash":       p.Hash,
 			}
 		}
 
 		resp := map[string]interface{}{
 			"policies": policyList,
+			// Deterministic digest of the whole loaded set; compare with
+			// `garmr policy digest <dir>` on the git checkout to verify the
+			// server converged on the content CI shipped.
+			"digest": s.engine.PolicySetDigest(),
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -973,6 +978,7 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]interface{}{
 		"success":         true,
 		"policies_loaded": count,
+		"digest":          s.engine.PolicySetDigest(),
 		"reload_time_ms":  time.Since(startTime).Milliseconds(),
 		"storage_type":    s.storageType(),
 	}

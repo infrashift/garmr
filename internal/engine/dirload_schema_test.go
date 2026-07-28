@@ -4,15 +4,16 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
 )
 
 // The directory loader is the production path (--policy-dir), so it must
-// enforce the same schema as garmr validate. These tests feed it a package
-// containing one valid policy alongside schema-invalid ones and assert the
-// invalid documents are rejected while the valid one loads.
+// enforce the same schema as garmr validate — and it must fail closed: one
+// schema-invalid policy fails the whole load (nothing is published), so a bad
+// deploy halts instead of shipping a partial policy set.
 func TestLoadPoliciesFromDir_SchemaValidation(t *testing.T) {
 	const validPolicy = `
 valid_policy: {
@@ -128,17 +129,18 @@ bad_policy: {
 			}
 
 			eng, _ := NewEngine(zap.NewNop())
-			if err := eng.LoadPoliciesFromDir(context.Background(), dir); err != nil {
-				t.Fatalf("LoadPoliciesFromDir failed: %v", err)
+			err := eng.LoadPoliciesFromDir(context.Background(), dir)
+			if err == nil {
+				t.Fatal("expected the load to fail on the schema-invalid policy")
+			}
+			if !strings.Contains(err.Error(), "schema validation") {
+				t.Errorf("error should name schema validation, got: %v", err)
 			}
 
-			if _, err := eng.GetPolicy("default", "valid-policy"); err != nil {
-				t.Errorf("valid policy was not loaded: %v", err)
-			}
-			for _, name := range []string{"bad-policy", "Bad_Name"} {
-				if _, err := eng.GetPolicy("default", name); err == nil {
-					t.Errorf("schema-invalid policy %q was loaded", name)
-				}
+			// Fail closed means nothing from the batch is published, the
+			// valid policy included.
+			if got := len(eng.ListPolicies("")); got != 0 {
+				t.Errorf("expected zero policies loaded after failure, got %d", got)
 			}
 		})
 	}

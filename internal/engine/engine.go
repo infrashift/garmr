@@ -48,6 +48,13 @@ const (
 
 // Engine is the core policy evaluation engine.
 type Engine struct {
+	// loadMu serializes every policy mutation end to end, including the
+	// build phase of a reload that runs outside mu. Without it, two
+	// concurrent reloads race to swap their sets, and a reload swap
+	// silently discards a concurrent LoadPolicy/DeletePolicy applied to
+	// the old set. Always acquired before mu.
+	loadMu sync.Mutex
+
 	// mu guards set and requireMatch. Policy mutations additionally
 	// serialize on it so replica sets are never modified concurrently.
 	mu sync.RWMutex

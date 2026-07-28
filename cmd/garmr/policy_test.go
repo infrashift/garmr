@@ -196,12 +196,18 @@ func TestRunPolicyList_JSONOutput(t *testing.T) {
 		_ = runPolicyList(cmd, nil)
 	})
 
-	var parsed []map[string]any
+	var parsed struct {
+		Policies []map[string]any `json:"policies"`
+		Digest   string           `json:"digest"`
+	}
 	if err := json.Unmarshal([]byte(stdout), &parsed); err != nil {
 		t.Fatalf("json unmarshal: %v", err)
 	}
-	if len(parsed) != 1 || parsed[0]["name"] != "pass-policy" {
+	if len(parsed.Policies) != 1 || parsed.Policies[0]["name"] != "pass-policy" {
 		t.Errorf("unexpected JSON: %q", stdout)
+	}
+	if parsed.Digest == "" {
+		t.Errorf("expected a policy-set digest in JSON output: %q", stdout)
 	}
 }
 
@@ -311,7 +317,7 @@ func policyReloadFlagSet(t *testing.T) *cobraCmd {
 
 func TestRunPolicyReload_Success(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "p.cue"), []byte(testPassPolicy), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "p.cue"), []byte(testDirPolicy), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -339,7 +345,7 @@ func TestRunPolicyReload_Success(t *testing.T) {
 
 func TestRunPolicyReload_JSONOutput(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "p.cue"), []byte(testPassPolicy), 0644)
+	os.WriteFile(filepath.Join(dir, "p.cue"), []byte(testDirPolicy), 0644)
 	newTestServerWithPolicyDir(t, dir)
 
 	viperSetOutput(t, "json")

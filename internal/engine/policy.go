@@ -2,9 +2,13 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -47,8 +51,15 @@ func (e *Engine) GetPolicy(namespace, name string) (*CompiledPolicy, error) {
 	return nil, ErrPolicyNotFound
 }
 
+// errNoPoliciesFound marks a directory that yielded zero policy documents.
+// The walker treats it as "keep scanning"; every other load error is a real
+// failure and aborts the load.
+var errNoPoliciesFound = errors.New("no policies found")
+
 // DeletePolicy removes a policy.
 func (e *Engine) DeletePolicy(namespace, name string) bool {
+	e.loadMu.Lock()
+	defer e.loadMu.Unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -70,6 +81,8 @@ func (e *Engine) DeletePolicy(namespace, name string) bool {
 
 // ClearPolicies removes all loaded policies.
 func (e *Engine) ClearPolicies() {
+	e.loadMu.Lock()
+	defer e.loadMu.Unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -84,8 +97,19 @@ func (e *Engine) ClearPolicies() {
 // ReloadPoliciesFromDir atomically reloads all policies from a directory.
 // This is safe to call while evaluations are in progress - in-flight evaluations
 // will complete with the old policy set, new evaluations will use the new set.
+//
+// Any failure — a policy that does not compile or validate, or a directory
+// tree yielding zero policies — leaves the existing set live and returns the
+// error. Swapping in an empty or partial set on a bad deploy would silently
+// deny (or skip) everything, which is an outage a 200 response would hide.
 func (e *Engine) ReloadPoliciesFromDir(ctx context.Context, dir string) (int, error) {
-	// Build a completely new replica set (no lock needed during load)
+	// Serialize against every other mutation for the whole build+swap window:
+	// concurrent reloads must not race their swaps, and an incremental
+	// LoadPolicy/DeletePolicy applied to the old set while a new set is being
+	// built would be silently discarded by the swap.
+	e.loadMu.Lock()
+	defer e.loadMu.Unlock()
+
 	newSet, err := newPolicySet(defaultReplicaCount())
 	if err != nil {
 		return 0, err
@@ -109,6 +133,10 @@ func (e *Engine) ReloadPoliciesFromDir(ctx context.Context, dir string) (int, er
 		return 0, err
 	}
 
+	if count == 0 {
+		return 0, fmt.Errorf("%w in %s; keeping the existing policy set", errNoPoliciesFound, dir)
+	}
+
 	// Atomic swap - only hold lock briefly. In-flight evaluations keep the
 	// replicas of the old set alive until they finish.
 	e.mu.Lock()
@@ -120,16 +148,24 @@ func (e *Engine) ReloadPoliciesFromDir(ctx context.Context, dir string) (int, er
 }
 
 // LoadPoliciesFromDir loads all policies from a directory and its
-// subdirectories, adding to any policies already loaded.
+// subdirectories, adding to any policies already loaded. Like the reload
+// path it fails closed: a policy that does not compile or validate, or a
+// tree yielding zero policies, is an error and nothing is loaded.
 func (e *Engine) LoadPoliciesFromDir(ctx context.Context, dir string) error {
+	e.loadMu.Lock()
+	defer e.loadMu.Unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	loaded := 0
 	// Two-phase so a failure partway through leaves every replica identical.
-	return e.set.mutateAll(func(i int, r *policyReplica) (func(), error) {
+	err := e.set.mutateAll(func(i int, r *policyReplica) (func(), error) {
 		pending := make(map[string]*CompiledPolicy)
 		if err := e.loadDirIntoReplica(ctx, dir, r, i != 0, pending); err != nil {
 			return nil, err
+		}
+		if i == 0 {
+			loaded = len(pending)
 		}
 		return func() {
 			for k, v := range pending {
@@ -137,16 +173,36 @@ func (e *Engine) LoadPoliciesFromDir(ctx context.Context, dir string) error {
 			}
 		}, nil
 	})
+	if err != nil {
+		return err
+	}
+	if loaded == 0 {
+		return fmt.Errorf("%w in %s", errNoPoliciesFound, dir)
+	}
+	return nil
 }
 
 // loadDirIntoReplica loads policies from dir (and its subdirectories) into a
 // replica, compiling everything with the replica's own context. When quiet is
 // true, logs and metrics are suppressed — used when replaying the same load
 // onto the remaining replicas of a set.
+// A directory that simply contains no policy documents (errNoPoliciesFound)
+// keeps the scan going — shared-definition packages and test fixtures are
+// legitimate. Every other error (a policy that fails to compile or validate)
+// aborts the load: skipping a broken policy and continuing would deploy a
+// partial policy set that looks healthy.
 func (e *Engine) loadDirIntoReplica(ctx context.Context, dir string, r *policyReplica, quiet bool, pending map[string]*CompiledPolicy) error {
-	// Load from the directory itself
-	if err := e.loadSingleDirIntoReplica(dir, r, quiet, pending); err != nil && !quiet {
-		e.logger.Debug("no policies in root, scanning subdirectories", zap.String("dir", dir))
+	// Load from the directory itself when it has CUE files of its own; a
+	// root that only holds subdirectories is not an error.
+	if hasCue, _ := e.hasCueFiles(dir); hasCue {
+		if err := e.loadSingleDirIntoReplica(dir, r, quiet, pending); err != nil {
+			if !errors.Is(err, errNoPoliciesFound) {
+				return err
+			}
+			if !quiet {
+				e.logger.Debug("no policies in root, scanning subdirectories", zap.String("dir", dir))
+			}
+		}
 	}
 
 	// Walk subdirectories
@@ -171,18 +227,17 @@ func (e *Engine) loadDirIntoReplica(ctx context.Context, dir string, r *policyRe
 		hasCueFiles, _ := e.hasCueFiles(subdir)
 		if hasCueFiles {
 			if err := e.loadSingleDirIntoReplica(subdir, r, quiet, pending); err != nil {
-				if !quiet {
-					e.logger.Warn("failed to load policies from subdirectory",
-						zap.String("dir", subdir),
-						zap.Error(err),
-					)
+				if !errors.Is(err, errNoPoliciesFound) {
+					return err
 				}
-				continue
+				if !quiet {
+					e.logger.Debug("no policies in subdirectory", zap.String("dir", subdir))
+				}
 			}
 		} else {
 			// Recursively check deeper directories
-			if err := e.loadDirIntoReplica(ctx, subdir, r, quiet, pending); err != nil && !quiet {
-				e.logger.Debug("no policies in subdirectory", zap.String("dir", subdir))
+			if err := e.loadDirIntoReplica(ctx, subdir, r, quiet, pending); err != nil {
+				return err
 			}
 		}
 	}
@@ -198,7 +253,7 @@ func (e *Engine) loadSingleDirIntoReplica(dir string, r *policyReplica, quiet bo
 		return err
 	}
 	if len(keys) == 0 {
-		return fmt.Errorf("no policies found in %s", dir)
+		return fmt.Errorf("%w in %s", errNoPoliciesFound, dir)
 	}
 	return nil
 }
@@ -265,31 +320,30 @@ func (e *Engine) loadInstancesIntoReplica(args []string, dir string, r *policyRe
 
 			// Unify with the schema before compiling — the directory loader is
 			// the production path, and an unvalidated load here would accept
-			// policies that `garmr validate` rejects.
+			// policies that `garmr validate` rejects. A failure aborts the
+			// whole load rather than skipping the policy: silently deploying
+			// a partial policy set is the outage this loader must prevent.
 			unified := fieldVal.Unify(r.schema.LookupPath(cue.ParsePath("#Policy")))
 			if unified.Err() != nil {
 				if !quiet {
 					e.observability().Metrics().RecordPolicyLoadError(name, ns, "schema")
-					e.logger.Warn("skipping policy that failed schema validation",
-						zap.String("name", name),
-						zap.Error(unified.Err()),
-					)
 				}
-				continue
+				return nil, fmt.Errorf("policy %s/%s in %s failed schema validation: %v", ns, name, dir, unified.Err())
 			}
 
 			compiled, err := e.compilePolicy(unified, name, ns)
 			if err != nil {
 				if !quiet {
 					e.observability().Metrics().RecordPolicyLoadError(name, ns, "compilation")
-					e.logger.Warn("skipping invalid policy",
-						zap.String("name", name),
-						zap.Error(err),
-					)
 				}
-				continue
+				return nil, fmt.Errorf("policy %s/%s in %s failed to compile: %w", ns, name, dir, err)
 			}
 
+			hash, err := canonicalPolicyHash(unified)
+			if err != nil {
+				return nil, fmt.Errorf("policy %s/%s in %s could not be hashed: %w", ns, name, dir, err)
+			}
+			compiled.Hash = hash
 			compiled.LoadedAt = time.Now()
 			key := policyKey(ns, name)
 			pending[key] = compiled
@@ -324,6 +378,8 @@ func (e *Engine) LoadPoliciesFromFile(ctx context.Context, path string) ([]strin
 		return nil, fmt.Errorf("resolving %s: %w", path, err)
 	}
 
+	e.loadMu.Lock()
+	defer e.loadMu.Unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -415,6 +471,30 @@ func (e *Engine) Validate(source string) ([]ValidationError, []ValidationError) 
 	}
 
 	return errs, nil
+}
+
+// PolicySetDigest returns a deterministic digest of the loaded policy set:
+// sha256 over the sorted "namespace/name:hash" lines of every policy. Two
+// processes hold identical policy content iff their digests match, so a CI
+// pipeline can compare the digest of its git checkout (via `garmr policy
+// digest`) with the digest a running server reports.
+func (e *Engine) PolicySetDigest() string {
+	set := e.currentSet()
+	rep := set.get()
+	defer set.put(rep)
+
+	lines := make([]string, 0, len(rep.policies))
+	for k, p := range rep.policies {
+		lines = append(lines, k+":"+p.Hash)
+	}
+	sort.Strings(lines)
+
+	h := sha256.New()
+	for _, line := range lines {
+		h.Write([]byte(line))
+		h.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // policyKey creates a unique key for a policy.

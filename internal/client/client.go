@@ -241,10 +241,19 @@ type PolicyInfo struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
 	RuleCount int    `json:"rule_count"`
+	Hash      string `json:"hash,omitempty"`
 }
 
-// ListPolicies lists all policies.
-func (c *Client) ListPolicies(ctx context.Context, namespace string) ([]PolicyInfo, error) {
+// PolicyList is the /v1/policies response: the loaded policies plus the
+// deterministic digest of the whole set, comparable with the output of
+// `garmr policy digest` on a git checkout.
+type PolicyList struct {
+	Policies []PolicyInfo `json:"policies"`
+	Digest   string       `json:"digest"`
+}
+
+// ListPolicies lists all policies along with the policy-set digest.
+func (c *Client) ListPolicies(ctx context.Context, namespace string) (*PolicyList, error) {
 	url := c.baseURL + "/v1/policies"
 	if namespace != "" {
 		url += "?namespace=" + namespace
@@ -266,14 +275,12 @@ func (c *Client) ListPolicies(ctx context.Context, namespace string) ([]PolicyIn
 		return nil, fmt.Errorf("server error (%d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	var result struct {
-		Policies []PolicyInfo `json:"policies"`
-	}
+	var result PolicyList
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 
-	return result.Policies, nil
+	return &result, nil
 }
 
 // DeletePolicy deletes a policy.
@@ -343,6 +350,7 @@ func (c *Client) Health(ctx context.Context) (*HealthResult, error) {
 type ReloadResult struct {
 	Success        bool   `json:"success"`
 	PoliciesLoaded int    `json:"policies_loaded"`
+	Digest         string `json:"digest,omitempty"`
 	ReloadTimeMs   int64  `json:"reload_time_ms"`
 	StorageType    string `json:"storage_type"`
 	Error          string `json:"error,omitempty"`

@@ -9,12 +9,30 @@ import (
 	"time"
 
 	"cuelang.org/go/cue"
+	"cuelang.org/go/cue/format"
 	"go.uber.org/zap"
 )
+
+// canonicalPolicyHash renders a schema-unified policy value to canonical CUE
+// syntax and hashes it. Identical policy content therefore produces the same
+// hash regardless of file layout, load path, or replica context — which is
+// what lets `garmr policy digest` on a git checkout be compared with the
+// digest a running server reports.
+func canonicalPolicyHash(val cue.Value) (string, error) {
+	node := val.Syntax(cue.Final(), cue.Docs(false), cue.Attributes(false))
+	b, err := format.Node(node)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
+}
 
 // LoadPolicy loads and compiles a policy from CUE source. The source is
 // compiled into every replica so each replica's context stays self-contained.
 func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string) error {
+	e.loadMu.Lock()
+	defer e.loadMu.Unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -30,7 +48,6 @@ func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string)
 	}
 
 	key := policyKey(namespace, name)
-	hash := sha256.Sum256([]byte(source))
 
 	// Two-phase: compile into every replica first, publish only if all
 	// succeeded. Mutating as we go would leave a partially-loaded set on a
@@ -43,7 +60,6 @@ func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string)
 			return nil, err
 		}
 		compiled.LoadedAt = time.Now()
-		compiled.Hash = hex.EncodeToString(hash[:])
 
 		if i == 0 {
 			ruleCount = len(compiled.Rules)
@@ -93,6 +109,12 @@ func (e *Engine) compilePolicySource(r *policyReplica, name, namespace, source s
 	if err != nil {
 		return nil, fmt.Errorf("compiling policy: %w", err)
 	}
+
+	hash, err := canonicalPolicyHash(unified)
+	if err != nil {
+		return nil, fmt.Errorf("hashing policy: %w", err)
+	}
+	compiled.Hash = hash
 	return compiled, nil
 }
 

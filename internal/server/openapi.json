@@ -19,6 +19,15 @@
       "description": "Local development server"
     }
   ],
+  "security": [
+    {},
+    {
+      "ApiKeyAuth": []
+    },
+    {
+      "BearerAuth": []
+    }
+  ],
   "tags": [
     {
       "name": "health",
@@ -93,6 +102,66 @@
                   "$ref": "#/components/schemas/ReadyResponse"
                 }
               }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": ["health"],
+        "summary": "Liveness probe",
+        "description": "Always returns 200 once the process is serving. /livez is an alias.",
+        "operationId": "getHealthz",
+        "security": [{}],
+        "responses": {
+          "200": {
+            "description": "Process is live"
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": ["health"],
+        "summary": "Readiness probe",
+        "description": "Returns 200 when the server can serve traffic. Returns 503 while zero policies are loaded and as soon as shutdown begins draining.",
+        "operationId": "getReadyz",
+        "security": [{}],
+        "responses": {
+          "200": {
+            "description": "Server is ready"
+          },
+          "503": {
+            "description": "Server is not ready (no policies loaded, or shutting down)"
+          }
+        }
+      }
+    },
+    "/health/deep": {
+      "get": {
+        "tags": ["health"],
+        "summary": "Deep health check",
+        "description": "Runs cheap and deep checkers (including a storage round trip). Always returns HTTP 200; the overall status is in the body. Requires the API key when one is configured.",
+        "operationId": "getDeepHealth",
+        "responses": {
+          "200": {
+            "description": "Check results (inspect the body's status field)"
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": ["health"],
+        "summary": "Prometheus metrics",
+        "operationId": "getMetrics",
+        "security": [{}],
+        "responses": {
+          "200": {
+            "description": "Prometheus exposition format",
+            "content": {
+              "text/plain": {}
             }
           }
         }
@@ -367,7 +436,7 @@
           "policies"
         ],
         "summary": "Reload policies",
-        "description": "Atomically reloads all policies from disk (hot reload)",
+        "description": "Atomically re-reads the policy directory and swaps the loaded set. Fails closed: a policy that does not compile or validate, or a directory yielding zero policies, returns 500 and the previously loaded set keeps serving.",
         "operationId": "reloadPolicies",
         "responses": {
           "200": {
@@ -380,8 +449,14 @@
               }
             }
           },
+          "400": {
+            "description": "No policy source configured",
+            "content": {
+              "text/plain": {}
+            }
+          },
           "500": {
-            "description": "Reload failed",
+            "description": "Reload failed; the previous policy set is still live",
             "content": {
               "application/json": {
                 "schema": {
@@ -662,17 +737,13 @@
       "ValidationError": {
         "type": "object",
         "properties": {
-          "line": {
-            "type": "integer",
-            "description": "Line number of the error"
-          },
-          "column": {
-            "type": "integer",
-            "description": "Column number of the error"
-          },
           "message": {
             "type": "string",
             "description": "Error message"
+          },
+          "code": {
+            "type": "string",
+            "description": "Error category (PARSE_ERROR, SCHEMA_ERROR)"
           }
         }
       },
@@ -684,6 +755,10 @@
             "items": {
               "$ref": "#/components/schemas/PolicySummary"
             }
+          },
+          "digest": {
+            "type": "string",
+            "description": "Deterministic sha256 digest of the loaded policy set; compare with `garmr policy digest <dir>` on a git checkout to verify convergence"
           }
         }
       },
@@ -698,33 +773,13 @@
             "type": "string",
             "description": "Policy namespace"
           },
-          "description": {
-            "type": "string",
-            "description": "Policy description"
-          },
           "rule_count": {
             "type": "integer",
             "description": "Number of rules in the policy"
           },
-          "enforcement": {
+          "hash": {
             "type": "string",
-            "enum": [
-              "deny",
-              "warn",
-              "audit"
-            ],
-            "description": "Enforcement action"
-          },
-          "target": {
-            "type": "object",
-            "properties": {
-              "resources": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              }
-            }
+            "description": "sha256 of the policy's canonical CUE rendering"
           }
         }
       },
@@ -738,6 +793,10 @@
           "policies_loaded": {
             "type": "integer",
             "description": "Number of policies loaded"
+          },
+          "digest": {
+            "type": "string",
+            "description": "Policy-set digest after the reload"
           },
           "reload_time_ms": {
             "type": "integer",
@@ -767,20 +826,24 @@
           "error": {
             "type": "string",
             "description": "Error message"
-          },
-          "code": {
-            "type": "string",
-            "description": "Error code"
-          },
-          "details": {
-            "type": "object",
-            "additionalProperties": true,
-            "description": "Additional error details"
           }
         },
         "required": [
           "error"
         ]
+      }
+    },
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "Static API key, required only when the server is started with auth.api_key set. In the recommended in-mesh deployment (Consul Connect mTLS + intentions) no key is configured and requests are unauthenticated at the application layer."
+      },
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The same API key may be presented as a Bearer token."
       }
     }
   }

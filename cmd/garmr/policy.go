@@ -593,7 +593,7 @@ func runPolicyList(cmd *cobra.Command, args []string) error {
 	defer c.Close()
 
 	namespace, _ := cmd.Flags().GetString("namespace")
-	policies, err := c.ListPolicies(ctx, namespace)
+	list, err := c.ListPolicies(ctx, namespace)
 	if err != nil {
 		return fmt.Errorf("listing policies: %w", err)
 	}
@@ -602,10 +602,10 @@ func runPolicyList(cmd *cobra.Command, args []string) error {
 
 	switch format {
 	case "json":
-		data, _ := json.MarshalIndent(policies, "", "  ")
+		data, _ := json.MarshalIndent(list, "", "  ")
 		fmt.Println(string(data))
 	default:
-		if len(policies) == 0 {
+		if len(list.Policies) == 0 {
 			fmt.Println("No policies loaded")
 			return nil
 		}
@@ -614,13 +614,14 @@ func runPolicyList(cmd *cobra.Command, args []string) error {
 			"NAME", "NAMESPACE", "RULES")
 		fmt.Println(strings.Repeat("-", 60))
 
-		for _, p := range policies {
+		for _, p := range list.Policies {
 			fmt.Printf("%-30s %-15s %-8d\n",
 				p.Name,
 				p.Namespace,
 				p.RuleCount,
 			)
 		}
+		fmt.Printf("\nDigest: %s\n", list.Digest)
 	}
 
 	return nil
@@ -644,16 +645,16 @@ func runPolicyGet(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	namespace, _ := cmd.Flags().GetString("namespace")
 
-	policies, err := c.ListPolicies(ctx, namespace)
+	list, err := c.ListPolicies(ctx, namespace)
 	if err != nil {
 		return fmt.Errorf("fetching policies: %w", err)
 	}
 
 	// Find the matching policy
 	var found *client.PolicyInfo
-	for i, p := range policies {
+	for i, p := range list.Policies {
 		if p.Name == name {
-			found = &policies[i]
+			found = &list.Policies[i]
 			break
 		}
 	}
@@ -749,6 +750,7 @@ func runPolicyReload(cmd *cobra.Command, args []string) error {
 		if result.Success {
 			fmt.Printf("✓ Reloaded %d policies in %dms\n", result.PoliciesLoaded, result.ReloadTimeMs)
 			fmt.Printf("  Storage: %s\n", result.StorageType)
+			fmt.Printf("  Digest:  %s\n", result.Digest)
 		} else {
 			fmt.Printf("✗ Reload failed: %s\n", result.Error)
 		}

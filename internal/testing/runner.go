@@ -236,13 +236,13 @@ func (r *Runner) parseTestCase(value cue.Value) (TestCase, error) {
 	// Parse input
 	if v := value.LookupPath(cue.ParsePath("input")); v.Exists() {
 		inputJSON, _ := v.MarshalJSON()
-		json.Unmarshal(inputJSON, &tc.Input)
+		_ = json.Unmarshal(inputJSON, &tc.Input)
 	}
 
 	// Parse context
 	if v := value.LookupPath(cue.ParsePath("context")); v.Exists() {
 		ctxJSON, _ := v.MarshalJSON()
-		json.Unmarshal(ctxJSON, &tc.Context)
+		_ = json.Unmarshal(ctxJSON, &tc.Context)
 	}
 
 	// Parse expectations

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,7 +26,7 @@ func TestGetPolicy(t *testing.T) {
 
 	// Not found
 	_, err = eng.GetPolicy("prod", "nonexistent")
-	if err != ErrPolicyNotFound {
+	if !errors.Is(err, ErrPolicyNotFound) {
 		t.Errorf("expected ErrPolicyNotFound, got %v", err)
 	}
 }

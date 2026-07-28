@@ -138,8 +138,8 @@ func TestAuditLog_IncludesPrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
-	if err := eng.LoadPolicy(context.Background(), "test-policy", "default", testPolicyCUE); err != nil {
-		t.Fatalf("LoadPolicy: %v", err)
+	if loadErr := eng.LoadPolicy(context.Background(), "test-policy", "default", testPolicyCUE); loadErr != nil {
+		t.Fatalf("LoadPolicy: %v", loadErr)
 	}
 
 	srv, err := NewServer(Config{AuditEnabled: false}, eng, zap.NewNop())

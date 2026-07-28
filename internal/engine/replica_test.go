@@ -81,7 +81,7 @@ func TestEvaluate_RawConstraint_DirLoad_Concurrent(t *testing.T) {
 					},
 				})
 				if err != nil {
-					errs <- fmt.Errorf("worker %d iter %d: %v", w, i, err)
+					errs <- fmt.Errorf("worker %d iter %d: %w", w, i, err)
 					continue
 				}
 				if resp.Decision != want {

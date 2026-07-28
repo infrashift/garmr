@@ -151,6 +151,118 @@ func TestRunValidate_Remote(t *testing.T) {
 	}
 }
 
+func TestRunValidate_Remote_Directory(t *testing.T) {
+	newTestServer(t)
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "nested")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "a.cue"), []byte(testPassPolicy), 0644)
+	os.WriteFile(filepath.Join(sub, "b.cue"), []byte(testPassPolicy), 0644)
+	os.WriteFile(filepath.Join(dir, "skip.txt"), []byte("not cue"), 0644)
+
+	cmd := validateFlagSet(t)
+	if err := cmd.Flags().Set("remote", "true"); err != nil {
+		t.Fatal(err)
+	}
+	rec := stubExit(t)
+	stdout, _ := captureOutput(t, func() {
+		if err := runValidate(cmd, []string{dir}); err != nil {
+			t.Fatalf("runValidate: %v", err)
+		}
+	})
+	if rec.Called {
+		t.Errorf("unexpected exit: %d", rec.Code)
+	}
+	if !strings.Contains(stdout, "a.cue") || !strings.Contains(stdout, "b.cue") {
+		t.Errorf("expected each .cue file validated remotely, got %q", stdout)
+	}
+	if strings.Contains(stdout, "skip.txt") {
+		t.Errorf("non-CUE file should be skipped, got %q", stdout)
+	}
+}
+
+func TestRunValidate_Remote_InvalidPolicy(t *testing.T) {
+	newTestServer(t)
+	path := writeTempFile(t, "bad.cue", `this is not valid cue {{{`)
+
+	cmd := validateFlagSet(t)
+	if err := cmd.Flags().Set("remote", "true"); err != nil {
+		t.Fatal(err)
+	}
+	rec := stubExit(t)
+	stdout, _ := captureOutput(t, func() {
+		_ = runValidate(cmd, []string{path})
+	})
+	if rec.Code != 1 {
+		t.Errorf("expected exit 1 for invalid policy, got %d", rec.Code)
+	}
+	if !strings.Contains(stdout, "invalid") {
+		t.Errorf("expected invalid marker, got %q", stdout)
+	}
+}
+
+func TestRunValidate_Remote_EmptyDirectory(t *testing.T) {
+	newTestServer(t)
+	cmd := validateFlagSet(t)
+	if err := cmd.Flags().Set("remote", "true"); err != nil {
+		t.Fatal(err)
+	}
+	rec := stubExit(t)
+	_, stderr := captureOutput(t, func() {
+		_ = runValidate(cmd, []string{t.TempDir()})
+	})
+	if rec.Code != 1 {
+		t.Errorf("expected exit 1 for directory without .cue files, got %d", rec.Code)
+	}
+	if !strings.Contains(stderr, "No .cue files") {
+		t.Errorf("expected no-cue-files message, got %q", stderr)
+	}
+}
+
+func TestRunValidate_Remote_UnreadableFile(t *testing.T) {
+	newTestServer(t)
+	cmd := validateFlagSet(t)
+	if err := cmd.Flags().Set("remote", "true"); err != nil {
+		t.Fatal(err)
+	}
+	rec := stubExit(t)
+	_, stderr := captureOutput(t, func() {
+		_ = runValidate(cmd, []string{filepath.Join(t.TempDir(), "missing.cue")})
+	})
+	if rec.Code != 1 {
+		t.Errorf("expected exit 1 for unreadable file, got %d", rec.Code)
+	}
+	if !strings.Contains(stderr, "Error reading") {
+		t.Errorf("expected read error, got %q", stderr)
+	}
+}
+
+func TestRunPolicyDigest_Errors(t *testing.T) {
+	cmd := newTestCmd(t)
+
+	if err := runPolicyDigest(cmd, []string{filepath.Join(t.TempDir(), "nope")}); err == nil {
+		t.Error("expected an error for a nonexistent path")
+	}
+	if err := runPolicyDigest(cmd, []string{t.TempDir()}); err == nil {
+		t.Error("expected an error for a directory with no policies")
+	}
+}
+
+func TestRunPolicyDigest_File(t *testing.T) {
+	path := writeTempFile(t, "p.cue", testDirPolicy)
+	cmd := newTestCmd(t)
+	stdout, _ := captureOutput(t, func() {
+		if err := runPolicyDigest(cmd, []string{path}); err != nil {
+			t.Fatalf("runPolicyDigest: %v", err)
+		}
+	})
+	if len(strings.TrimSpace(stdout)) != 64 {
+		t.Errorf("expected a sha256 hex digest, got %q", stdout)
+	}
+}
+
 func TestRunPolicyDigest_MatchesValidateDigest(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "a.cue"), []byte(testDirPolicy), 0644)

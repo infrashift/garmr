@@ -213,8 +213,8 @@ func TestStart_NotReadyWithZeroPolicies(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := writeFile(filepath.Join(dir, "broken.cue"), []byte("package policies\n{{{ not cue")); err != nil {
-		t.Fatalf("writing broken policy: %v", err)
+	if writeErr := writeFile(filepath.Join(dir, "broken.cue"), []byte("package policies\n{{{ not cue")); writeErr != nil {
+		t.Fatalf("writing broken policy: %v", writeErr)
 	}
 
 	srv, err := NewServer(Config{

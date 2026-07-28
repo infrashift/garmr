@@ -256,5 +256,5 @@ func formatTAP(result *qtesting.SuiteResult) string {
 func printJSON(results interface{}) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	enc.Encode(results)
+	_ = enc.Encode(results)
 }

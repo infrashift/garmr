@@ -188,7 +188,7 @@ func (h *Handler) LivenessHandler() http.HandlerFunc {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}
 }
 
@@ -212,7 +212,7 @@ func (h *Handler) ReadinessHandler() http.HandlerFunc {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}
 }
 
@@ -227,7 +227,7 @@ func (h *Handler) DeepHealthHandler() http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK) // Always 200 for deep health
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}
 }
 

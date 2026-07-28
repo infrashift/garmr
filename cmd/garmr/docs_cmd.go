@@ -209,9 +209,9 @@ func findPolicyFiles(inputPath string, recursive bool) ([]string, error) {
 				return nil
 			})
 		} else {
-			entries, err := os.ReadDir(inputPath)
-			if err != nil {
-				return nil, err
+			entries, dirErr := os.ReadDir(inputPath)
+			if dirErr != nil {
+				return nil, dirErr
 			}
 			for _, entry := range entries {
 				if !entry.IsDir() && filepath.Ext(entry.Name()) == ".cue" && !strings.HasSuffix(entry.Name(), "_test.cue") {
@@ -277,7 +277,7 @@ func parsePoliciesFromFile(ctx *cue.Context, filePath string) ([]PolicyDoc, erro
 				policy.Labels = make(map[string]string)
 				labelsIter, _ := labelsVal.Fields()
 				for labelsIter.Next() {
-					key := labelsIter.Label()
+					key := labelsIter.Selector().Unquoted()
 					val, _ := labelsIter.Value().String()
 					policy.Labels[key] = val
 				}

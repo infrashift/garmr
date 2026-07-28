@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -34,7 +35,8 @@ func TestNewFilesystemBackend_DefaultRoot(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for non-existent default root")
 	}
-	if _, ok := err.(*ErrNotFound); !ok {
+	var notFoundErr *ErrNotFound
+	if !errors.As(err, &notFoundErr) {
 		t.Errorf("expected ErrNotFound, got %T: %v", err, err)
 	}
 }
@@ -65,7 +67,8 @@ func TestNewFilesystemBackend_NonexistentRoot(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for non-existent root")
 	}
-	if _, ok := err.(*ErrNotFound); !ok {
+	var notFoundErr *ErrNotFound
+	if !errors.As(err, &notFoundErr) {
 		t.Errorf("expected ErrNotFound, got %T: %v", err, err)
 	}
 }
@@ -158,7 +161,8 @@ func TestFilesystemBackend_Get_NotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for nonexistent file")
 	}
-	if _, ok := err.(*ErrNotFound); !ok {
+	var notFoundErr *ErrNotFound
+	if !errors.As(err, &notFoundErr) {
 		t.Errorf("expected ErrNotFound, got %T: %v", err, err)
 	}
 }
@@ -177,7 +181,8 @@ func TestFilesystemBackend_Get_PathTraversal(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for path traversal")
 	}
-	if _, ok := err.(*ErrAccessDenied); !ok {
+	var deniedErr *ErrAccessDenied
+	if !errors.As(err, &deniedErr) {
 		t.Errorf("expected ErrAccessDenied, got %T: %v", err, err)
 	}
 }

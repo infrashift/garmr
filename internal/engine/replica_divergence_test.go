@@ -94,8 +94,8 @@ func TestLoadPolicy_SuccessIsVisibleOnEveryReplica(t *testing.T) {
 	good := makePolicy("good", "default", "valid",
 		`{id: "r1", description: "d", severity: "high", expr: {match: {path: "x", equals: 1}}}`,
 		"deny", "")
-	if err := eng.LoadPolicy(context.Background(), "good", "default", good); err != nil {
-		t.Fatalf("LoadPolicy: %v", err)
+	if loadErr := eng.LoadPolicy(context.Background(), "good", "default", good); loadErr != nil {
+		t.Fatalf("LoadPolicy: %v", loadErr)
 	}
 
 	assertConsistentAcrossReplicas(t, eng, map[string]any{"x": 2.0})

@@ -10,6 +10,7 @@ func TestNewParser(t *testing.T) {
 	p := NewParser()
 	if p == nil {
 		t.Fatal("NewParser returned nil")
+		return
 	}
 	if p.DefaultFormat != FormatJSON {
 		t.Errorf("expected default format JSON, got %s", p.DefaultFormat)

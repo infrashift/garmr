@@ -39,7 +39,8 @@ func TestRegistry_Create_Unknown(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown backend")
 	}
-	if _, ok := err.(*ErrUnknownBackend); !ok {
+	var unknownErr *ErrUnknownBackend
+	if !errors.As(err, &unknownErr) {
 		t.Errorf("expected ErrUnknownBackend, got %T: %v", err, err)
 	}
 }

@@ -106,8 +106,8 @@ spec: {
 
 			dir := t.TempDir()
 			path := dir + "/policy.cue"
-			if err := writeTestFile(path, "package policies\n\np: "+tt.source+"\n"); err != nil {
-				t.Fatalf("writing policy: %v", err)
+			if writeErr := writeTestFile(path, "package policies\n\np: "+tt.source+"\n"); writeErr != nil {
+				t.Fatalf("writing policy: %v", writeErr)
 			}
 
 			keys, err := eng.LoadPoliciesFromFile(context.Background(), path)

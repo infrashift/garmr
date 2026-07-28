@@ -173,8 +173,8 @@ func newTestServerCfg(t *testing.T, cfg server.Config, policies ...policyFixture
 	}
 
 	for _, p := range policies {
-		if err := eng.LoadPolicy(context.Background(), p.Name, p.Namespace, p.Source); err != nil {
-			t.Fatalf("LoadPolicy %s/%s: %v", p.Namespace, p.Name, err)
+		if loadErr := eng.LoadPolicy(context.Background(), p.Name, p.Namespace, p.Source); loadErr != nil {
+			t.Fatalf("LoadPolicy %s/%s: %v", p.Namespace, p.Name, loadErr)
 		}
 	}
 

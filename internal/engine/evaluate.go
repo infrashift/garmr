@@ -42,7 +42,7 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 	// Convert input to CUE value using the replica's context
 	inputVal := rep.ctx.Encode(req.Input)
 	if inputVal.Err() != nil {
-		return nil, fmt.Errorf("%w: encoding input: %v", ErrInvalidInput, inputVal.Err())
+		return nil, fmt.Errorf("%w: encoding input: %w", ErrInvalidInput, inputVal.Err())
 	}
 
 	// Find applicable policies

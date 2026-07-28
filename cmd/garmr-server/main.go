@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -55,6 +56,15 @@ Examples:
 	RunE:         runServer,
 }
 
+// mustBind panics on a BindPFlag error. It can only fail when the named flag
+// does not exist — a programming error that should abort startup, not be
+// silently discarded.
+func mustBind(key string, flag *pflag.Flag) {
+	if err := viper.BindPFlag(key, flag); err != nil {
+		panic(fmt.Sprintf("binding %s: %v", key, err))
+	}
+}
+
 func init() {
 	cobra.OnInitialize(initConfig)
 
@@ -74,19 +84,19 @@ func init() {
 
 	// Lifecycle flags
 	rootCmd.Flags().Duration("shutdown-timeout", 30*time.Second, "max time to wait for in-flight requests to drain on SIGTERM")
-	viper.BindPFlag("shutdown_timeout", rootCmd.Flags().Lookup("shutdown-timeout"))
+	mustBind("shutdown_timeout", rootCmd.Flags().Lookup("shutdown-timeout"))
 
 	// Evaluation posture: fail-closed when no policy matches (default true)
 	rootCmd.Flags().Bool("require-match", true, "return DENY when no policy matches the evaluation (fail-closed)")
-	viper.BindPFlag("evaluation.require_match", rootCmd.Flags().Lookup("require-match"))
+	mustBind("evaluation.require_match", rootCmd.Flags().Lookup("require-match"))
 	viper.SetDefault("evaluation.require_match", true)
 
 	// Bind to viper
-	viper.BindPFlag("http_addr", rootCmd.Flags().Lookup("http-addr"))
-	viper.BindPFlag("policy_dir", rootCmd.Flags().Lookup("policy-dir"))
-	viper.BindPFlag("log.level", rootCmd.Flags().Lookup("log-level"))
-	viper.BindPFlag("log.format", rootCmd.Flags().Lookup("log-format"))
-	viper.BindPFlag("dev", rootCmd.Flags().Lookup("dev"))
+	mustBind("http_addr", rootCmd.Flags().Lookup("http-addr"))
+	mustBind("policy_dir", rootCmd.Flags().Lookup("policy-dir"))
+	mustBind("log.level", rootCmd.Flags().Lookup("log-level"))
+	mustBind("log.format", rootCmd.Flags().Lookup("log-format"))
+	mustBind("dev", rootCmd.Flags().Lookup("dev"))
 
 	// Audit flags
 	rootCmd.Flags().Bool("audit", true, "enable audit logging")
@@ -94,23 +104,23 @@ func init() {
 	rootCmd.Flags().Int("audit-max-size", 100, "max audit log file size in MB before rotation")
 	rootCmd.Flags().Int("audit-max-backups", 10, "max number of old audit log files to retain")
 	rootCmd.Flags().Int("audit-max-age", 30, "max age in days for old audit log files")
-	viper.BindPFlag("audit.enabled", rootCmd.Flags().Lookup("audit"))
-	viper.BindPFlag("audit.path", rootCmd.Flags().Lookup("audit-path"))
-	viper.BindPFlag("audit.max_size", rootCmd.Flags().Lookup("audit-max-size"))
-	viper.BindPFlag("audit.max_backups", rootCmd.Flags().Lookup("audit-max-backups"))
-	viper.BindPFlag("audit.max_age", rootCmd.Flags().Lookup("audit-max-age"))
+	mustBind("audit.enabled", rootCmd.Flags().Lookup("audit"))
+	mustBind("audit.path", rootCmd.Flags().Lookup("audit-path"))
+	mustBind("audit.max_size", rootCmd.Flags().Lookup("audit-max-size"))
+	mustBind("audit.max_backups", rootCmd.Flags().Lookup("audit-max-backups"))
+	mustBind("audit.max_age", rootCmd.Flags().Lookup("audit-max-age"))
 
 	// Auth flags
 	rootCmd.Flags().String("api-key", "", "API key for authentication (empty = no auth)")
 	rootCmd.Flags().String("api-key-header", "X-API-Key", "header name for API key")
 	rootCmd.Flags().String("identity-header", "X-Forwarded-Client-Cert", "header carrying mesh-verified client identity (XFCC format)")
-	viper.BindPFlag("auth.api_key", rootCmd.Flags().Lookup("api-key"))
-	viper.BindPFlag("auth.api_key_header", rootCmd.Flags().Lookup("api-key-header"))
-	viper.BindPFlag("auth.identity_header", rootCmd.Flags().Lookup("identity-header"))
+	mustBind("auth.api_key", rootCmd.Flags().Lookup("api-key"))
+	mustBind("auth.api_key_header", rootCmd.Flags().Lookup("api-key-header"))
+	mustBind("auth.identity_header", rootCmd.Flags().Lookup("identity-header"))
 
 	// CORS flags
 	rootCmd.Flags().StringSlice("cors-origins", nil, "allowed CORS origins (empty = allow all)")
-	viper.BindPFlag("cors.allowed_origins", rootCmd.Flags().Lookup("cors-origins"))
+	mustBind("cors.allowed_origins", rootCmd.Flags().Lookup("cors-origins"))
 
 	// Rate limiting flags
 	rootCmd.Flags().Bool("rate-limit", false, "enable rate limiting")
@@ -118,16 +128,16 @@ func init() {
 	rootCmd.Flags().Int("rate-limit-burst", 200, "rate limit burst size")
 	rootCmd.Flags().StringSlice("rate-limit-trusted-proxies", nil,
 		"CIDRs whose X-Forwarded-For is trusted for per-client rate limiting (default: none, header ignored)")
-	viper.BindPFlag("rate_limit.enabled", rootCmd.Flags().Lookup("rate-limit"))
-	viper.BindPFlag("rate_limit.rps", rootCmd.Flags().Lookup("rate-limit-rps"))
-	viper.BindPFlag("rate_limit.burst", rootCmd.Flags().Lookup("rate-limit-burst"))
-	viper.BindPFlag("rate_limit.trusted_proxies", rootCmd.Flags().Lookup("rate-limit-trusted-proxies"))
+	mustBind("rate_limit.enabled", rootCmd.Flags().Lookup("rate-limit"))
+	mustBind("rate_limit.rps", rootCmd.Flags().Lookup("rate-limit-rps"))
+	mustBind("rate_limit.burst", rootCmd.Flags().Lookup("rate-limit-burst"))
+	mustBind("rate_limit.trusted_proxies", rootCmd.Flags().Lookup("rate-limit-trusted-proxies"))
 
 	// Storage backend flags
 	rootCmd.Flags().String("storage-type", "", "storage backend type (filesystem)")
 	rootCmd.Flags().String("storage-root", "", "storage backend root path/prefix")
-	viper.BindPFlag("storage.type", rootCmd.Flags().Lookup("storage-type"))
-	viper.BindPFlag("storage.root", rootCmd.Flags().Lookup("storage-root"))
+	mustBind("storage.type", rootCmd.Flags().Lookup("storage-type"))
+	mustBind("storage.root", rootCmd.Flags().Lookup("storage-root"))
 }
 
 func initConfig() {
@@ -160,10 +170,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("initializing logger: %w", err)
 	}
-	defer logger.Sync()
+	// Sync flushes on exit; its error is expected on stderr sinks and has
+	// nowhere useful to go this late.
+	defer func() { _ = logger.Sync() }()
 
 	logger.Info("starting Garmr server",
 		zap.String("version", version),
+		zap.String("commit", commit),
 	)
 
 	// Initialize OpenTelemetry tracing. No-op if OTEL env vars are unset.
@@ -175,8 +188,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := shutdownTracing(shutdownCtx); err != nil {
-			logger.Warn("tracing shutdown returned error", zap.Error(err))
+		if shutErr := shutdownTracing(shutdownCtx); shutErr != nil {
+			logger.Warn("tracing shutdown returned error", zap.Error(shutErr))
 		}
 	}()
 

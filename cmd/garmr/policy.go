@@ -476,8 +476,8 @@ func runPolicyDiff(cmd *cobra.Command, args []string) error {
 			Size int64  `json:"size"`
 		} `json:"source"`
 	}
-	if err := json.Unmarshal(lockContent, &lock); err != nil {
-		return fmt.Errorf("parsing lock file: %w", err)
+	if jsonErr := json.Unmarshal(lockContent, &lock); jsonErr != nil {
+		return fmt.Errorf("parsing lock file: %w", jsonErr)
 	}
 
 	// Compute current checksum
@@ -530,7 +530,7 @@ func generateLockFile(policyPath, version, updatedBy string) error {
 	checksum := "sha256:" + hash
 
 	if updatedBy == "" {
-		if u, err := user.Current(); err == nil {
+		if u, userErr := user.Current(); userErr == nil {
 			updatedBy = u.Username
 		}
 	}
@@ -582,8 +582,8 @@ func validateLockFileCmd(policyPath string) error {
 		Checksum string `json:"checksum"`
 		Version  string `json:"version"`
 	}
-	if err := json.Unmarshal(lockContent, &lock); err != nil {
-		return fmt.Errorf("parsing lock file: %w", err)
+	if jsonErr := json.Unmarshal(lockContent, &lock); jsonErr != nil {
+		return fmt.Errorf("parsing lock file: %w", jsonErr)
 	}
 
 	// Compute current checksum
@@ -789,7 +789,8 @@ func runPolicyDelete(cmd *cobra.Command, args []string) error {
 	if !force {
 		fmt.Printf("Delete policy '%s/%s'? [y/N]: ", namespace, name)
 		var confirm string
-		fmt.Scanln(&confirm)
+		// EOF or piped stdin reads as empty, which safely means "not y".
+		_, _ = fmt.Scanln(&confirm)
 		if strings.ToLower(confirm) != "y" {
 			fmt.Println("Cancelled")
 			return nil

@@ -51,9 +51,13 @@ func init() {
 	rootCmd.PersistentFlags().BoolP("quiet", "q", false, "suppress non-essential output")
 	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "show rule details (default: show on fail, hide on pass; use --verbose=false to always hide)")
 
-	// Bind flags to viper
-	viper.BindPFlag("server", rootCmd.PersistentFlags().Lookup("server"))
-	viper.BindPFlag("output", rootCmd.PersistentFlags().Lookup("output"))
+	// Bind flags to viper. BindPFlag only fails when the flag does not
+	// exist, which is a programming error worth aborting on.
+	for key, name := range map[string]string{"server": "server", "output": "output"} {
+		if err := viper.BindPFlag(key, rootCmd.PersistentFlags().Lookup(name)); err != nil {
+			panic(err)
+		}
+	}
 
 	// Add subcommands
 	rootCmd.AddCommand(evalCmd)
@@ -81,9 +85,8 @@ func initConfig() {
 	viper.SetEnvPrefix("GARMR")
 	viper.AutomaticEnv()
 
-	if err := viper.ReadInConfig(); err == nil {
-		// Config file found and loaded
-	}
+	// A missing config file is fine — flags and env vars carry the defaults.
+	_ = viper.ReadInConfig()
 }
 
 func main() {

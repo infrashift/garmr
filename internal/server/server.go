@@ -544,7 +544,7 @@ func (s *Server) writeError(w http.ResponseWriter, status int, userMsg string, e
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{
+	_ = json.NewEncoder(w).Encode(map[string]string{
 		"error": userMsg,
 	})
 }
@@ -570,7 +570,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if !healthy {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
@@ -602,7 +602,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	if !ready {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
@@ -717,7 +717,7 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Request-Id", requestID)
-	json.NewEncoder(w).Encode(evaluateResponseBody(result, requestID))
+	_ = json.NewEncoder(w).Encode(evaluateResponseBody(result, requestID))
 }
 
 // evaluateResponseBody converts an engine response into the JSON body shape.
@@ -863,7 +863,7 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
@@ -892,7 +892,7 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 
 	case http.MethodDelete:
 		name := r.URL.Query().Get("name")
@@ -923,7 +923,7 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 			"deleted": deleted,
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -998,7 +998,7 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 		"storage_type":    s.storageType(),
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -1056,13 +1056,13 @@ func severityToString(s engine.Severity) string {
 // handleOpenAPI serves the OpenAPI specification
 func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(openAPISpec)
+	_, _ = w.Write(openAPISpec)
 }
 
 // handleSwaggerUI serves a simple Swagger UI page
 func (s *Server) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(swaggerUIHTML))
+	_, _ = w.Write([]byte(swaggerUIHTML))
 }
 
 // Swagger UI HTML (uses CDN)
@@ -1222,7 +1222,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		if subtle.ConstantTimeCompare([]byte(providedKey), []byte(s.config.APIKey)) == 0 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]string{
+			_ = json.NewEncoder(w).Encode(map[string]string{
 				"error": "invalid or missing API key",
 			})
 			return

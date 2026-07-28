@@ -4,8 +4,10 @@ Feature gaps identified during the 2026-07 code/docs reviews. These were
 deliberately **not** implemented (the review branches fixed bugs, removed
 debt, and aligned docs); they are recorded here so the ideas aren't lost.
 
-Two rounds are recorded: `feature/refactor` (2026-07-08/09) and
-`feature/review-fix-refactor` (2026-07-28).
+Three rounds are recorded: `feature/refactor` (2026-07-08/09),
+`feature/review-fix-refactor` (2026-07-28), and the pre-production
+hardening pass (2026-07-28, Phases A–G) targeting the Nomad + Consul
+Connect deployment.
 
 ## Engine — deferred cleanups (behavior-neutral)
 
@@ -48,21 +50,105 @@ Two rounds are recorded: `feature/refactor` (2026-07-08/09) and
   or a nested `forEach` re-binds them. The remaining per-element cost is
   CUE-internal — see deferred cleanup #2.
 
-## Engine — deferred cleanups (added 2026-07-28)
+## Implemented in the pre-production hardening pass (2026-07-28, Phases A–G)
 
-3. Directory loads do not validate against the embedded schema.
-   `LoadPolicy` unifies the source with `#Policy` before compiling, but
-   `loadInstancesIntoReplica` calls `compilePolicy` directly, so policies
-   loaded from `--policy-dir` — the production path — are never schema
-   checked. Explicit compile-time rejections cover the fields that mattered
-   (see "Silently-ignored policy schema fields" below), but the general gap
-   remains. Closing it means unifying in the directory loader too, which
-   will start rejecting policies that load today; worth a deliberate
-   migration rather than a silent tightening.
-4. A policy that fails to compile during a directory load is skipped with a
-   warning, and the surfaced error is "no policies found in <dir>" rather
-   than the real reason. The fail-closed outcome is right; the diagnostic is
-   not.
+- **Multi-operator AND semantics** (Phase A): condition blocks silently
+  enforced only the first operator in dispatch order — fail-open.
+  `match`/`length`/`semver`/`datetime` now evaluate every specified
+  operator and AND the results (`evaluateAllSpecified` in
+  `internal/engine/helpers.go`); violations name each unmet check.
+- **One schema, enforced on the production path** (Phase B): resolves old
+  item #3. `schemas/policy.cue` is embedded via go:embed (the `schemas` Go
+  package) and unified with every document the directory loader compiles.
+  The diverged hand-maintained copy in `engine.go` is gone. `#Rule.id` was
+  relaxed to a bounded token; `#Rule.expr` stays `_` because raw CUE
+  constraint expressions are a feature.
+- **Fail-closed loading + serialized mutations + digest** (Phase C):
+  resolves old item #4. Compile/schema failures abort the load naming the
+  policy; zero policies fails startup (nonzero exit) and reload (HTTP 500,
+  old set retained); `Engine.loadMu` serializes reload build+swap against
+  all mutations. Every policy carries a canonical-content sha256 and the
+  set digest is served by `GET /v1/policies` and reload, reproducible
+  offline with `garmr policy digest`.
+- **Readiness reflects shutdown; TLS deleted** (Phase D): `/readyz` is 503
+  before Start and from the instant Stop() begins draining. The TLS
+  listener, flags, config keys, and the rate limiter's unreachable "cert"
+  identifier were removed — the mesh owns transport security.
+- **Local-first `garmr validate` + `garmr policy digest`** (Phase E):
+  validate runs the server's exact loader locally (multi-file CUE packages
+  now validate; no in-mesh CI runner needed); `--remote` keeps the server
+  path. Dead `--warn`/`--strict` and phantom line/column rendering removed.
+  The lock-file "on-demand reload" fiction was excised from CLI help and
+  docs.
+- **Nomad deploy assets; container/build fixes** (Phase F):
+  `deploy/nomad/` service + parameterized batch jobs + pipeline README;
+  HEALTHCHECK scheme fixed; docker Make targets point at Containerfile;
+  CI builds and smoke-tests the image.
+
+## Deferred from the pre-production hardening pass (2026-07-28)
+
+Recorded, deliberately not done before the deploy:
+
+- **Dead code**: `health` placeholder checkers (`PluginChecker`, and
+  `DiskSpaceChecker`/`MemoryChecker` which return healthy unconditionally —
+  the fail-open shape Phase 1 removed elsewhere; delete rather than ever
+  register), `health.SetLive`/`Unregister` (liveness is a constant),
+  `ratelimit.AllowN`/`Wait`/`ClientCount`, `input.ParseBytes`/`ToJSON*`/
+  `ToYAML`/`Supported*`, `engine.ClearPolicies` (then fold
+  `forEachExclusive` into its one caller), `PrometheusMetrics.Registry`,
+  `internal/testing` dead struct fields (`TestExpectation.Output`,
+  `ActualResult.Output`, `TestCase.Context` is parsed then ignored).
+  `engine.LoadPolicy` is now test-scaffolding only (no production caller);
+  keep or fold into test helpers.
+- **Duplication**: 8× CLI client-construction boilerplate (a
+  `newClientFromFlags` helper collapses ~90 lines); `Load*/Reload*
+  FromBackend` twins; `getNestedString` (server) vs `getStringField`
+  (engine); sort comparators in `compile.go:267-339` share their prologue.
+- **Oversized functions**: `Evaluate` (219 lines), `evaluateExpression`
+  (124), `handleEvaluate` (113), `runTest` (143) — split only with tests in
+  hand; they are the hottest correctness surfaces.
+- **Error-shape inconsistency**: the same handler returns JSON via
+  `writeError` for some failures and plain text via `http.Error` for
+  method/missing-input errors, so a client parsing a 400 body gets
+  different shapes depending on which 400. Also missing from rest-api.md's
+  status table: 401, 405, 413, 429.
+- **Client query-param escaping**: `DeletePolicy`/`ListPolicies` build
+  query strings with Sprintf on raw input (`client.go`) — a name containing
+  `&`/`#`/space produces a malformed request. Use `url.Values`.
+- **Rate limiting behind a sidecar**: with Consul transparent proxy every
+  caller shares one per-client bucket (RemoteAddr is the local Envoy), and
+  the per-client knobs (`ClientIdentifier`, `HeaderName`, per-client
+  rps/burst, MaxClients) are hardcoded in `DefaultConfig()` with no config
+  surface. Real fix: key the limiter on the XFCC/SPIFFE identity and
+  expose the knobs.
+- **`/health/deep` quirks**: always returns HTTP 200 (status body-only) and
+  is the only health path that requires the API key. Both undocumented.
+- **Hardcoded server limits**: `MaxRecvSize` fixed at 16 MB in main.go
+  (evaluate buffers the full body via io.ReadAll), Read/Write/Idle
+  timeouts fixed in `newHTTPServer` — should be config, and reconciled
+  with Envoy timeouts.
+- **Metrics gaps**: no `garmr_policy_reloads_total`; the per-namespace
+  `policies_loaded` gauge goes stale when a namespace disappears on
+  reload.
+- **Swagger UI loads swagger-ui-dist from unpkg.com** — fails closed in an
+  egress-restricted mesh (page just breaks), but should be vendored or
+  dropped.
+- **Docs accuracy sweep (remainder)**: policy-loading.md's fictional
+  "Namespace Resolution" modes (`directory`/`explicit`/`hybrid` — the
+  engine only reads `metadata.namespace`); the `garmr serve` + CUE-config
+  container example; README's operator table missing the set operators and
+  the "Hot reload" phrasing; `GARMR_CONFIG` env var documented but never
+  bound; `./garmr.yaml` vs actual `.garmr.yaml` config name; `garmr test`
+  flag table says `--output` but the flag is `--format`; storage-backends'
+  include/exclude-pattern claim (patterns are never consulted on the
+  filesystem short-circuit path); `docs/demo/NLIT-2026.md` is orphaned.
+- **Per-alloc reload fan-out**: `POST /v1/policies/reload` mutates one
+  process; the Nomad README documents looping over allocs, but a
+  `garmr policy reload --all-allocs` (or documented `nomad alloc exec`
+  wrapper) would remove the sharp edge. Same for `DELETE /v1/policies`
+  diverging replicas until the next reload/rollout.
+- **Audit log shipping**: the audit file (only record of the mesh-verified
+  `principal`) lives on local disk and nothing ships it off-node.
 
 ## Resolved by removal (2026-07-28)
 
@@ -255,8 +341,10 @@ Two rounds are recorded: `feature/refactor` (2026-07-08/09) and
 - **mTLS** (2026-07-09) — decided against: mutual TLS is handled by the
   Consul service mesh (the sidecar terminates client mTLS and forwards the
   verified SPIFFE identity via `auth.identity_header`; see
-  `deploy/helm/garmr/examples/consul-connect/`). The server keeps plain
-  server-side TLS (`tls.cert`/`tls.key`) for non-mesh deployments.
+  `deploy/helm/garmr/examples/consul-connect/`). Update 2026-07-28: the
+  plain server-side TLS listener was removed as well (Phase D) — the
+  server is HTTP-only, and non-mesh deployments front it with a
+  TLS-terminating proxy.
 - **`expr.ref` and `spec.requires`** (2026-07-09) — decided against
   together; both were never implemented. `ref` and `requires` were removed
   from the schemas; `ref` is additionally rejected at policy compile time

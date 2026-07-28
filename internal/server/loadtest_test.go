@@ -528,21 +528,6 @@ func TestLoadTest_Sustained(t *testing.T) {
 	}
 }
 
-// --- Helper: print a final summary table ---
-
-func printStepTable(t *testing.T, steps []stepResult) {
-	t.Helper()
-	t.Logf("")
-	t.Logf("%-12s %-12s %-10s %-10s %-8s %-10s %-10s %-10s %-10s",
-		"TARGET_RPS", "ACTUAL_RPS", "TOTAL", "ERRORS", "ERR%", "P50", "P95", "P99", "MAX")
-	t.Logf("%s", strings.Repeat("-", 102))
-	for _, s := range steps {
-		t.Logf("%-12d %-12.0f %-10d %-10d %-8.2f %-10v %-10v %-10v %-10v",
-			s.TargetRPS, s.ActualRPS, s.TotalReqs, s.Failures,
-			s.ErrorPct, s.P50, s.P95, s.P99, s.Max)
-	}
-}
-
 // --- Quick smoke load test for CI ---
 
 // TestLoadTest_Smoke is a short, low-intensity version of the ramp test

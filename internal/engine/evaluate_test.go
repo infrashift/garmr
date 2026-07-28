@@ -478,8 +478,8 @@ spec: {
 				t.Fatalf("NewEngine: %v", err)
 			}
 			for _, p := range tc.seedPolicies {
-				if err := eng.LoadPolicy(context.Background(), p.name, p.ns, p.rules); err != nil {
-					t.Fatalf("LoadPolicy %s: %v", p.name, err)
+				if loadErr := eng.LoadPolicy(context.Background(), p.name, p.ns, p.rules); loadErr != nil {
+					t.Fatalf("LoadPolicy %s: %v", p.name, loadErr)
 				}
 			}
 			resp, err := eng.Evaluate(context.Background(), tc.req)
@@ -534,8 +534,8 @@ func TestEvaluate_NoMatch_DryRunNotApplicable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
-	if err := eng.LoadPolicy(context.Background(), "dry", "other", dryRunSource); err != nil {
-		t.Fatalf("LoadPolicy: %v", err)
+	if loadErr := eng.LoadPolicy(context.Background(), "dry", "other", dryRunSource); loadErr != nil {
+		t.Fatalf("LoadPolicy: %v", loadErr)
 	}
 
 	resp, err := eng.Evaluate(context.Background(), &EvaluateRequest{
@@ -1033,9 +1033,9 @@ func TestConcurrentCueContextPool_PoolIsolation(t *testing.T) {
 
 	// Aggregate per-policy stats
 	type policyStats struct {
-		passCorrect, passWrong, failCorrect, failWrong int
-		errors                                         int
-		durations                                      []time.Duration
+		passCorrect, failCorrect int
+		errors                   int
+		durations                []time.Duration
 	}
 	perPolicy := make([]policyStats, len(policies))
 

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -264,7 +265,7 @@ func TestReloadPoliciesFromBackend_MockBackend(t *testing.T) {
 
 	// Old policy should be gone (atomic swap)
 	_, err = eng.GetPolicy("default", "old-policy")
-	if err != ErrPolicyNotFound {
+	if !errors.Is(err, ErrPolicyNotFound) {
 		t.Error("expected old-policy to be replaced after reload")
 	}
 

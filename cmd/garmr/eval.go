@@ -151,9 +151,9 @@ func readInput(cmd *cobra.Command) (map[string]interface{}, error) {
 
 	// Check for inline data first
 	if data, _ := cmd.Flags().GetString("data"); data != "" {
-		result, err := parser.Parse([]byte(data), format)
-		if err != nil {
-			return nil, fmt.Errorf("parsing inline data: %w", err)
+		result, parseErr := parser.Parse([]byte(data), format)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing inline data: %w", parseErr)
 		}
 		return result, nil
 	}
@@ -172,18 +172,18 @@ func readInput(cmd *cobra.Command) (map[string]interface{}, error) {
 			return nil, err
 		}
 		// For stdin, use format flag or auto-detect
-		result, err := parser.Parse(data, format)
-		if err != nil {
-			return nil, fmt.Errorf("parsing stdin: %w", err)
+		result, parseErr := parser.Parse(data, format)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing stdin: %w", parseErr)
 		}
 		return result, nil
 	}
 
 	// For files, auto-detect from extension if format is auto
 	if format == input.FormatAuto {
-		result, _, err := parser.ParseFile(inputPath)
-		if err != nil {
-			return nil, fmt.Errorf("parsing file: %w", err)
+		result, _, parseErr := parser.ParseFile(inputPath)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing file: %w", parseErr)
 		}
 		return result, nil
 	}

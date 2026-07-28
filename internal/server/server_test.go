@@ -118,6 +118,7 @@ func TestHandleEvaluate_Deny(t *testing.T) {
 	resp := postJSON(t, ts.URL+"/v1/evaluate", map[string]any{
 		"input": map[string]any{"env": "dev"},
 	})
+	defer resp.Body.Close()
 
 	result := decodeJSON(t, resp)
 	if result["decision"] != "deny" {
@@ -249,6 +250,7 @@ func TestHandleValidate_Invalid(t *testing.T) {
 	resp := postJSON(t, ts.URL+"/v1/validate", map[string]any{
 		"policy": "!!! invalid CUE !!!",
 	})
+	defer resp.Body.Close()
 
 	result := decodeJSON(t, resp)
 	if result["valid"] != false {

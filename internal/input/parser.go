@@ -135,7 +135,7 @@ func (p *Parser) DetectFormatFromContentType(contentType string) Format {
 func (p *Parser) parseJSON(data []byte) (map[string]any, error) {
 	var result map[string]any
 	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("%w: invalid JSON: %v", ErrParseFailure, err)
+		return nil, fmt.Errorf("%w: invalid JSON: %w", ErrParseFailure, err)
 	}
 	return result, nil
 }
@@ -144,7 +144,7 @@ func (p *Parser) parseJSON(data []byte) (map[string]any, error) {
 func (p *Parser) parseYAML(data []byte) (map[string]any, error) {
 	var result map[string]any
 	if err := yaml.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("%w: invalid YAML: %v", ErrParseFailure, err)
+		return nil, fmt.Errorf("%w: invalid YAML: %w", ErrParseFailure, err)
 	}
 	return result, nil
 }

@@ -96,13 +96,13 @@ func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string)
 func (e *Engine) compilePolicySource(r *policyReplica, name, namespace, source string) (*CompiledPolicy, error) {
 	val := r.ctx.CompileString(source)
 	if val.Err() != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidPolicy, val.Err())
+		return nil, fmt.Errorf("%w: %w", ErrInvalidPolicy, val.Err())
 	}
 
 	// Unify with schema to validate
 	unified := val.Unify(r.schema.LookupPath(cue.ParsePath("#Policy")))
 	if unified.Err() != nil {
-		return nil, fmt.Errorf("%w: schema validation failed: %v", ErrInvalidPolicy, unified.Err())
+		return nil, fmt.Errorf("%w: schema validation failed: %w", ErrInvalidPolicy, unified.Err())
 	}
 
 	compiled, err := e.compilePolicy(unified, name, namespace)

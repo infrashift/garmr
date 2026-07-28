@@ -328,7 +328,7 @@ func (e *Engine) loadInstancesIntoReplica(args []string, dir string, r *policyRe
 				if !quiet {
 					e.observability().Metrics().RecordPolicyLoadError(name, ns, "schema")
 				}
-				return nil, fmt.Errorf("policy %s/%s in %s failed schema validation: %v", ns, name, dir, unified.Err())
+				return nil, fmt.Errorf("policy %s/%s in %s failed schema validation: %w", ns, name, dir, unified.Err())
 			}
 
 			compiled, err := e.compilePolicy(unified, name, ns)
@@ -386,10 +386,10 @@ func (e *Engine) LoadPoliciesFromFile(ctx context.Context, path string) ([]strin
 	var keys []string
 	err = e.set.mutateAll(func(i int, r *policyReplica) (func(), error) {
 		pending := make(map[string]*CompiledPolicy)
-		loaded, err := e.loadInstancesIntoReplica(
+		loaded, loadErr := e.loadInstancesIntoReplica(
 			[]string{"./" + filepath.Base(abs)}, filepath.Dir(abs), r, i != 0, pending)
-		if err != nil {
-			return nil, err
+		if loadErr != nil {
+			return nil, loadErr
 		}
 		if i == 0 {
 			keys = loaded

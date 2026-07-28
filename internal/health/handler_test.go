@@ -12,6 +12,7 @@ func TestNewHandler(t *testing.T) {
 	h := NewHandler("1.0.0")
 	if h == nil {
 		t.Fatal("NewHandler returned nil")
+		return
 	}
 	if h.version != "1.0.0" {
 		t.Errorf("expected version 1.0.0, got %s", h.version)

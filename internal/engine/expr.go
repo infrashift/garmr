@@ -542,14 +542,14 @@ func (e *Engine) resolveValue(ctx context.Context, val cue.Value, input cue.Valu
 		argsVal := funcVal.LookupPath(cue.ParsePath("args"))
 		var args []any
 		if argsVal.Exists() {
-			iter, err := argsVal.List()
-			if err != nil {
-				return nil, fmt.Errorf("func 'args' must be a list: %w", err)
+			iter, listErr := argsVal.List()
+			if listErr != nil {
+				return nil, fmt.Errorf("func 'args' must be a list: %w", listErr)
 			}
 			for iter.Next() {
-				resolved, err := e.resolveValue(ctx, iter.Value(), input)
-				if err != nil {
-					return nil, fmt.Errorf("func %q argument: %w", name, err)
+				resolved, resolveErr := e.resolveValue(ctx, iter.Value(), input)
+				if resolveErr != nil {
+					return nil, fmt.Errorf("func %q argument: %w", name, resolveErr)
 				}
 				args = append(args, resolved)
 			}

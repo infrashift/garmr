@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -102,7 +103,8 @@ func TestRecoveryMiddleware_AbortHandlerRepanics(t *testing.T) {
 
 	defer func() {
 		rec := recover()
-		if rec != http.ErrAbortHandler {
+		err, ok := rec.(error)
+		if !ok || !errors.Is(err, http.ErrAbortHandler) {
 			t.Fatalf("expected ErrAbortHandler to be re-raised, got %v", rec)
 		}
 	}()

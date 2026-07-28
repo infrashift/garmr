@@ -116,9 +116,19 @@ Recorded, deliberately not done before the deploy:
   `TestSortRules_Orders` pinning the ordering contract for all four
   evaluation orders (written against the old implementation first, then the
   refactor verified against it).
-- **Oversized functions**: `Evaluate` (219 lines), `evaluateExpression`
-  (124), `handleEvaluate` (113), `runTest` (143) — split only with tests in
-  hand; they are the hottest correctness surfaces.
+- ~~**Oversized functions**~~ — done (2026-07-28, follow-up commit).
+  `Evaluate` 219→110 lines (outcome merging extracted into an
+  `evalAccumulator` with engineFailure/fold/noteFailFast/finish phases,
+  plus `minPolicyTimeout`); `evaluateExpression` 124→42 (a pure dispatcher
+  over extracted `evaluateAll`/`evaluateAny`/`evaluateNot`/
+  `evaluatePathPresence`/`evaluateRawConstraint`); `handleEvaluate` 113→46
+  (pure `parseEvaluateRequest` + `auditDecision`); `runTest` 143→45
+  (`collectTestFiles`/`runTestSuites`/`filterTestCases`). runTest was at
+  ~4% coverage, so nine tests were written against the old implementation
+  first — and immediately caught a real bug: `garmr test <dir>` without
+  --recursive SkipDir'd the walk root and always reported "no test files
+  found"; fixed in the split. Everything else was refactored under the
+  existing engine/server nets plus a -race pass.
 - **Error-shape inconsistency**: the same handler returns JSON via
   `writeError` for some failures and plain text via `http.Error` for
   method/missing-input errors, so a client parsing a 400 body gets

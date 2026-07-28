@@ -629,27 +629,41 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Detect input format from Content-Type header
-	parser := input.NewParser()
-	contentType := r.Header.Get("Content-Type")
-	format := parser.DetectFormatFromContentType(contentType)
-
-	// Parse the request body based on format
-	var req struct {
-		Input         map[string]interface{} `json:"input" yaml:"input"`
-		Namespace     string                 `json:"namespace" yaml:"namespace"`
-		Policies      []string               `json:"policies" yaml:"policies"`
-		IncludePassed bool                   `json:"include_passed" yaml:"include_passed"`
-	}
-
-	// Parse based on detected format
-	parsed, err := parser.Parse(body, format)
+	engineReq, err := parseEvaluateRequest(body, r.Header.Get("Content-Type"))
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid request body", err)
 		return
 	}
+	if engineReq.Input == nil {
+		http.Error(w, "input is required", http.StatusBadRequest)
+		return
+	}
 
-	// Map parsed data to request struct
+	result, err := s.engine.Evaluate(r.Context(), engineReq)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Evaluation failed", err)
+		return
+	}
+
+	s.auditDecision(r, requestID, engineReq, result, startTime)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Request-Id", requestID)
+	_ = json.NewEncoder(w).Encode(evaluateResponseBody(result, requestID))
+}
+
+// parseEvaluateRequest decodes an evaluate request body (JSON or YAML per
+// the Content-Type) into an engine request. Kept pure so it can be tested
+// without a ResponseWriter. A missing input is NOT an error here — the
+// handler reports it with its own status/message.
+func parseEvaluateRequest(body []byte, contentType string) (*engine.EvaluateRequest, error) {
+	parser := input.NewParser()
+	parsed, err := parser.Parse(body, parser.DetectFormatFromContentType(contentType))
+	if err != nil {
+		return nil, err
+	}
+
+	req := &engine.EvaluateRequest{}
 	if inputData, ok := parsed["input"].(map[string]interface{}); ok {
 		req.Input = inputData
 	}
@@ -664,60 +678,40 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if includePassed, ok := parsed["include_passed"].(bool); ok {
-		req.IncludePassed = includePassed
+		req.Options.IncludePassed = includePassed
 	}
+	return req, nil
+}
 
-	if req.Input == nil {
-		http.Error(w, "input is required", http.StatusBadRequest)
+// auditDecision writes the decision audit record for one evaluation.
+func (s *Server) auditDecision(r *http.Request, requestID string, req *engine.EvaluateRequest, result *engine.EvaluateResponse, startTime time.Time) {
+	if s.auditLogger == nil {
 		return
 	}
 
-	engineReq := &engine.EvaluateRequest{
-		Input:     req.Input,
-		Namespace: req.Namespace,
-		Policies:  req.Policies,
-		Options: engine.EvaluateOptions{
-			IncludePassed: req.IncludePassed,
-		},
-	}
-
-	result, err := s.engine.Evaluate(r.Context(), engineReq)
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "Evaluation failed", err)
-		return
-	}
-
-	// Count violations
 	violations := 0
-	for _, r := range result.Results {
-		if !r.Passed {
+	for _, res := range result.Results {
+		if !res.Passed {
 			violations++
 		}
 	}
 
-	// Write audit log
-	if s.auditLogger != nil {
-		s.auditLogger.Info("decision",
-			"request_id", requestID,
-			"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
-			"decision", decisionToString(result.Decision),
-			"namespace", req.Namespace,
-			"policies_evaluated", result.Metrics.PoliciesEvaluated,
-			"rules_evaluated", result.Metrics.RulesEvaluated,
-			"violations", violations,
-			"duration_ms", time.Since(startTime).Milliseconds(),
-			"source_ip", r.RemoteAddr,
-			"principal", PrincipalFromContext(r.Context()),
-			"trace_id", observability.TraceIDFromContext(r.Context()),
-			"user_agent", r.UserAgent(),
-			"input_kind", req.Input["kind"],
-			"input_name", engine.NestedString(req.Input, "metadata", "name"),
-		)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Request-Id", requestID)
-	_ = json.NewEncoder(w).Encode(evaluateResponseBody(result, requestID))
+	s.auditLogger.Info("decision",
+		"request_id", requestID,
+		"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
+		"decision", decisionToString(result.Decision),
+		"namespace", req.Namespace,
+		"policies_evaluated", result.Metrics.PoliciesEvaluated,
+		"rules_evaluated", result.Metrics.RulesEvaluated,
+		"violations", violations,
+		"duration_ms", time.Since(startTime).Milliseconds(),
+		"source_ip", r.RemoteAddr,
+		"principal", PrincipalFromContext(r.Context()),
+		"trace_id", observability.TraceIDFromContext(r.Context()),
+		"user_agent", r.UserAgent(),
+		"input_kind", req.Input["kind"],
+		"input_name", engine.NestedString(req.Input, "metadata", "name"),
+	)
 }
 
 // evaluateResponseBody converts an engine response into the JSON body shape.

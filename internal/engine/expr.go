@@ -9,113 +9,125 @@ import (
 )
 
 // evaluateExpression evaluates a CUE expression against input.
+// evaluateExpression dispatches on the single structured operator an
+// expression declares, falling back to treating the expression as a raw CUE
+// constraint when none is present.
 func (e *Engine) evaluateExpression(ctx context.Context, expr cue.Value, input cue.Value) (bool, map[string]any, string) {
-	bindings := make(map[string]any)
-
-	// Check for 'forEach' (array iteration)
 	if forEachVal := expr.LookupPath(cue.ParsePath("forEach")); forEachVal.Exists() {
 		return e.evaluateForEach(ctx, forEachVal, input)
 	}
-
-	// Check for 'all' (AND)
 	if allVal := expr.LookupPath(cue.ParsePath("all")); allVal.Exists() {
-		iter, _ := allVal.List()
-		for iter.Next() {
-			passed, b, msg := e.evaluateExpression(ctx, iter.Value(), input)
-			for k, v := range b {
-				bindings[k] = v
-			}
-			if !passed {
-				return false, bindings, msg
-			}
-		}
-		return true, bindings, ""
+		return e.evaluateAll(ctx, allVal, input)
 	}
-
-	// Check for 'any' (OR)
 	if anyVal := expr.LookupPath(cue.ParsePath("any")); anyVal.Exists() {
-		iter, _ := anyVal.List()
-		var lastMsg string
-		for iter.Next() {
-			passed, b, msg := e.evaluateExpression(ctx, iter.Value(), input)
-			if passed {
-				for k, v := range b {
-					bindings[k] = v
-				}
-				return true, bindings, ""
-			}
-			lastMsg = msg
-		}
-		return false, bindings, lastMsg
+		return e.evaluateAny(ctx, anyVal, input)
 	}
-
-	// Check for 'not'
 	if notVal := expr.LookupPath(cue.ParsePath("not")); notVal.Exists() {
-		passed, b, _ := e.evaluateExpression(ctx, notVal, input)
-		for k, v := range b {
-			bindings[k] = v
-		}
-		return !passed, bindings, ""
+		return e.evaluateNot(ctx, notVal, input)
 	}
-
-	// Check for 'exists'
 	if existsVal := expr.LookupPath(cue.ParsePath("exists")); existsVal.Exists() {
-		path, _ := existsVal.String()
-		fieldVal := input.LookupPath(cue.ParsePath(path))
-		exists := fieldVal.Exists() && fieldVal.Kind() != cue.NullKind
-		if !exists {
-			return false, bindings, fmt.Sprintf("field '%s' does not exist", path)
-		}
-		return true, bindings, ""
+		return evaluatePathPresence(existsVal, input, true)
 	}
-
-	// Check for 'absent'
 	if absentVal := expr.LookupPath(cue.ParsePath("absent")); absentVal.Exists() {
-		path, _ := absentVal.String()
-		fieldVal := input.LookupPath(cue.ParsePath(path))
-		absent := !fieldVal.Exists() || fieldVal.Kind() == cue.NullKind
-		if !absent {
-			return false, bindings, fmt.Sprintf("field '%s' should not exist", path)
-		}
-		return true, bindings, ""
+		return evaluatePathPresence(absentVal, input, false)
 	}
-
-	// Check for 'contains' (collection contains check)
 	if containsVal := expr.LookupPath(cue.ParsePath("contains")); containsVal.Exists() {
 		return e.evaluateContainsExpr(containsVal, input)
 	}
-
-	// Check for 'match'
 	if matchVal := expr.LookupPath(cue.ParsePath("match")); matchVal.Exists() {
 		return e.evaluateMatch(matchVal, input)
 	}
-
-	// Check for 'compare'
 	if compareVal := expr.LookupPath(cue.ParsePath("compare")); compareVal.Exists() {
 		return e.evaluateCompare(ctx, compareVal, input)
 	}
-
-	// Check for 'func' (builtin function call)
 	if funcVal := expr.LookupPath(cue.ParsePath("func")); funcVal.Exists() {
 		return e.evaluateFunc(ctx, funcVal, input)
 	}
 
 	// 'ref' is not supported (removed from the schema). Top-level uses are
 	// rejected at compile time; this backstop catches refs nested inside
-	// all/any/not, which would otherwise silently pass through the default
-	// unify branch below.
+	// all/any/not, which would otherwise silently pass through the raw
+	// constraint fallback.
 	if refVal := expr.LookupPath(cue.ParsePath("ref")); refVal.Exists() {
-		return false, bindings, "expr 'ref' is not supported"
+		return false, map[string]any{}, "expr 'ref' is not supported"
 	}
 
-	// Default: the expression is a raw CUE constraint over input fields, e.g.
-	// `expr: {spec: replicas: <=3}`. Unify it with the input and check for
-	// errors.
-	//
-	// This branch is why a typo'd operator used to pass silently: the input is
-	// encoded from a map[string]any, so it is an OPEN struct, and unifying
-	// `{mach: {...}}` (a misspelling of `match`) simply added a new field and
-	// succeeded. Guard the branch before unifying — see exprConstrainsInput.
+	return e.evaluateRawConstraint(expr, input)
+}
+
+// evaluateAll ANDs a list of sub-expressions, short-circuiting on the first
+// failure. Bindings accumulate across every sub-expression evaluated.
+func (e *Engine) evaluateAll(ctx context.Context, listVal cue.Value, input cue.Value) (bool, map[string]any, string) {
+	bindings := make(map[string]any)
+	iter, _ := listVal.List()
+	for iter.Next() {
+		passed, b, msg := e.evaluateExpression(ctx, iter.Value(), input)
+		for k, v := range b {
+			bindings[k] = v
+		}
+		if !passed {
+			return false, bindings, msg
+		}
+	}
+	return true, bindings, ""
+}
+
+// evaluateAny ORs a list of sub-expressions, keeping only the winning
+// branch's bindings; on failure the last branch's message is reported.
+func (e *Engine) evaluateAny(ctx context.Context, listVal cue.Value, input cue.Value) (bool, map[string]any, string) {
+	bindings := make(map[string]any)
+	iter, _ := listVal.List()
+	var lastMsg string
+	for iter.Next() {
+		passed, b, msg := e.evaluateExpression(ctx, iter.Value(), input)
+		if passed {
+			for k, v := range b {
+				bindings[k] = v
+			}
+			return true, bindings, ""
+		}
+		lastMsg = msg
+	}
+	return false, bindings, lastMsg
+}
+
+// evaluateNot inverts a sub-expression, preserving its bindings.
+func (e *Engine) evaluateNot(ctx context.Context, notVal cue.Value, input cue.Value) (bool, map[string]any, string) {
+	passed, b, _ := e.evaluateExpression(ctx, notVal, input)
+	bindings := make(map[string]any)
+	for k, v := range b {
+		bindings[k] = v
+	}
+	return !passed, bindings, ""
+}
+
+// evaluatePathPresence handles the string-form 'exists' (wantPresent) and
+// 'absent' (!wantPresent) operators.
+func evaluatePathPresence(pathVal cue.Value, input cue.Value, wantPresent bool) (bool, map[string]any, string) {
+	bindings := make(map[string]any)
+	path, _ := pathVal.String()
+	fieldVal := input.LookupPath(cue.ParsePath(path))
+	present := fieldVal.Exists() && fieldVal.Kind() != cue.NullKind
+
+	if wantPresent && !present {
+		return false, bindings, fmt.Sprintf("field '%s' does not exist", path)
+	}
+	if !wantPresent && present {
+		return false, bindings, fmt.Sprintf("field '%s' should not exist", path)
+	}
+	return true, bindings, ""
+}
+
+// evaluateRawConstraint unifies the expression with the input as a plain CUE
+// constraint, e.g. `expr: {spec: replicas: <=3}`.
+//
+// This branch is why a typo'd operator used to pass silently: the input is
+// encoded from a map[string]any, so it is an OPEN struct, and unifying
+// `{mach: {...}}` (a misspelling of `match`) simply added a new field and
+// succeeded. Guard the branch before unifying — see exprConstrainsInput.
+func (e *Engine) evaluateRawConstraint(expr cue.Value, input cue.Value) (bool, map[string]any, string) {
+	bindings := make(map[string]any)
+
 	if reason := exprConstrainsInput(expr, input); reason != "" {
 		return false, bindings, reason
 	}

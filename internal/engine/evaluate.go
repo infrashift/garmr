@@ -69,16 +69,9 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 		return resp, nil
 	}
 
-	// Timeout enforcement: find the minimum timeout across all policies
-	minTimeout := time.Duration(0)
-	for _, p := range policies {
-		if p.Evaluation.Timeout > 0 {
-			if minTimeout == 0 || p.Evaluation.Timeout < minTimeout {
-				minTimeout = p.Evaluation.Timeout
-			}
-		}
-	}
-	if minTimeout > 0 {
+	// Timeout enforcement: the minimum timeout across all policies bounds
+	// the whole evaluation.
+	if minTimeout := minPolicyTimeout(policies); minTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, minTimeout)
 		defer cancel()
@@ -90,15 +83,11 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 	for _, p := range policies {
 		totalRulesInScope += e.countRulesInScope(p, req)
 	}
-	rulesEvaluated := 0
-	resp.Summary.TotalRules = totalRulesInScope
-	// Initialise eagerly so a response with zero results still serialises
-	// empty maps rather than null.
-	resp.Summary.BySeverity = make(map[Severity]SeverityCounts)
-	resp.Summary.ByCategory = make(map[string]CategoryCounts)
-	resp.Summary.ByNamespace = make(map[string]NamespaceCounts)
+	acc := newEvalAccumulator(resp, totalRulesInScope)
 
-	// Evaluate each policy
+	// Evaluate each policy, folding every outcome into the response. Each
+	// fold reports whether the evaluation must stop (engine failure,
+	// timeout, or fail-fast).
 	for _, policy := range policies {
 		outcome, err := e.evaluatePolicy(ctx, policy, inputVal, req)
 		if err != nil {
@@ -110,114 +99,15 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 				zap.String("namespace", policy.Namespace),
 				zap.Error(err),
 			)
-			resp.Decision = DecisionDeny
-			resp.Results = append(resp.Results, buildEvaluationErrorResult(policy, err))
+			acc.engineFailure(policy, err)
 			break
 		}
-
-		// A deadline that expires partway through a policy means some rules
-		// never ran. Deny unconditionally: unlike a rule violation this is an
-		// engine failure, so `enforcement.action: "warn"` and dry-run must not
-		// be able to downgrade it.
-		if outcome.timedOut {
-			resp.Decision = DecisionDeny
-			resp.Results = append(resp.Results, buildTimeoutResult(policy, ctx.Err()))
-			resp.EvaluationMode.TotalRulesInScope = totalRulesInScope
-			resp.EvaluationMode.RulesEvaluated = rulesEvaluated
-			resp.EvaluationMode.RulesSkipped = totalRulesInScope - rulesEvaluated
-			break
-		}
-
-		results := outcome.results
-		failFastTriggered := outcome.failFast
-
-		rulesEvaluated += len(results)
-		resp.Metrics.RulesEvaluated += len(results)
-
-		// Determine dry run mode
-		isDryRun := false
-		if req.Options.DryRunOverride != nil {
-			isDryRun = *req.Options.DryRunOverride
-		} else {
-			isDryRun = policy.Enforcement.DryRun
-		}
-
-		// Compute this policy's effective decision in isolation, then merge.
-		// A dry-run policy is capped at Warn but must never lower a Deny
-		// that another (enforcing) policy has already produced.
-		policyDecision := DecisionAllow
-
-		for _, result := range results {
-			e.recordSummary(&resp.Summary, policy, result)
-
-			if !result.Passed {
-				// Record violation metric
-				e.observability().Metrics().RecordViolation(policy.Name, policy.Namespace, result.RuleID, string(result.Severity))
-
-				// Update decision based on enforcement action
-				switch policy.Enforcement.Action {
-				case "deny":
-					policyDecision = maxDecision(policyDecision, DecisionDeny)
-				case "warn":
-					policyDecision = maxDecision(policyDecision, DecisionWarn)
-				}
-
-				if isDryRun {
-					result.Message = "[DRY RUN] " + result.Message
-				}
-			}
-
-			// Include result based on options
-			if !result.Passed || req.Options.IncludePassed {
-				resp.Results = append(resp.Results, result)
-			}
-		}
-
-		// Dry run: this policy's deny becomes a warn
-		if isDryRun && policyDecision == DecisionDeny {
-			policyDecision = DecisionWarn
-		}
-		resp.Decision = maxDecision(resp.Decision, policyDecision)
-
-		// Set dry run mode info
-		if isDryRun {
-			resp.EvaluationMode.DryRun = true
-		}
-
-		// Handle fail-fast termination
-		if failFastTriggered {
-			// Find the last failed result
-			var lastFailed *RuleResult
-			for i := len(results) - 1; i >= 0; i-- {
-				if !results[i].Passed {
-					r := results[i]
-					r.CausedTermination = true
-					lastFailed = &r
-					break
-				}
-			}
-
-			resp.TerminatedEarly = true
-			resp.TerminationRule = lastFailed
-			resp.EvaluationMode.FailFast = true
-			resp.EvaluationMode.ShortCircuited = true
-			resp.EvaluationMode.TotalRulesInScope = totalRulesInScope
-			resp.EvaluationMode.RulesEvaluated = rulesEvaluated
-			resp.EvaluationMode.RulesSkipped = totalRulesInScope - rulesEvaluated
+		if stop := acc.fold(e, policy, outcome, req, ctx.Err()); stop {
 			break
 		}
 	}
 
-	resp.Summary.Skipped = totalRulesInScope - rulesEvaluated
-
-	// Always report the scope counts, not only when something terminated
-	// early. A caller cannot tell a full evaluation from a partial one
-	// otherwise, which is the whole point of exposing evaluation_mode.
-	if resp.EvaluationMode.TotalRulesInScope == 0 {
-		resp.EvaluationMode.TotalRulesInScope = totalRulesInScope
-		resp.EvaluationMode.RulesEvaluated = rulesEvaluated
-		resp.EvaluationMode.RulesSkipped = totalRulesInScope - rulesEvaluated
-	}
+	acc.finish()
 
 	resp.Metrics.EvaluationTimeNs = time.Since(start).Nanoseconds()
 
@@ -231,6 +121,147 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 	)
 
 	return resp, nil
+}
+
+// minPolicyTimeout returns the smallest configured per-policy timeout, or 0
+// when no policy sets one.
+func minPolicyTimeout(policies []*CompiledPolicy) time.Duration {
+	min := time.Duration(0)
+	for _, p := range policies {
+		if p.Evaluation.Timeout > 0 && (min == 0 || p.Evaluation.Timeout < min) {
+			min = p.Evaluation.Timeout
+		}
+	}
+	return min
+}
+
+// evalAccumulator folds per-policy outcomes into an EvaluateResponse,
+// tracking the scope counters that make partial evaluations visible.
+type evalAccumulator struct {
+	resp              *EvaluateResponse
+	totalRulesInScope int
+	rulesEvaluated    int
+}
+
+func newEvalAccumulator(resp *EvaluateResponse, totalRulesInScope int) *evalAccumulator {
+	resp.Summary.TotalRules = totalRulesInScope
+	// Initialise eagerly so a response with zero results still serialises
+	// empty maps rather than null.
+	resp.Summary.BySeverity = make(map[Severity]SeverityCounts)
+	resp.Summary.ByCategory = make(map[string]CategoryCounts)
+	resp.Summary.ByNamespace = make(map[string]NamespaceCounts)
+	return &evalAccumulator{resp: resp, totalRulesInScope: totalRulesInScope}
+}
+
+// engineFailure records a policy that could not be evaluated at all. Deny
+// unconditionally — fail closed.
+func (a *evalAccumulator) engineFailure(policy *CompiledPolicy, err error) {
+	a.resp.Decision = DecisionDeny
+	a.resp.Results = append(a.resp.Results, buildEvaluationErrorResult(policy, err))
+}
+
+// fold merges one policy's outcome and reports whether evaluation must stop.
+func (a *evalAccumulator) fold(e *Engine, policy *CompiledPolicy, outcome policyOutcome, req *EvaluateRequest, ctxErr error) (stop bool) {
+	// A deadline that expires partway through a policy means some rules
+	// never ran. Deny unconditionally: unlike a rule violation this is an
+	// engine failure, so `enforcement.action: "warn"` and dry-run must not
+	// be able to downgrade it.
+	if outcome.timedOut {
+		a.resp.Decision = DecisionDeny
+		a.resp.Results = append(a.resp.Results, buildTimeoutResult(policy, ctxErr))
+		a.setScopeCounts()
+		return true
+	}
+
+	results := outcome.results
+	a.rulesEvaluated += len(results)
+	a.resp.Metrics.RulesEvaluated += len(results)
+
+	// Determine dry run mode
+	isDryRun := policy.Enforcement.DryRun
+	if req.Options.DryRunOverride != nil {
+		isDryRun = *req.Options.DryRunOverride
+	}
+
+	// Compute this policy's effective decision in isolation, then merge.
+	// A dry-run policy is capped at Warn but must never lower a Deny
+	// that another (enforcing) policy has already produced.
+	policyDecision := DecisionAllow
+
+	for _, result := range results {
+		e.recordSummary(&a.resp.Summary, policy, result)
+
+		if !result.Passed {
+			e.observability().Metrics().RecordViolation(policy.Name, policy.Namespace, result.RuleID, string(result.Severity))
+
+			switch policy.Enforcement.Action {
+			case "deny":
+				policyDecision = maxDecision(policyDecision, DecisionDeny)
+			case "warn":
+				policyDecision = maxDecision(policyDecision, DecisionWarn)
+			}
+
+			if isDryRun {
+				result.Message = "[DRY RUN] " + result.Message
+			}
+		}
+
+		if !result.Passed || req.Options.IncludePassed {
+			a.resp.Results = append(a.resp.Results, result)
+		}
+	}
+
+	// Dry run: this policy's deny becomes a warn
+	if isDryRun && policyDecision == DecisionDeny {
+		policyDecision = DecisionWarn
+	}
+	a.resp.Decision = maxDecision(a.resp.Decision, policyDecision)
+	if isDryRun {
+		a.resp.EvaluationMode.DryRun = true
+	}
+
+	if outcome.failFast {
+		a.noteFailFast(results)
+		return true
+	}
+	return false
+}
+
+// noteFailFast marks the response as short-circuited by the last failing
+// result of the terminating policy.
+func (a *evalAccumulator) noteFailFast(results []RuleResult) {
+	var lastFailed *RuleResult
+	for i := len(results) - 1; i >= 0; i-- {
+		if !results[i].Passed {
+			r := results[i]
+			r.CausedTermination = true
+			lastFailed = &r
+			break
+		}
+	}
+
+	a.resp.TerminatedEarly = true
+	a.resp.TerminationRule = lastFailed
+	a.resp.EvaluationMode.FailFast = true
+	a.resp.EvaluationMode.ShortCircuited = true
+	a.setScopeCounts()
+}
+
+// setScopeCounts publishes the in-scope/evaluated/skipped counters.
+func (a *evalAccumulator) setScopeCounts() {
+	a.resp.EvaluationMode.TotalRulesInScope = a.totalRulesInScope
+	a.resp.EvaluationMode.RulesEvaluated = a.rulesEvaluated
+	a.resp.EvaluationMode.RulesSkipped = a.totalRulesInScope - a.rulesEvaluated
+}
+
+// finish fills the summary skip count and, when nothing terminated early,
+// the scope counters. Always reporting them is the point of evaluation_mode:
+// a caller cannot tell a full evaluation from a partial one otherwise.
+func (a *evalAccumulator) finish() {
+	a.resp.Summary.Skipped = a.totalRulesInScope - a.rulesEvaluated
+	if a.resp.EvaluationMode.TotalRulesInScope == 0 {
+		a.setScopeCounts()
+	}
 }
 
 // findApplicablePolicies returns policies from the replica that match the request.

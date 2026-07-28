@@ -452,7 +452,11 @@
           "400": {
             "description": "No policy source configured",
             "content": {
-              "text/plain": {}
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
             }
           },
           "500": {

@@ -200,7 +200,7 @@ func (l *Limiter) Allow(clientID string) *Result {
 			Allowed:   false,
 			Limit:     l.config.RequestsPerSecond,
 			Remaining: 0,
-			RetryIn:   time.Second / time.Duration(l.config.RequestsPerSecond),
+			RetryIn:   retryIn(l.config.RequestsPerSecond),
 		}
 	}
 
@@ -212,7 +212,7 @@ func (l *Limiter) Allow(clientID string) *Result {
 				Allowed:   false,
 				Limit:     l.config.ClientRequestsPerSecond,
 				Remaining: 0,
-				RetryIn:   time.Second / time.Duration(l.config.ClientRequestsPerSecond),
+				RetryIn:   retryIn(l.config.ClientRequestsPerSecond),
 			}
 		}
 	}
@@ -221,6 +221,17 @@ func (l *Limiter) Allow(clientID string) *Result {
 		Allowed: true,
 		Limit:   l.config.RequestsPerSecond,
 	}
+}
+
+// retryIn converts a rate into the wait before the next token. The naive
+// `time.Second / time.Duration(rps)` truncated fractional rates to zero and
+// panicked with a divide-by-zero, so any limiter configured below 1 rps
+// turned every rejected request into a 500 instead of a 429.
+func retryIn(rps float64) time.Duration {
+	if rps <= 0 {
+		return 0
+	}
+	return time.Duration(float64(time.Second) / rps)
 }
 
 func (l *Limiter) getOrCreateClient(clientID string) *clientLimiter {
@@ -321,7 +332,10 @@ func (l *Limiter) Middleware(next http.Handler) http.Handler {
 			if result.RetryIn > 0 {
 				w.Header().Set("Retry-After", formatDuration(result.RetryIn))
 			}
-			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			// Same {"error": ...} JSON shape as every other error response.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate limit exceeded"}` + "\n"))
 			return
 		}
 

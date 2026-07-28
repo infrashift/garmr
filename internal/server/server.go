@@ -549,6 +549,28 @@ func (s *Server) writeError(w http.ResponseWriter, status int, userMsg string, e
 	})
 }
 
+// isBodyTooLarge reports whether err came from http.MaxBytesReader.
+func isBodyTooLarge(err error) bool {
+	var maxBytesErr *http.MaxBytesError
+	return errors.As(err, &maxBytesErr)
+}
+
+// bodyErrorStatus maps a request-body read failure to its status code: an
+// over-limit body is 413, anything else is a plain bad request.
+func bodyErrorStatus(err error) int {
+	if isBodyTooLarge(err) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
+}
+
+func bodyErrorMessage(err error) string {
+	if isBodyTooLarge(err) {
+		return "Request body too large"
+	}
+	return "Failed to read request body"
+}
+
 // HTTP Handlers
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -607,7 +629,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed", nil)
 		return
 	}
 
@@ -625,7 +647,7 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "Failed to read request body", err)
+		s.writeError(w, bodyErrorStatus(err), bodyErrorMessage(err), err)
 		return
 	}
 
@@ -635,7 +657,7 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if engineReq.Input == nil {
-		http.Error(w, "input is required", http.StatusBadRequest)
+		s.writeError(w, http.StatusBadRequest, "input is required", nil)
 		return
 	}
 
@@ -781,7 +803,7 @@ func evaluateResponseBody(result *engine.EvaluateResponse, requestID string) map
 
 func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed", nil)
 		return
 	}
 
@@ -803,6 +825,10 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if isBodyTooLarge(err) {
+			s.writeError(w, http.StatusRequestEntityTooLarge, "Request body too large", err)
+			return
+		}
 		s.writeError(w, http.StatusBadRequest, "Invalid JSON in request body", err)
 		return
 	}
@@ -895,13 +921,13 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(resp)
 
 	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed", nil)
 	}
 }
 
 func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed", nil)
 		return
 	}
 
@@ -911,7 +937,7 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.storageBackend == nil {
-		http.Error(w, "No policy source configured", http.StatusBadRequest)
+		s.writeError(w, http.StatusBadRequest, "No policy source configured", nil)
 		return
 	}
 

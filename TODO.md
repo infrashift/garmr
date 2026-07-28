@@ -129,11 +129,20 @@ Recorded, deliberately not done before the deploy:
   --recursive SkipDir'd the walk root and always reported "no test files
   found"; fixed in the split. Everything else was refactored under the
   existing engine/server nets plus a -race pass.
-- **Error-shape inconsistency**: the same handler returns JSON via
-  `writeError` for some failures and plain text via `http.Error` for
-  method/missing-input errors, so a client parsing a 400 body gets
-  different shapes depending on which 400. Also missing from rest-api.md's
-  status table: 401, 405, 413, 429.
+- ~~**Error-shape inconsistency**~~ — done (2026-07-28, follow-up commit).
+  Every error response now carries the same {"error": ...} JSON shape: the
+  six plain-text `http.Error` sites (four 405s, missing-input 400,
+  no-policy-source 400) go through `writeError`, the rate limiter's 429
+  emits JSON, and an over-limit body is now correctly 413 (was a generic
+  400) on both /v1/evaluate and /v1/validate.
+  `TestErrorResponses_AllJSON` pins the contract across eleven error
+  paths. Writing that test exposed a real bug: RetryIn was computed as
+  `time.Second / time.Duration(rps)`, which truncates any fractional rate
+  to zero and panics with divide-by-zero — every rejected request under a
+  sub-1-rps limiter became a 500 instead of a 429. Fixed (`retryIn()` in
+  the limiter) and pinned. rest-api.md's status table now lists
+  401/405/413/429 and the honest one-field error shape; openapi.json's
+  reload 400 is JSON.
 - **Client query-param escaping**: `DeletePolicy`/`ListPolicies` build
   query strings with Sprintf on raw input (`client.go`) — a name containing
   `&`/`#`/space produces a malformed request. Use `url.Values`.

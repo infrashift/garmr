@@ -232,6 +232,29 @@ func TestCleanupExpired(t *testing.T) {
 	}
 }
 
+// TestAllow_FractionalRPSDoesNotPanic pins the divide-by-zero fix: a rate
+// below 1 rps truncated to time.Duration(0) in the RetryIn computation and
+// panicked, turning every rejected request into a 500.
+func TestAllow_FractionalRPSDoesNotPanic(t *testing.T) {
+	cfg := testConfig()
+	cfg.PerClient = false
+	cfg.RequestsPerSecond = 0.5
+	cfg.Burst = 1
+	l := New(cfg)
+	defer l.Close()
+
+	if got := l.Allow(""); !got.Allowed {
+		t.Fatal("first request denied within burst")
+	}
+	got := l.Allow("")
+	if got.Allowed {
+		t.Fatal("second request allowed past the burst")
+	}
+	if got.RetryIn != 2*time.Second {
+		t.Errorf("RetryIn = %v, want 2s for 0.5 rps", got.RetryIn)
+	}
+}
+
 // TestClose_Idempotent covers the double-Stop panic: Close used to close an
 // unguarded channel, so a second Server.Stop() crashed the process.
 func TestClose_Idempotent(t *testing.T) {

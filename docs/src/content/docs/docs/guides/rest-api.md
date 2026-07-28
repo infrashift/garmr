@@ -431,13 +431,12 @@ curl -X POST http://localhost:8080/v1/validate \
 
 ## Error Responses
 
-All errors return a JSON response:
+Every error — regardless of endpoint or status code — returns the same JSON
+shape:
 
 ```json
 {
-  "error": "error message",
-  "code": "ERROR_CODE",
-  "details": {}
+  "error": "error message"
 }
 ```
 
@@ -446,9 +445,12 @@ All errors return a JSON response:
 | Code | Meaning |
 |------|---------|
 | 200 | Success |
-| 400 | Bad Request (invalid input) |
-| 404 | Not Found |
-| 500 | Internal Server Error |
+| 400 | Bad Request (malformed body, missing `input`, no policy source configured) |
+| 401 | Unauthorized (API key configured but missing or wrong) |
+| 405 | Method Not Allowed |
+| 413 | Request Entity Too Large (body exceeds the server's receive limit) |
+| 429 | Too Many Requests (rate limited; `Retry-After` and `X-RateLimit-*` headers are set) |
+| 500 | Internal Server Error (including a reload that failed — the previous policy set keeps serving) |
 
 ---
 

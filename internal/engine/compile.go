@@ -25,7 +25,7 @@ func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string)
 	// would collide with it so that response consumers can distinguish real
 	// policies from engine-generated ones by namespace alone.
 	if namespace == ReservedSystemNamespace {
-		e.obs.Metrics().RecordPolicyLoadError(name, namespace, "reserved_namespace")
+		e.observability().Metrics().RecordPolicyLoadError(name, namespace, "reserved_namespace")
 		return fmt.Errorf("%w: namespace %q is reserved for internal use", ErrInvalidPolicy, namespace)
 	}
 
@@ -53,7 +53,7 @@ func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string)
 		return nil
 	})
 	if err != nil {
-		e.obs.Metrics().RecordPolicyLoadError(name, namespace, "compilation")
+		e.observability().Metrics().RecordPolicyLoadError(name, namespace, "compilation")
 		return err
 	}
 
@@ -65,7 +65,7 @@ func (e *Engine) LoadPolicy(ctx context.Context, name, namespace, source string)
 	)
 
 	// Record successful policy load count for this namespace
-	e.obs.Metrics().SetPoliciesLoaded(namespace, nsCount)
+	e.observability().Metrics().SetPoliciesLoaded(namespace, nsCount)
 
 	return nil
 }

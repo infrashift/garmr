@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"cuelang.org/go/cue"
 	"go.uber.org/zap"
@@ -64,8 +65,10 @@ type Engine struct {
 	// Bounded, because patterns can come from caller-supplied input.
 	regexCache *regexCache
 
-	// obs provides optional metrics, tracing, and audit logging
-	obs *observability.Provider
+	// obs provides optional metrics, tracing, and audit logging.
+	// Atomic because SetObservability is called after construction while
+	// Evaluate reads it from request goroutines.
+	obs atomic.Pointer[observability.Provider]
 
 	// requireMatch controls fail-closed behavior: when true, evaluations
 	// that match zero policies return DecisionDeny with a synthetic result
@@ -89,9 +92,9 @@ func NewEngine(logger *zap.Logger) (*Engine, error) {
 		logger:       logger,
 		builtins:     make(map[string]BuiltinFunc),
 		regexCache:   newRegexCache(maxRegexCacheEntries),
-		obs:          observability.NewProvider(),
 		requireMatch: true,
 	}
+	e.obs.Store(observability.NewProvider())
 
 	// Register built-in functions
 	e.registerBuiltins()
@@ -107,8 +110,17 @@ func (e *Engine) currentSet() *policySet {
 }
 
 // SetObservability sets the observability provider for the engine.
+// A nil provider is ignored so observability() never returns nil.
 func (e *Engine) SetObservability(obs *observability.Provider) {
-	e.obs = obs
+	if obs == nil {
+		return
+	}
+	e.obs.Store(obs)
+}
+
+// observability returns the current provider (never nil).
+func (e *Engine) observability() *observability.Provider {
+	return e.obs.Load()
 }
 
 // SetRequireMatch controls fail-closed behavior for evaluations that match

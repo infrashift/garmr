@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,10 +27,10 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	"github.com/infrashift/garmr/internal/engine"
-	"github.com/infrashift/garmr/internal/experimental/ratelimit"
 	"github.com/infrashift/garmr/internal/health"
 	"github.com/infrashift/garmr/internal/input"
 	"github.com/infrashift/garmr/internal/observability"
+	"github.com/infrashift/garmr/internal/ratelimit"
 	"github.com/infrashift/garmr/internal/storage"
 )
 
@@ -64,6 +65,9 @@ type Config struct {
 	RateLimitEnabled   bool
 	RateLimitPerSecond float64
 	RateLimitBurst     int
+	// RateLimitTrustedProxies lists CIDRs whose X-Forwarded-For header is
+	// believed for per-client identification. Empty means never trust it.
+	RateLimitTrustedProxies []string
 	// Storage backend
 	StorageType    string                 // "filesystem" (default), "s3", "minio"
 	StorageRoot    string                 // Root path/prefix for storage backend
@@ -137,7 +141,13 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 		if cfg.RateLimitBurst > 0 {
 			rlConfig.Burst = cfg.RateLimitBurst
 		}
+		rlConfig.TrustedProxies = cfg.RateLimitTrustedProxies
 		s.rateLimiter = ratelimit.New(rlConfig)
+		// Without this the limiter is unobservable: the collector was
+		// registered but garmr_rate_limit_hits_total was never incremented.
+		s.rateLimiter.SetOnLimited(func() {
+			s.obs.Metrics().RecordRateLimitHit("")
+		})
 	}
 
 	// Initialize health handler
@@ -297,9 +307,11 @@ func (s *Server) Start(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 
-	// Start HTTP server
+	// Build the server synchronously so s.httpServer is set before anything
+	// can observe it, then serve on a goroutine.
+	srv := s.newHTTPServer()
 	go func() {
-		if err := s.startHTTP(); err != nil && err != http.ErrServerClosed {
+		if err := s.serve(srv); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("HTTP server error: %w", err)
 		}
 	}()
@@ -344,14 +356,18 @@ func (s *Server) Stop() error {
 		s.rateLimiter.Close()
 	}
 
-	if s.httpServer != nil {
+	s.mu.RLock()
+	srv := s.httpServer
+	s.mu.RUnlock()
+
+	if srv != nil {
 		timeout := s.config.ShutdownTimeout
 		if timeout <= 0 {
 			timeout = 30 * time.Second
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		return s.httpServer.Shutdown(ctx)
+		return srv.Shutdown(ctx)
 	}
 
 	return nil
@@ -425,10 +441,15 @@ func (s *Server) buildHandler() http.Handler {
 	return handler
 }
 
-func (s *Server) startHTTP() error {
+// newHTTPServer builds the *http.Server and stores it on s.
+//
+// Split from serve() so the assignment happens synchronously in Start rather
+// than inside the serving goroutine: Stop() reads s.httpServer, so assigning
+// it from the goroutine was a race.
+func (s *Server) newHTTPServer() *http.Server {
 	s.logger.Info("registering HTTP handlers")
 
-	s.httpServer = &http.Server{
+	srv := &http.Server{
 		Addr:         s.config.HTTPAddr,
 		Handler:      s.buildHandler(),
 		ReadTimeout:  30 * time.Second,
@@ -436,13 +457,22 @@ func (s *Server) startHTTP() error {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	s.mu.Lock()
+	s.httpServer = srv
+	s.mu.Unlock()
+
+	return srv
+}
+
+// serve blocks serving on srv. Only ever called from the Start goroutine.
+func (s *Server) serve(srv *http.Server) error {
 	if s.config.EnableTLS {
 		s.logger.Info("starting HTTPS server", zap.String("addr", s.config.HTTPAddr))
-		return s.httpServer.ListenAndServeTLS(s.config.TLSCert, s.config.TLSKey)
+		return srv.ListenAndServeTLS(s.config.TLSCert, s.config.TLSKey)
 	}
 
 	s.logger.Info("starting HTTP server", zap.String("addr", s.config.HTTPAddr))
-	return s.httpServer.ListenAndServe()
+	return srv.ListenAndServe()
 }
 
 // writeError writes a generic error message to the client and logs the full error server-side.
@@ -484,7 +514,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	ready := s.ready
-	checks := s.checks
+	// Clone: copying the map reference and encoding it after releasing the
+	// lock races with Start/MarkReady/Stop writing the same map, which is an
+	// unrecoverable "concurrent map read and map write" fatal error that
+	// recoveryMiddleware cannot catch.
+	checks := maps.Clone(s.checks)
 	s.mu.RUnlock()
 
 	resp := map[string]interface{}{

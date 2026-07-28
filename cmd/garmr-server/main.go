@@ -121,9 +121,12 @@ func init() {
 	rootCmd.Flags().Bool("rate-limit", false, "enable rate limiting")
 	rootCmd.Flags().Float64("rate-limit-rps", 100, "requests per second limit")
 	rootCmd.Flags().Int("rate-limit-burst", 200, "rate limit burst size")
+	rootCmd.Flags().StringSlice("rate-limit-trusted-proxies", nil,
+		"CIDRs whose X-Forwarded-For is trusted for per-client rate limiting (default: none, header ignored)")
 	viper.BindPFlag("rate_limit.enabled", rootCmd.Flags().Lookup("rate-limit"))
 	viper.BindPFlag("rate_limit.rps", rootCmd.Flags().Lookup("rate-limit-rps"))
 	viper.BindPFlag("rate_limit.burst", rootCmd.Flags().Lookup("rate-limit-burst"))
+	viper.BindPFlag("rate_limit.trusted_proxies", rootCmd.Flags().Lookup("rate-limit-trusted-proxies"))
 
 	// Storage backend flags
 	rootCmd.Flags().String("storage-type", "", "storage backend type (filesystem, s3, minio)")
@@ -248,10 +251,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 		RateLimitEnabled:   viper.GetBool("rate_limit.enabled"),
 		RateLimitPerSecond: viper.GetFloat64("rate_limit.rps"),
 		RateLimitBurst:     viper.GetInt("rate_limit.burst"),
-		StorageType:        viper.GetString("storage.type"),
-		StorageRoot:        viper.GetString("storage.root"),
-		StorageOptions:     storageOpts,
-		RequireMatch:       &requireMatch,
+
+		RateLimitTrustedProxies: viper.GetStringSlice("rate_limit.trusted_proxies"),
+		StorageType:             viper.GetString("storage.type"),
+		StorageRoot:             viper.GetString("storage.root"),
+		StorageOptions:          storageOpts,
+		RequireMatch:            &requireMatch,
 	}
 
 	// Create server

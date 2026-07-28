@@ -19,8 +19,8 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 	e.mu.RUnlock()
 
 	// Track active evaluations for metrics
-	e.obs.Metrics().IncActiveEvaluations()
-	defer e.obs.Metrics().DecActiveEvaluations()
+	e.observability().Metrics().IncActiveEvaluations()
+	defer e.observability().Metrics().DecActiveEvaluations()
 
 	// Check out a policy replica for the duration of this evaluation. The
 	// replica's CUE context and every compiled policy value in it form a
@@ -63,7 +63,7 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 		resp.Decision = DecisionDeny
 		resp.Results = append(resp.Results, e.buildNoMatchResult(rep, req))
 		resp.Metrics.EvaluationTimeNs = time.Since(start).Nanoseconds()
-		e.obs.Metrics().RecordEvaluation(
+		e.observability().Metrics().RecordEvaluation(
 			"",
 			req.Namespace,
 			string(resp.Decision),
@@ -156,7 +156,7 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 
 			if !result.Passed {
 				// Record violation metric
-				e.obs.Metrics().RecordViolation(policy.Name, policy.Namespace, result.RuleID, string(result.Severity))
+				e.observability().Metrics().RecordViolation(policy.Name, policy.Namespace, result.RuleID, string(result.Severity))
 
 				// Update decision based on enforcement action
 				switch policy.Enforcement.Action {
@@ -217,7 +217,7 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 	resp.Metrics.EvaluationTimeNs = time.Since(start).Nanoseconds()
 
 	// Record evaluation metric
-	e.obs.Metrics().RecordEvaluation(
+	e.observability().Metrics().RecordEvaluation(
 		"",                    // policy name (we evaluate multiple)
 		req.Namespace,         // namespace
 		string(resp.Decision), // decision

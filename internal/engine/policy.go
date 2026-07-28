@@ -203,7 +203,7 @@ func (e *Engine) loadInstancesIntoReplica(args []string, dir string, r *policyRe
 	for _, inst := range instances {
 		if inst.Err != nil {
 			if !quiet {
-				e.obs.Metrics().RecordPolicyLoadError("", dir, "compilation")
+				e.observability().Metrics().RecordPolicyLoadError("", dir, "compilation")
 			}
 			return nil, fmt.Errorf("loading instance: %w", inst.Err)
 		}
@@ -211,7 +211,7 @@ func (e *Engine) loadInstancesIntoReplica(args []string, dir string, r *policyRe
 		val := r.ctx.BuildInstance(inst)
 		if val.Err() != nil {
 			if !quiet {
-				e.obs.Metrics().RecordPolicyLoadError("", dir, "compilation")
+				e.observability().Metrics().RecordPolicyLoadError("", dir, "compilation")
 			}
 			return nil, fmt.Errorf("building instance: %w", val.Err())
 		}
@@ -245,7 +245,7 @@ func (e *Engine) loadInstancesIntoReplica(args []string, dir string, r *policyRe
 			compiled, err := e.compilePolicy(fieldVal, name, ns)
 			if err != nil {
 				if !quiet {
-					e.obs.Metrics().RecordPolicyLoadError(name, ns, "compilation")
+					e.observability().Metrics().RecordPolicyLoadError(name, ns, "compilation")
 					e.logger.Warn("skipping invalid policy",
 						zap.String("name", name),
 						zap.Error(err),
@@ -272,7 +272,7 @@ func (e *Engine) loadInstancesIntoReplica(args []string, dir string, r *policyRe
 	// Record loaded policy counts per namespace
 	if !quiet {
 		for ns, count := range namespaceCounts {
-			e.obs.Metrics().SetPoliciesLoaded(ns, count)
+			e.observability().Metrics().SetPoliciesLoaded(ns, count)
 		}
 	}
 

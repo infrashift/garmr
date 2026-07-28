@@ -1,12 +1,19 @@
-// internal/ratelimit/limiter.go
 // Package ratelimit provides request rate limiting for Garmr.
+//
+// Placement note: this middleware must sit OUTSIDE authMiddleware in the
+// handler chain. Composed inside it, unauthenticated floods are rejected by
+// auth before the limiter ever sees them, which is precisely the traffic
+// worth limiting.
 package ratelimit
 
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -46,7 +53,22 @@ type Config struct {
 
 	// ExemptClients are client identifiers exempt from rate limiting
 	ExemptClients []string `json:"exemptClients"`
+
+	// TrustedProxies lists CIDRs whose X-Forwarded-For header is believed
+	// when ClientIdentifier is "ip". Empty means never trust the header.
+	//
+	// Without this the header is attacker-controlled: any client can rotate
+	// it to get a fresh bucket per request, which both bypasses the per-client
+	// limit and grows the client map without bound.
+	TrustedProxies []string `json:"trustedProxies"`
+
+	// MaxClients bounds the per-client limiter map. Reaching it evicts the
+	// least recently seen client. Zero uses DefaultMaxClients.
+	MaxClients int `json:"maxClients"`
 }
+
+// DefaultMaxClients bounds the client map when Config.MaxClients is unset.
+const DefaultMaxClients = 10000
 
 // DefaultConfig returns a default rate limit configuration.
 func DefaultConfig() Config {
@@ -61,6 +83,7 @@ func DefaultConfig() Config {
 		HeaderName:              "X-Client-ID",
 		CleanupInterval:         time.Minute,
 		ClientTTL:               10 * time.Minute,
+		MaxClients:              DefaultMaxClients,
 	}
 }
 
@@ -85,13 +108,31 @@ type Limiter struct {
 	clientsMu sync.RWMutex
 	exemptSet map[string]bool
 
+	// trustedProxies are the parsed Config.TrustedProxies CIDRs.
+	trustedProxies []*net.IPNet
+
+	// maxClients is the resolved bound on the clients map.
+	maxClients int
+
+	// onLimited, when set, is called each time a request is rejected. The
+	// server wires this to the garmr_rate_limit_hits_total metric.
+	onLimited func()
+
 	// Cleanup
 	stopCleanup chan struct{}
+	closeOnce   sync.Once
 }
 
 type clientLimiter struct {
-	limiter  *rate.Limiter
-	lastSeen time.Time
+	limiter *rate.Limiter
+	// lastSeen is unix nanos, accessed atomically. It was previously a
+	// time.Time written after releasing the read lock while cleanupExpired
+	// read it under the write lock — an unsynchronised race.
+	lastSeen atomic.Int64
+}
+
+func (c *clientLimiter) touch() {
+	c.lastSeen.Store(time.Now().UnixNano())
 }
 
 // New creates a new rate limiter.
@@ -100,7 +141,12 @@ func New(cfg Config) *Limiter {
 		config:      cfg,
 		clients:     make(map[string]*clientLimiter),
 		exemptSet:   make(map[string]bool),
+		maxClients:  cfg.MaxClients,
 		stopCleanup: make(chan struct{}),
+	}
+
+	if l.maxClients <= 0 {
+		l.maxClients = DefaultMaxClients
 	}
 
 	// Create global limiter
@@ -111,12 +157,31 @@ func New(cfg Config) *Limiter {
 		l.exemptSet[client] = true
 	}
 
+	// Parse trusted proxy CIDRs. A malformed entry is skipped rather than
+	// silently widening trust.
+	for _, cidr := range cfg.TrustedProxies {
+		if _, network, err := net.ParseCIDR(strings.TrimSpace(cidr)); err == nil {
+			l.trustedProxies = append(l.trustedProxies, network)
+		}
+	}
+
 	// Start cleanup goroutine
 	if cfg.PerClient && cfg.CleanupInterval > 0 {
 		go l.cleanup()
 	}
 
 	return l
+}
+
+// SetOnLimited registers a callback invoked whenever a request is rejected.
+func (l *Limiter) SetOnLimited(fn func()) {
+	l.onLimited = fn
+}
+
+func (l *Limiter) limited() {
+	if l.onLimited != nil {
+		l.onLimited()
+	}
 }
 
 // Allow checks if a request is allowed.
@@ -225,7 +290,7 @@ func (l *Limiter) getOrCreateClient(clientID string) *clientLimiter {
 	l.clientsMu.RUnlock()
 
 	if exists {
-		client.lastSeen = time.Now()
+		client.touch()
 		return client
 	}
 
@@ -234,17 +299,40 @@ func (l *Limiter) getOrCreateClient(clientID string) *clientLimiter {
 
 	// Double-check after acquiring write lock
 	if client, exists = l.clients[clientID]; exists {
-		client.lastSeen = time.Now()
+		client.touch()
 		return client
 	}
 
-	client = &clientLimiter{
-		limiter:  rate.NewLimiter(rate.Limit(l.config.ClientRequestsPerSecond), l.config.ClientBurst),
-		lastSeen: time.Now(),
+	// Bound the map. Without this a caller rotating its identifier (e.g. a
+	// spoofed X-Forwarded-For) grows it without limit.
+	if len(l.clients) >= l.maxClients {
+		l.evictOldestLocked()
 	}
+
+	client = &clientLimiter{
+		limiter: rate.NewLimiter(rate.Limit(l.config.ClientRequestsPerSecond), l.config.ClientBurst),
+	}
+	client.touch()
 	l.clients[clientID] = client
 
 	return client
+}
+
+// evictOldestLocked removes the least recently seen client. Caller holds the
+// write lock.
+func (l *Limiter) evictOldestLocked() {
+	var oldestID string
+	var oldest int64
+
+	for id, c := range l.clients {
+		seen := c.lastSeen.Load()
+		if oldestID == "" || seen < oldest {
+			oldestID, oldest = id, seen
+		}
+	}
+	if oldestID != "" {
+		delete(l.clients, oldestID)
+	}
 }
 
 func (l *Limiter) cleanup() {
@@ -265,17 +353,20 @@ func (l *Limiter) cleanupExpired() {
 	l.clientsMu.Lock()
 	defer l.clientsMu.Unlock()
 
-	now := time.Now()
+	cutoff := time.Now().Add(-l.config.ClientTTL).UnixNano()
 	for clientID, client := range l.clients {
-		if now.Sub(client.lastSeen) > l.config.ClientTTL {
+		if client.lastSeen.Load() < cutoff {
 			delete(l.clients, clientID)
 		}
 	}
 }
 
-// Close stops the rate limiter cleanup.
+// Close stops the rate limiter cleanup. Safe to call more than once:
+// Server.Stop can run twice, and closing an already-closed channel panics.
 func (l *Limiter) Close() {
-	close(l.stopCleanup)
+	l.closeOnce.Do(func() {
+		close(l.stopCleanup)
+	})
 }
 
 // ClientCount returns the number of tracked clients.
@@ -292,6 +383,7 @@ func (l *Limiter) Middleware(next http.Handler) http.Handler {
 
 		result := l.Allow(clientID)
 		if !result.Allowed {
+			l.limited()
 			w.Header().Set("X-RateLimit-Limit", formatFloat(result.Limit))
 			w.Header().Set("X-RateLimit-Remaining", "0")
 			if result.RetryIn > 0 {
@@ -308,11 +400,17 @@ func (l *Limiter) Middleware(next http.Handler) http.Handler {
 func (l *Limiter) extractClientID(r *http.Request) string {
 	switch l.config.ClientIdentifier {
 	case "ip":
-		// Try X-Forwarded-For first
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			return xff
+		// X-Forwarded-For is only believed when the immediate peer is a
+		// configured trusted proxy. Trusting it unconditionally let any
+		// client rotate the header for a fresh bucket per request, which
+		// both bypassed the per-client limit and grew the client map.
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" && l.peerIsTrustedProxy(r.RemoteAddr) {
+			// Right-most entry appended by our trusted proxy is the only one
+			// it vouches for; earlier entries are caller-supplied.
+			parts := strings.Split(xff, ",")
+			return strings.TrimSpace(parts[len(parts)-1])
 		}
-		return r.RemoteAddr
+		return clientIP(r.RemoteAddr)
 
 	case "header":
 		return r.Header.Get(l.config.HeaderName)
@@ -324,8 +422,36 @@ func (l *Limiter) extractClientID(r *http.Request) string {
 		return ""
 
 	default:
-		return r.RemoteAddr
+		return clientIP(r.RemoteAddr)
 	}
+}
+
+// peerIsTrustedProxy reports whether the immediate peer falls inside a
+// configured TrustedProxies CIDR. With none configured this is always false,
+// so X-Forwarded-For is ignored by default.
+func (l *Limiter) peerIsTrustedProxy(remoteAddr string) bool {
+	if len(l.trustedProxies) == 0 {
+		return false
+	}
+	ip := net.ParseIP(clientIP(remoteAddr))
+	if ip == nil {
+		return false
+	}
+	for _, network := range l.trustedProxies {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// clientIP strips the port from a RemoteAddr, so one client's buckets are not
+// split across its ephemeral source ports.
+func clientIP(remoteAddr string) string {
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		return host
+	}
+	return remoteAddr
 }
 
 func formatFloat(f float64) string {

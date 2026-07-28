@@ -5,6 +5,7 @@ package observability
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -179,7 +180,12 @@ var (
 // ============================================
 
 // Provider manages observability components.
+//
+// The setters are called after construction (main.go wires the Prometheus
+// recorder onto an already-built server), while the getters are read from
+// request-handling goroutines, so all access is guarded.
 type Provider struct {
+	mu      sync.RWMutex
 	metrics MetricsRecorder
 	tracer  Tracer
 	audit   AuditLogger
@@ -196,51 +202,71 @@ func NewProvider() *Provider {
 
 // SetMetrics sets the metrics recorder.
 func (p *Provider) SetMetrics(m MetricsRecorder) {
-	if m != nil {
-		p.metrics = m
+	if m == nil {
+		return
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.metrics = m
 }
 
 // SetTracer sets the tracer.
 func (p *Provider) SetTracer(t Tracer) {
-	if t != nil {
-		p.tracer = t
+	if t == nil {
+		return
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.tracer = t
 }
 
 // SetAuditLogger sets the audit logger.
 func (p *Provider) SetAuditLogger(a AuditLogger) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.audit = a
 }
 
 // Metrics returns the metrics recorder (never nil).
 func (p *Provider) Metrics() MetricsRecorder {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.metrics
 }
 
 // Tracer returns the tracer (never nil).
 func (p *Provider) Tracer() Tracer {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.tracer
 }
 
 // AuditLogger returns the audit logger (may be nil if not configured).
 func (p *Provider) AuditLogger() AuditLogger {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.audit
 }
 
 // HasMetrics returns true if a real metrics recorder is configured.
 func (p *Provider) HasMetrics() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	_, isNoop := p.metrics.(NoopMetrics)
 	return !isNoop
 }
 
 // HasTracing returns true if a real tracer is configured.
 func (p *Provider) HasTracing() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	_, isNoop := p.tracer.(*NoopTracer)
 	return !isNoop
 }
 
 // HasAudit returns true if an audit logger is configured.
 func (p *Provider) HasAudit() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.audit != nil
 }

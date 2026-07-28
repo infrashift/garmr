@@ -263,7 +263,22 @@ func (e *Engine) loadInstancesIntoReplica(args []string, dir string, r *policyRe
 				ns, _ = nsVal.String()
 			}
 
-			compiled, err := e.compilePolicy(fieldVal, name, ns)
+			// Unify with the schema before compiling — the directory loader is
+			// the production path, and an unvalidated load here would accept
+			// policies that `garmr validate` rejects.
+			unified := fieldVal.Unify(r.schema.LookupPath(cue.ParsePath("#Policy")))
+			if unified.Err() != nil {
+				if !quiet {
+					e.observability().Metrics().RecordPolicyLoadError(name, ns, "schema")
+					e.logger.Warn("skipping policy that failed schema validation",
+						zap.String("name", name),
+						zap.Error(unified.Err()),
+					)
+				}
+				continue
+			}
+
+			compiled, err := e.compilePolicy(unified, name, ns)
 			if err != nil {
 				if !quiet {
 					e.observability().Metrics().RecordPolicyLoadError(name, ns, "compilation")

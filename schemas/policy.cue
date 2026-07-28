@@ -111,8 +111,10 @@ package policy
 
 // Rule is an individual policy check.
 #Rule: {
-	// Unique identifier within policy (e.g., "SEC-001")
-	id: string & =~"^[A-Z]{2,6}-[0-9]{3,4}$"
+	// Unique identifier within policy (e.g., "SEC-001"). Any short
+	// alphanumeric/hyphen/underscore token is accepted; the SEC-001 style is
+	// a convention, not a requirement.
+	id: string & =~"^[A-Za-z][A-Za-z0-9_-]{0,63}$"
 
 	// Human-readable description
 	description: string
@@ -129,8 +131,12 @@ package policy
 	// Rules with same priority maintain definition order
 	priority?: int & >=0 & <=9999
 
-	// The constraint expression
-	expr: #Expression
+	// The constraint expression. Deliberately unconstrained here: expr is
+	// usually a #Expression, but the engine also accepts a raw CUE constraint
+	// struct that is unified with the input directly (see the policy-schema
+	// reference). Typing this as #Expression would reject that feature at
+	// load time; unknown operator structs instead fail closed at evaluation.
+	expr: _
 
 	// Custom violation message (supports template variables)
 	message?: string

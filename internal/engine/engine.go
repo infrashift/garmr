@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/infrashift/garmr/internal/observability"
+	"github.com/infrashift/garmr/schemas"
 )
 
 // cueCtxKey is a context key for passing the checked-out replica's CUE
@@ -133,87 +134,11 @@ func (e *Engine) SetRequireMatch(v bool) {
 	e.requireMatch = v
 }
 
-// policySchemaSource is the embedded policy schema. Each policy replica
-// compiles its own copy so schema values never cross context boundaries.
-const policySchemaSource = `
-package policy
-
-#Policy: {
-	apiVersion: "policy.garmr.io/v1"
-	kind: "Policy"
-	metadata: #Metadata
-	spec: #PolicySpec
-}
-
-#Metadata: {
-	name: string
-	namespace: string | *"default"
-	labels: [string]: string
-	annotations: [string]: string
-	...
-}
-
-#PolicySpec: {
-	description?: string
-	target: #Target
-	rules: [#Rule, ...#Rule]
-	enforcement: #Enforcement
-	evaluation?: #EvaluationConfig
-}
-
-#EvaluationConfig: {
-	order?: string | *"priority"
-	failFast?: bool | *false
-	includeCategories?: [...string]
-	excludeCategories?: [...string]
-	includeTags?: [...string]
-	excludeTags?: [...string]
-	maxRules?: int | *0
-	timeout?: string
-}
-
-#Target: {
-	// A resource is either a kind shorthand ("pod", "*") or a full selector.
-	resources: [...(string | #ResourceSelector)]
-}
-
-#ResourceSelector: {
-	apiGroup: string | *"*"
-	kind: string | *"*"
-	names?: [...string]
-	labels?: [string]: string
-	annotations?: [string]: string
-	namespaces?: [...string]
-}
-
-#Rule: {
-	id: string
-	description: string
-	severity: "critical" | "high" | "medium" | "low" | "info"
-	priority?: int
-	expr: _
-	message?: string
-	url?: string
-	remediation?: string
-	category?: string
-	tags?: [...string]
-}
-
-#Enforcement: {
-	action: "deny" | "warn" | "audit"
-	dryRun: bool | *false
-	exceptions?: [...#Exception]
-}
-
-#Exception: {
-	name: string
-	reason: string
-	match: #ResourceSelector
-	expiry?: string
-	approvedBy?: [...string]
-	ticket?: string
-}
-`
+// policySchemaSource is the canonical policy schema, embedded from
+// schemas/policy.cue so the engine, `garmr validate`, and `cue vet` cannot
+// drift apart. Each policy replica compiles its own copy so schema values
+// never cross context boundaries.
+var policySchemaSource = schemas.PolicyCUE
 
 // registerBuiltins registers built-in functions.
 func (e *Engine) registerBuiltins() {

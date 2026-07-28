@@ -228,21 +228,96 @@ func TestEvaluate_Exception(t *testing.T) {
 
 // --- Timeout Enforcement ---
 
+// TestEvaluate_Timeout pins the fail-closed contract for evaluation
+// deadlines. Rules that never ran are not evidence of compliance, so an
+// expired deadline must DENY. The previous version of this test asserted
+// nothing (`_ = resp`), which is why the fail-open behaviour survived.
 func TestEvaluate_Timeout(t *testing.T) {
 	source := makePolicyFull("timeout-test", "default", "timeout test",
 		`{id: "r1", description: "check", severity: "low", expr: {match: {path: "x", equals: 1}}, message: "fail"}`,
 		"deny", "", `evaluation: timeout: "1ns"`)
 	eng := loadTestPolicy(t, "timeout-test", "default", source)
 
-	// With an absurdly short timeout, the context should be cancelled
 	resp, err := eng.Evaluate(context.Background(), &EvaluateRequest{
 		Input: map[string]any{"x": 2.0},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// With timeout, the rule may pass (timeout = don't penalize) or be skipped
-	_ = resp // Just ensure no panic/error
+
+	if resp.Decision != DecisionDeny {
+		t.Errorf("decision = %v, want %v (a timed-out evaluation must fail closed)", resp.Decision, DecisionDeny)
+	}
+	assertSoleTimeoutResult(t, resp)
+}
+
+// TestEvaluate_TimeoutNotDowngradedByWarn ensures `enforcement.action: "warn"`
+// cannot soften a timeout. A timeout is an engine failure, not a policy
+// verdict, so the enforcement action does not apply to it.
+func TestEvaluate_TimeoutNotDowngradedByWarn(t *testing.T) {
+	source := makePolicyFull("timeout-warn", "default", "timeout under warn",
+		`{id: "r1", description: "check", severity: "low", expr: {match: {path: "x", equals: 1}}, message: "fail"}`,
+		"warn", "", `evaluation: timeout: "1ns"`)
+	eng := loadTestPolicy(t, "timeout-warn", "default", source)
+
+	resp, err := eng.Evaluate(context.Background(), &EvaluateRequest{
+		Input: map[string]any{"x": 2.0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Decision != DecisionDeny {
+		t.Errorf("decision = %v, want %v (warn must not downgrade a timeout)", resp.Decision, DecisionDeny)
+	}
+	assertSoleTimeoutResult(t, resp)
+}
+
+// TestEvaluate_TimeoutNotDowngradedByDryRun is the dry-run counterpart:
+// dry-run caps a policy's own deny at warn, but must not cap a timeout.
+func TestEvaluate_TimeoutNotDowngradedByDryRun(t *testing.T) {
+	source := makePolicyFull("timeout-dryrun", "default", "timeout under dry run",
+		`{id: "r1", description: "check", severity: "low", expr: {match: {path: "x", equals: 1}}, message: "fail"}`,
+		"deny", "dryRun: true", `evaluation: timeout: "1ns"`)
+	eng := loadTestPolicy(t, "timeout-dryrun", "default", source)
+
+	dryRun := true
+	resp, err := eng.Evaluate(context.Background(), &EvaluateRequest{
+		Input:   map[string]any{"x": 2.0},
+		Options: EvaluateOptions{DryRunOverride: &dryRun},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Decision != DecisionDeny {
+		t.Errorf("decision = %v, want %v (dry run must not downgrade a timeout)", resp.Decision, DecisionDeny)
+	}
+	assertSoleTimeoutResult(t, resp)
+}
+
+// assertSoleTimeoutResult verifies the response carries exactly one result:
+// the synthetic system timeout, failing. Critically it also asserts that no
+// result passed — the old behaviour emitted synthetic passing results, and a
+// decision check alone would not catch a regression back to that.
+func assertSoleTimeoutResult(t *testing.T, resp *EvaluateResponse) {
+	t.Helper()
+
+	if len(resp.Results) != 1 {
+		t.Fatalf("got %d results, want exactly 1 (the timeout result); results=%+v", len(resp.Results), resp.Results)
+	}
+	r := resp.Results[0]
+	if r.PolicyNamespace != ReservedSystemNamespace || r.PolicyName != SystemPolicyNameTimeout || r.RuleID != RuleIDTimeout {
+		t.Errorf("result identity = %s/%s#%s, want %s/%s#%s",
+			r.PolicyNamespace, r.PolicyName, r.RuleID,
+			ReservedSystemNamespace, SystemPolicyNameTimeout, RuleIDTimeout)
+	}
+	for i, res := range resp.Results {
+		if res.Passed {
+			t.Errorf("result[%d] passed; a timed-out evaluation must not report any rule as passing: %+v", i, res)
+		}
+	}
+	if r.Remediation == "" {
+		t.Error("timeout result has no remediation; operators need to be told to raise the timeout")
+	}
 }
 
 // --- Namespace Filtering ---

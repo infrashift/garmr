@@ -96,17 +96,44 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 	}
 	rulesEvaluated := 0
 	resp.Summary.TotalRules = totalRulesInScope
+	// Initialise eagerly so a response with zero results still serialises
+	// empty maps rather than null.
+	resp.Summary.BySeverity = make(map[Severity]SeverityCounts)
+	resp.Summary.ByCategory = make(map[string]CategoryCounts)
+	resp.Summary.ByNamespace = make(map[string]NamespaceCounts)
 
 	// Evaluate each policy
 	for _, policy := range policies {
-		results, failFastTriggered, err := e.evaluatePolicy(ctx, policy, inputVal, req)
+		outcome, err := e.evaluatePolicy(ctx, policy, inputVal, req)
 		if err != nil {
+			// Fail closed: a policy that could not be evaluated is not
+			// evidence of compliance. Continuing here would let the overall
+			// decision stay Allow while a rule silently never ran.
 			e.logger.Error("policy evaluation failed",
 				zap.String("policy", policy.Name),
+				zap.String("namespace", policy.Namespace),
 				zap.Error(err),
 			)
-			continue
+			resp.Decision = DecisionDeny
+			resp.Results = append(resp.Results, buildEvaluationErrorResult(policy, err))
+			break
 		}
+
+		// A deadline that expires partway through a policy means some rules
+		// never ran. Deny unconditionally: unlike a rule violation this is an
+		// engine failure, so `enforcement.action: "warn"` and dry-run must not
+		// be able to downgrade it.
+		if outcome.timedOut {
+			resp.Decision = DecisionDeny
+			resp.Results = append(resp.Results, buildTimeoutResult(policy, ctx.Err()))
+			resp.EvaluationMode.TotalRulesInScope = totalRulesInScope
+			resp.EvaluationMode.RulesEvaluated = rulesEvaluated
+			resp.EvaluationMode.RulesSkipped = totalRulesInScope - rulesEvaluated
+			break
+		}
+
+		results := outcome.results
+		failFastTriggered := outcome.failFast
 
 		rulesEvaluated += len(results)
 		resp.Metrics.RulesEvaluated += len(results)
@@ -376,16 +403,26 @@ func (e *Engine) selectorMatchesInput(selector ResourceSelector, kind, apiGroup,
 	return true
 }
 
+// policyOutcome is the result of evaluating one policy: the per-rule results,
+// whether fail-fast stopped the policy, and whether the evaluation deadline
+// expired partway through. timedOut is reported rather than folded into
+// results because a deadline is an engine failure, not a policy verdict — see
+// Evaluate, which turns it into an unconditional deny.
+type policyOutcome struct {
+	results  []RuleResult
+	failFast bool
+	timedOut bool
+}
+
 // evaluatePolicy evaluates a single policy against input.
-// Returns results, whether fail-fast was triggered, and any error.
-func (e *Engine) evaluatePolicy(ctx context.Context, policy *CompiledPolicy, input cue.Value, req *EvaluateRequest) ([]RuleResult, bool, error) {
-	var results []RuleResult
+func (e *Engine) evaluatePolicy(ctx context.Context, policy *CompiledPolicy, input cue.Value, req *EvaluateRequest) (policyOutcome, error) {
+	var out policyOutcome
 	opts := req.Options
 
 	// Check if any exception matches the input, skip evaluation if so
 	if len(policy.Enforcement.Exceptions) > 0 {
 		if e.matchesException(policy.Enforcement.Exceptions, req.Input) {
-			return results, false, nil
+			return out, nil
 		}
 	}
 
@@ -395,37 +432,76 @@ func (e *Engine) evaluatePolicy(ctx context.Context, policy *CompiledPolicy, inp
 			continue
 		}
 
-		// Timeout check: if the context has been cancelled/timed out, stop evaluating
+		// Timeout check: if the context has been cancelled/timed out, stop
+		// evaluating and report it. Emitting a passing synthetic result here
+		// would fail open — a policy whose rules never ran would return
+		// ALLOW, which is exactly the silent pass the no-match handling
+		// exists to prevent.
 		if ctx.Err() != nil {
-			result := RuleResult{
-				PolicyName:      policy.Name,
-				PolicyNamespace: policy.Namespace,
-				RuleID:          rule.ID,
-				RuleDescription: rule.Description,
-				Severity:        rule.Severity,
-				Passed:          true, // don't penalize on timeout
-				Message:         "evaluation timed out",
-				Bindings:        make(map[string]any),
-			}
-			results = append(results, result)
-			break
+			out.timedOut = true
+			return out, nil
 		}
 
 		result := e.evaluateRule(ctx, policy, rule, input, opts)
-		results = append(results, result)
+		out.results = append(out.results, result)
 
 		// Fail-fast: stop at first failure if configured
 		if policy.Evaluation.FailFast && !result.Passed {
-			return results, true, nil
+			out.failFast = true
+			return out, nil
 		}
 
 		// maxRules: stop once the configured evaluation cap is reached
-		if policy.Evaluation.MaxRules > 0 && len(results) >= policy.Evaluation.MaxRules {
+		if policy.Evaluation.MaxRules > 0 && len(out.results) >= policy.Evaluation.MaxRules {
 			break
 		}
 	}
 
-	return results, false, nil
+	return out, nil
+}
+
+// buildTimeoutResult returns the synthetic failing result emitted when a
+// policy's evaluation deadline expires. It mirrors buildNoMatchResult: both
+// are engine-level failures surfaced in the reserved system namespace so they
+// cannot be confused with a policy's own verdict.
+func buildTimeoutResult(policy *CompiledPolicy, cause error) RuleResult {
+	timeout := policy.Evaluation.Timeout
+	message := fmt.Sprintf("Evaluation of policy %s/%s exceeded its deadline (%s) and was denied.",
+		policy.Namespace, policy.Name, timeout)
+	if timeout <= 0 {
+		message = fmt.Sprintf("Evaluation of policy %s/%s was cancelled before completing (%v) and was denied.",
+			policy.Namespace, policy.Name, cause)
+	}
+
+	return RuleResult{
+		PolicyNamespace: ReservedSystemNamespace,
+		PolicyName:      SystemPolicyNameTimeout,
+		RuleID:          RuleIDTimeout,
+		RuleDescription: "Policy evaluation did not complete",
+		Severity:        SeverityCritical,
+		Passed:          false,
+		Message:         message,
+		Remediation:     "Raise `spec.evaluation.timeout` for this policy or simplify its rules. Rules that did not run are not evidence of compliance, so the evaluation fails closed.",
+		Bindings:        map[string]any{},
+	}
+}
+
+// buildEvaluationErrorResult returns the synthetic failing result emitted when
+// a policy cannot be evaluated at all. Like buildTimeoutResult it lives in the
+// reserved system namespace and fails closed.
+func buildEvaluationErrorResult(policy *CompiledPolicy, cause error) RuleResult {
+	return RuleResult{
+		PolicyNamespace: ReservedSystemNamespace,
+		PolicyName:      SystemPolicyNameTimeout,
+		RuleID:          RuleIDTimeout,
+		RuleDescription: "Policy evaluation did not complete",
+		Severity:        SeverityCritical,
+		Passed:          false,
+		Message: fmt.Sprintf("Evaluation of policy %s/%s failed: %v. The request was denied because the policy's rules did not run.",
+			policy.Namespace, policy.Name, cause),
+		Remediation: "Inspect the server logs for the underlying error and re-run `garmr validate` against this policy.",
+		Bindings:    map[string]any{},
+	}
 }
 
 // evaluateRule evaluates a single rule against input.
@@ -444,12 +520,9 @@ func (e *Engine) evaluateRule(ctx context.Context, policy *CompiledPolicy, rule 
 		Bindings:        make(map[string]any),
 	}
 
-	// Timeout check at rule level
-	if ctx.Err() != nil {
-		result.Passed = true // don't penalize on timeout
-		result.Message = "evaluation timed out"
-		return result
-	}
+	// No rule-level timeout check: the caller's loop tests ctx.Err() before
+	// each rule and reports a policy-level timeout instead. Returning a
+	// passing result here would fail open.
 
 	// Evaluate the expression by unifying with input
 	passed, bindings, msg := e.evaluateExpression(ctx, rule.Expression, input)

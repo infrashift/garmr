@@ -40,6 +40,8 @@ const (
 	ReservedSystemNamespace = "__system__"
 	SystemPolicyNameMatch   = "policy-match"
 	RuleIDNoMatch           = "no-match"
+	SystemPolicyNameTimeout = "policy-timeout"
+	RuleIDTimeout           = "timeout"
 )
 
 // Engine is the core policy evaluation engine.

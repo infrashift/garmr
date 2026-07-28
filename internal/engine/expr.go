@@ -93,7 +93,7 @@ func (e *Engine) evaluateExpression(ctx context.Context, expr cue.Value, input c
 
 	// Check for 'compare'
 	if compareVal := expr.LookupPath(cue.ParsePath("compare")); compareVal.Exists() {
-		return e.evaluateCompare(compareVal, input)
+		return e.evaluateCompare(ctx, compareVal, input)
 	}
 
 	// Check for 'func' (builtin function call)
@@ -186,8 +186,10 @@ func (e *Engine) evaluateFunc(ctx context.Context, expr cue.Value, input cue.Val
 	// Check expectation if present
 	expectVal := expr.LookupPath(cue.ParsePath("expect"))
 	if expectVal.Exists() {
-		var expected any
-		expectVal.Decode(&expected)
+		expected, err := decodeAny(expectVal)
+		if err != nil {
+			return false, bindings, fmt.Sprintf("builtin %s: cannot decode expect: %v", name, err)
+		}
 
 		// Compare result with expected value
 		if valuesEqual(result, expected) {
@@ -196,15 +198,10 @@ func (e *Engine) evaluateFunc(ctx context.Context, expr cue.Value, input cue.Val
 		return false, bindings, fmt.Sprintf("builtin %s returned %v, expected %v", name, result, expected)
 	}
 
-	// If no expectation, treat truthy result as pass
-	// boolean true, non-zero number, non-empty string = pass
-	switch v := result.(type) {
-	case bool:
-		if !v {
-			return false, bindings, fmt.Sprintf("builtin %s returned false", name)
-		}
-	case nil:
-		return false, bindings, fmt.Sprintf("builtin %s returned nil", name)
+	// No expectation: a truthy result passes. Zero, empty string, empty
+	// collection and nil all fail.
+	if ok, reason := builtinResultTruthy(result); !ok {
+		return false, bindings, fmt.Sprintf("builtin %s %s", name, reason)
 	}
 
 	return true, bindings, ""
@@ -265,9 +262,14 @@ func (e *Engine) evaluateMatch(expr cue.Value, input cue.Value) (bool, map[strin
 			return false, bindings, fmt.Sprintf("path '%s' not found", path)
 		}
 
-		var expected, actual interface{}
-		equalsVal.Decode(&expected)
-		fieldVal.Decode(&actual)
+		expected, err := decodeAny(equalsVal)
+		if err != nil {
+			return false, bindings, fmt.Sprintf("'equals' operand for '%s' is not decodable: %v", path, err)
+		}
+		actual, err := decodeAny(fieldVal)
+		if err != nil {
+			return false, bindings, fmt.Sprintf("'%s' is not decodable: %v", path, err)
+		}
 
 		if !valuesEqual(actual, expected) {
 			return false, bindings, fmt.Sprintf("'%s' expected '%v', got '%v'", path, expected, actual)
@@ -275,68 +277,23 @@ func (e *Engine) evaluateMatch(expr cue.Value, input cue.Value) (bool, map[strin
 		return true, bindings, ""
 	}
 
-	// Check for 'greaterThan'
+	// Numeric comparisons. All four share numericComparison so a malformed
+	// operand fails closed with the same message shape.
 	if gtVal := expr.LookupPath(cue.ParsePath("greaterThan")); gtVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-
-		var expected, actual float64
-		gtVal.Decode(&expected)
-		fieldVal.Decode(&actual)
-
-		if actual <= expected {
-			return false, bindings, fmt.Sprintf("'%s' expected > %v, got %v", path, expected, actual)
-		}
-		return true, bindings, ""
+		ok, reason := numericComparison(fieldVal, gtVal, path, ">", func(a, e float64) bool { return a > e })
+		return ok, bindings, reason
 	}
-
-	// Check for 'greaterThanOrEqual'
 	if gteVal := expr.LookupPath(cue.ParsePath("greaterThanOrEqual")); gteVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-
-		var expected, actual float64
-		gteVal.Decode(&expected)
-		fieldVal.Decode(&actual)
-
-		if actual < expected {
-			return false, bindings, fmt.Sprintf("'%s' expected >= %v, got %v", path, expected, actual)
-		}
-		return true, bindings, ""
+		ok, reason := numericComparison(fieldVal, gteVal, path, ">=", func(a, e float64) bool { return a >= e })
+		return ok, bindings, reason
 	}
-
-	// Check for 'lessThan'
 	if ltVal := expr.LookupPath(cue.ParsePath("lessThan")); ltVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-
-		var expected, actual float64
-		ltVal.Decode(&expected)
-		fieldVal.Decode(&actual)
-
-		if actual >= expected {
-			return false, bindings, fmt.Sprintf("'%s' expected < %v, got %v", path, expected, actual)
-		}
-		return true, bindings, ""
+		ok, reason := numericComparison(fieldVal, ltVal, path, "<", func(a, e float64) bool { return a < e })
+		return ok, bindings, reason
 	}
-
-	// Check for 'lessThanOrEqual'
 	if lteVal := expr.LookupPath(cue.ParsePath("lessThanOrEqual")); lteVal.Exists() {
-		if !fieldVal.Exists() {
-			return false, bindings, fmt.Sprintf("path '%s' not found", path)
-		}
-
-		var expected, actual float64
-		lteVal.Decode(&expected)
-		fieldVal.Decode(&actual)
-
-		if actual > expected {
-			return false, bindings, fmt.Sprintf("'%s' expected <= %v, got %v", path, expected, actual)
-		}
-		return true, bindings, ""
+		ok, reason := numericComparison(fieldVal, lteVal, path, "<=", func(a, e float64) bool { return a <= e })
+		return ok, bindings, reason
 	}
 
 	// Check for 'in' (value in list)
@@ -345,8 +302,10 @@ func (e *Engine) evaluateMatch(expr cue.Value, input cue.Value) (bool, map[strin
 			return false, bindings, fmt.Sprintf("path '%s' not found", path)
 		}
 
-		var actual interface{}
-		fieldVal.Decode(&actual)
+		actual, err := decodeAny(fieldVal)
+		if err != nil {
+			return false, bindings, fmt.Sprintf("'%s' is not decodable: %v", path, err)
+		}
 
 		iter, err := inVal.List()
 		if err != nil {
@@ -356,8 +315,10 @@ func (e *Engine) evaluateMatch(expr cue.Value, input cue.Value) (bool, map[strin
 		found := false
 		var allowedValues []string
 		for iter.Next() {
-			var v interface{}
-			iter.Value().Decode(&v)
+			v, err := decodeAny(iter.Value())
+			if err != nil {
+				return false, bindings, fmt.Sprintf("'in' list entry is not decodable: %v", err)
+			}
 			allowedValues = append(allowedValues, fmt.Sprintf("%v", v))
 			if valuesEqual(actual, v) {
 				found = true
@@ -377,8 +338,10 @@ func (e *Engine) evaluateMatch(expr cue.Value, input cue.Value) (bool, map[strin
 			return false, bindings, fmt.Sprintf("path '%s' not found", path)
 		}
 
-		var actual interface{}
-		fieldVal.Decode(&actual)
+		actual, err := decodeAny(fieldVal)
+		if err != nil {
+			return false, bindings, fmt.Sprintf("'%s' is not decodable: %v", path, err)
+		}
 
 		iter, err := notInVal.List()
 		if err != nil {
@@ -386,8 +349,10 @@ func (e *Engine) evaluateMatch(expr cue.Value, input cue.Value) (bool, map[strin
 		}
 
 		for iter.Next() {
-			var v interface{}
-			iter.Value().Decode(&v)
+			v, err := decodeAny(iter.Value())
+			if err != nil {
+				return false, bindings, fmt.Sprintf("'notIn' list entry is not decodable: %v", err)
+			}
 			if valuesEqual(actual, v) {
 				return false, bindings, fmt.Sprintf("'%s' value '%v' is in forbidden list", path, actual)
 			}
@@ -517,7 +482,7 @@ func (e *Engine) evaluateMatch(expr cue.Value, input cue.Value) (bool, map[strin
 }
 
 // evaluateCompare evaluates a compare expression.
-func (e *Engine) evaluateCompare(expr cue.Value, input cue.Value) (bool, map[string]any, string) {
+func (e *Engine) evaluateCompare(ctx context.Context, expr cue.Value, input cue.Value) (bool, map[string]any, string) {
 	bindings := make(map[string]any)
 
 	leftVal := expr.LookupPath(cue.ParsePath("left"))
@@ -528,9 +493,15 @@ func (e *Engine) evaluateCompare(expr cue.Value, input cue.Value) (bool, map[str
 		return false, bindings, "compare requires 'left', 'op', and 'right'"
 	}
 
-	left := e.resolveValue(leftVal, input)
+	left, err := e.resolveValue(ctx, leftVal, input)
+	if err != nil {
+		return false, bindings, fmt.Sprintf("compare 'left': %v", err)
+	}
 	op, _ := opVal.String()
-	right := e.resolveValue(rightVal, input)
+	right, err := e.resolveValue(ctx, rightVal, input)
+	if err != nil {
+		return false, bindings, fmt.Sprintf("compare 'right': %v", err)
+	}
 
 	result, reason := e.compare(left, op, right)
 	if !result {
@@ -543,64 +514,87 @@ func (e *Engine) evaluateCompare(expr cue.Value, input cue.Value) (bool, map[str
 	return true, bindings, ""
 }
 
-// resolveValue resolves a Value to an actual value.
-func (e *Engine) resolveValue(val cue.Value, input cue.Value) any {
+// resolveValue resolves a Value to an actual value. Failures are returned
+// rather than collapsed to nil so the caller can fail closed with a reason,
+// matching compare's behaviour on malformed operands.
+//
+// A path that does not exist in the input is not an error: it resolves to nil
+// and the comparison reports it as a non-numeric/mismatched operand.
+func (e *Engine) resolveValue(ctx context.Context, val cue.Value, input cue.Value) (any, error) {
 	// Check for literal
 	if litVal := val.LookupPath(cue.ParsePath("literal")); litVal.Exists() {
-		var v any
-		litVal.Decode(&v)
-		return v
+		v, err := decodeAny(litVal)
+		if err != nil {
+			return nil, fmt.Errorf("literal is not decodable: %w", err)
+		}
+		return v, nil
 	}
 
 	// Check for path reference
 	if pathVal := val.LookupPath(cue.ParsePath("path")); pathVal.Exists() {
-		path, _ := pathVal.String()
-		fieldVal := input.LookupPath(cue.ParsePath(path))
-		if fieldVal.Exists() {
-			var v any
-			fieldVal.Decode(&v)
-			return v
+		path, err := pathVal.String()
+		if err != nil {
+			return nil, fmt.Errorf("path must be a string: %w", err)
 		}
-		return nil
+		fieldVal := input.LookupPath(cue.ParsePath(path))
+		if !fieldVal.Exists() {
+			return nil, nil
+		}
+		v, err := decodeAny(fieldVal)
+		if err != nil {
+			return nil, fmt.Errorf("path %q is not decodable: %w", path, err)
+		}
+		return v, nil
 	}
 
 	// Check for func call
 	if funcVal := val.LookupPath(cue.ParsePath("func")); funcVal.Exists() {
 		nameVal := funcVal.LookupPath(cue.ParsePath("name"))
 		if !nameVal.Exists() {
-			return nil
+			return nil, fmt.Errorf("func requires a 'name'")
 		}
-		name, _ := nameVal.String()
+		name, err := nameVal.String()
+		if err != nil {
+			return nil, fmt.Errorf("func 'name' must be a string: %w", err)
+		}
 		fn, ok := e.builtins[name]
 		if !ok {
-			return nil
+			return nil, fmt.Errorf("unknown builtin %q", name)
 		}
 
 		// Resolve arguments
 		argsVal := funcVal.LookupPath(cue.ParsePath("args"))
 		var args []any
 		if argsVal.Exists() {
-			iter, _ := argsVal.List()
+			iter, err := argsVal.List()
+			if err != nil {
+				return nil, fmt.Errorf("func 'args' must be a list: %w", err)
+			}
 			for iter.Next() {
-				resolved := e.resolveValue(iter.Value(), input)
+				resolved, err := e.resolveValue(ctx, iter.Value(), input)
+				if err != nil {
+					return nil, fmt.Errorf("func %q argument: %w", name, err)
+				}
 				args = append(args, resolved)
 			}
 		}
 
-		result, err := fn(context.Background(), args...)
+		// Pass the request context so a builtin honours the evaluation
+		// deadline and client cancellation.
+		result, err := fn(ctx, args...)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("builtin %q: %w", name, err)
 		}
-		return result
+		return result, nil
 	}
 
 	// Check for env variable
 	if envVal := val.LookupPath(cue.ParsePath("env")); envVal.Exists() {
 		envName, _ := envVal.String()
-		return os.Getenv(envName)
+		return os.Getenv(envName), nil
 	}
 
-	return nil
+	return nil, fmt.Errorf("value must specify one of 'path', 'literal', or 'func'")
 }
 
 // compare performs a comparison operation. It returns whether the comparison
@@ -756,7 +750,12 @@ func (e *Engine) evaluateForEach(ctx context.Context, expr cue.Value, input cue.
 
 		// Create a new input context with the current item aliased
 		// We need to merge the item into the input under the alias
-		itemInput := e.createItemContext(ctx, input, itemVal, alias, index)
+		itemInput, err := e.createItemContext(ctx, input, itemVal, alias, index)
+		if err != nil {
+			// Fail closed: an element we could not bind is not an element we
+			// verified.
+			return false, bindings, fmt.Sprintf("forEach over '%s': %v", path, err)
+		}
 
 		passed, b, msg := e.evaluateExpression(ctx, conditionVal, itemInput)
 		for k, v := range b {
@@ -809,29 +808,33 @@ func (e *Engine) evaluateForEach(ctx context.Context, expr cue.Value, input cue.
 // the alias or "_index" already exists on the input (an unlucky field name,
 // or a nested forEach re-binding), fall back to rebuilding the input map,
 // which preserves the replace semantics.
-func (e *Engine) createItemContext(ctx context.Context, input cue.Value, item cue.Value, alias string, index int) cue.Value {
+func (e *Engine) createItemContext(ctx context.Context, input cue.Value, item cue.Value, alias string, index int) (cue.Value, error) {
 	aliasPath := cue.MakePath(cue.Str(alias))
 	indexPath := cue.MakePath(cue.Str("_index"))
 
 	if !input.LookupPath(aliasPath).Exists() && !input.LookupPath(indexPath).Exists() {
 		indexVal := e.getCueContext(ctx).Encode(index)
-		return input.FillPath(aliasPath, item).FillPath(indexPath, indexVal)
+		return input.FillPath(aliasPath, item).FillPath(indexPath, indexVal), nil
 	}
 
 	// Fallback: rebuild via Go values so the new bindings replace the old.
 	var inputMap map[string]any
-	input.Decode(&inputMap)
+	if err := input.Decode(&inputMap); err != nil {
+		return cue.Value{}, fmt.Errorf("rebuilding element context: input is not decodable: %w", err)
+	}
 	if inputMap == nil {
 		inputMap = make(map[string]any)
 	}
 
-	var itemData any
-	item.Decode(&itemData)
+	itemData, err := decodeAny(item)
+	if err != nil {
+		return cue.Value{}, fmt.Errorf("rebuilding element context: element %d is not decodable: %w", index, err)
+	}
 
 	inputMap[alias] = itemData
 	inputMap["_index"] = index
 
-	return e.getCueContext(ctx).Encode(inputMap)
+	return e.getCueContext(ctx).Encode(inputMap), nil
 }
 
 // evaluateContainsExpr evaluates a standalone contains expression.
@@ -861,8 +864,10 @@ func (e *Engine) evaluateContainsExpr(expr cue.Value, input cue.Value) (bool, ma
 		if s, sErr := fieldVal.String(); sErr == nil {
 			// Single value check on string
 			if checkVal := expr.LookupPath(cue.ParsePath("value")); checkVal.Exists() {
-				var needle string
-				checkVal.Decode(&needle)
+				needle, nErr := checkVal.String()
+				if nErr != nil {
+					return false, bindings, fmt.Sprintf("'contains.value' must be a string when '%s' is a string: %v", path, nErr)
+				}
 				if strings.Contains(s, needle) {
 					return true, bindings, ""
 				}
@@ -874,8 +879,10 @@ func (e *Engine) evaluateContainsExpr(expr cue.Value, input cue.Value) (bool, ma
 
 	// Single value check
 	if checkVal := expr.LookupPath(cue.ParsePath("value")); checkVal.Exists() {
-		var needle any
-		checkVal.Decode(&needle)
+		needle, err := decodeAny(checkVal)
+		if err != nil {
+			return false, bindings, fmt.Sprintf("'contains.value' is not decodable: %v", err)
+		}
 		for _, item := range collection {
 			if valuesEqual(item, needle) {
 				return true, bindings, ""
@@ -887,7 +894,9 @@ func (e *Engine) evaluateContainsExpr(expr cue.Value, input cue.Value) (bool, ma
 	// All values must be present
 	if allVal := expr.LookupPath(cue.ParsePath("all")); allVal.Exists() {
 		var required []any
-		allVal.Decode(&required)
+		if err := allVal.Decode(&required); err != nil {
+			return false, bindings, fmt.Sprintf("'contains.all' must be a list: %v", err)
+		}
 		for _, needle := range required {
 			found := false
 			for _, item := range collection {
@@ -906,7 +915,9 @@ func (e *Engine) evaluateContainsExpr(expr cue.Value, input cue.Value) (bool, ma
 	// Any value must be present
 	if anyVal := expr.LookupPath(cue.ParsePath("any")); anyVal.Exists() {
 		var candidates []any
-		anyVal.Decode(&candidates)
+		if err := anyVal.Decode(&candidates); err != nil {
+			return false, bindings, fmt.Sprintf("'contains.any' must be a list: %v", err)
+		}
 		for _, needle := range candidates {
 			for _, item := range collection {
 				if valuesEqual(item, needle) {

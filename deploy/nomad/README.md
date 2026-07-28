@@ -24,6 +24,15 @@ Garmr with ServiceIntentions (see
 intentions are service-level, so any service allowed to evaluate can also
 call the management endpoints; keep the allow list tight).
 
+## Rate limiting in the mesh
+
+If you enable rate limiting, set `--rate-limit-identifier identity` (or
+`rate_limit.client_identifier: identity`). The default `ip` keying is
+useless behind the sidecar — every caller's `RemoteAddr` is the local
+Envoy, so all services would share one bucket. `identity` keys each
+bucket on the mesh-verified SPIFFE URI from the XFCC header, the same
+value the audit log records as `principal`.
+
 ## Policy volume
 
 The specs use a Nomad host volume named `garmr-policies`. Declare it on the

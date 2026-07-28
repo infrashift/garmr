@@ -126,12 +126,26 @@ func init() {
 	rootCmd.Flags().Bool("rate-limit", false, "enable rate limiting")
 	rootCmd.Flags().Float64("rate-limit-rps", 100, "requests per second limit")
 	rootCmd.Flags().Int("rate-limit-burst", 200, "rate limit burst size")
+	rootCmd.Flags().Bool("rate-limit-per-client", true, "track a separate bucket per client")
+	rootCmd.Flags().String("rate-limit-identifier", "ip",
+		"how per-client buckets are keyed: ip, header, or identity (mesh-verified SPIFFE URI from the XFCC header — use behind a Consul/Envoy sidecar)")
+	rootCmd.Flags().String("rate-limit-header", "X-Client-ID", "header read by the 'header' identifier")
+	rootCmd.Flags().Float64("rate-limit-client-rps", 1000, "per-client requests per second")
+	rootCmd.Flags().Int("rate-limit-client-burst", 100, "per-client burst size")
+	rootCmd.Flags().Int("rate-limit-max-clients", 10000, "bound on tracked per-client buckets (LRU eviction beyond it)")
 	rootCmd.Flags().StringSlice("rate-limit-trusted-proxies", nil,
 		"CIDRs whose X-Forwarded-For is trusted for per-client rate limiting (default: none, header ignored)")
 	mustBind("rate_limit.enabled", rootCmd.Flags().Lookup("rate-limit"))
 	mustBind("rate_limit.rps", rootCmd.Flags().Lookup("rate-limit-rps"))
 	mustBind("rate_limit.burst", rootCmd.Flags().Lookup("rate-limit-burst"))
+	mustBind("rate_limit.per_client", rootCmd.Flags().Lookup("rate-limit-per-client"))
+	mustBind("rate_limit.client_identifier", rootCmd.Flags().Lookup("rate-limit-identifier"))
+	mustBind("rate_limit.header_name", rootCmd.Flags().Lookup("rate-limit-header"))
+	mustBind("rate_limit.client_rps", rootCmd.Flags().Lookup("rate-limit-client-rps"))
+	mustBind("rate_limit.client_burst", rootCmd.Flags().Lookup("rate-limit-client-burst"))
+	mustBind("rate_limit.max_clients", rootCmd.Flags().Lookup("rate-limit-max-clients"))
 	mustBind("rate_limit.trusted_proxies", rootCmd.Flags().Lookup("rate-limit-trusted-proxies"))
+	viper.SetDefault("rate_limit.per_client", true)
 
 	// Storage backend flags
 	rootCmd.Flags().String("storage-type", "", "storage backend type (filesystem)")
@@ -201,6 +215,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	// Create server config
 	requireMatch := viper.GetBool("evaluation.require_match")
+	rateLimitPerClient := viper.GetBool("rate_limit.per_client")
 	cfg := server.Config{
 		HTTPAddr:           viper.GetString("http_addr"),
 		PolicyDir:          viper.GetString("policy_dir"),
@@ -221,10 +236,16 @@ func runServer(cmd *cobra.Command, args []string) error {
 		RateLimitPerSecond: viper.GetFloat64("rate_limit.rps"),
 		RateLimitBurst:     viper.GetInt("rate_limit.burst"),
 
-		RateLimitTrustedProxies: viper.GetStringSlice("rate_limit.trusted_proxies"),
-		StorageType:             viper.GetString("storage.type"),
-		StorageRoot:             viper.GetString("storage.root"),
-		RequireMatch:            &requireMatch,
+		RateLimitPerClient:        &rateLimitPerClient,
+		RateLimitClientIdentifier: viper.GetString("rate_limit.client_identifier"),
+		RateLimitHeaderName:       viper.GetString("rate_limit.header_name"),
+		RateLimitClientRPS:        viper.GetFloat64("rate_limit.client_rps"),
+		RateLimitClientBurst:      viper.GetInt("rate_limit.client_burst"),
+		RateLimitMaxClients:       viper.GetInt("rate_limit.max_clients"),
+		RateLimitTrustedProxies:   viper.GetStringSlice("rate_limit.trusted_proxies"),
+		StorageType:               viper.GetString("storage.type"),
+		StorageRoot:               viper.GetString("storage.root"),
+		RequireMatch:              &requireMatch,
 	}
 
 	// Create server

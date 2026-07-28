@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+
+	"github.com/infrashift/garmr/internal/xfcc"
 )
 
 // Config configures rate limiting.
@@ -38,11 +40,21 @@ type Config struct {
 	// ClientBurst is the per-client burst size
 	ClientBurst int `json:"clientBurst"`
 
-	// ClientIdentifier is how to identify clients: ip, header, cert
+	// ClientIdentifier is how to identify clients: "ip", "header", or
+	// "identity". Behind a service-mesh sidecar (Consul transparent proxy),
+	// "ip" collapses every caller into one bucket — RemoteAddr is the local
+	// Envoy — so mesh deployments should use "identity", which keys on the
+	// SPIFFE URI the sidecar forwards in the XFCC header. Only enable
+	// "identity" when a sidecar owns that header: from untrusted callers it
+	// is spoofable, letting them rotate buckets at will.
 	ClientIdentifier string `json:"clientIdentifier"`
 
 	// HeaderName for header-based client identification
 	HeaderName string `json:"headerName"`
+
+	// IdentityHeader is the header carrying the mesh-verified identity for
+	// the "identity" client identifier. Empty means xfcc.DefaultHeader.
+	IdentityHeader string `json:"identityHeader"`
 
 	// CleanupInterval for expired client limiters
 	CleanupInterval time.Duration `json:"cleanupInterval"`
@@ -360,6 +372,20 @@ func (l *Limiter) extractClientID(r *http.Request) string {
 
 	case "header":
 		return r.Header.Get(l.config.HeaderName)
+
+	case "identity":
+		// Key on the mesh-verified SPIFFE identity from the XFCC header.
+		// Falls back to the client IP when the header is absent or carries
+		// no URI — behind a sidecar that collapses to the loopback bucket,
+		// which fails safe (shared limit) rather than open (fresh buckets).
+		header := l.config.IdentityHeader
+		if header == "" {
+			header = xfcc.DefaultHeader
+		}
+		if id := xfcc.ParseSPIFFEIdentity(r.Header.Values(header)); id != "" {
+			return id
+		}
+		return clientIP(r.RemoteAddr)
 
 	default:
 		return clientIP(r.RemoteAddr)

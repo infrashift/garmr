@@ -148,12 +148,20 @@ Recorded, deliberately not done before the deploy:
   `url.Values.Encode()` (the raw-Sprintf locals also shadowed the `url`
   package); `TestClient_QueryParamsEscaped` pins that names/namespaces
   containing `&`/`#`/`=`/spaces arrive server-side as data.
-- **Rate limiting behind a sidecar**: with Consul transparent proxy every
-  caller shares one per-client bucket (RemoteAddr is the local Envoy), and
-  the per-client knobs (`ClientIdentifier`, `HeaderName`, per-client
-  rps/burst, MaxClients) are hardcoded in `DefaultConfig()` with no config
-  surface. Real fix: key the limiter on the XFCC/SPIFFE identity and
-  expose the knobs.
+- ~~**Rate limiting behind a sidecar**~~ — done (2026-07-28, follow-up
+  commit). New `client_identifier: identity` mode keys per-client buckets
+  on the mesh-verified SPIFFE URI from the XFCC header (falling back to
+  the client IP — fails safe as a shared bucket — when the header is
+  absent); the XFCC parsing moved to the shared `internal/xfcc` package so
+  the limiter and the server's audit principal use one implementation.
+  Every per-client knob is now configurable (`rate_limit.per_client`,
+  `client_identifier`, `header_name`, `client_rps`, `client_burst`,
+  `max_clients`) with flags, viper keys, and docs.
+  `TestRateLimit_KeyedByMeshIdentity` drives the full middleware chain:
+  two identities from the same source address get independent buckets.
+  The "identity" mode must only be enabled when a sidecar owns the XFCC
+  header — documented in config.example.yaml, configuration.md, and the
+  Nomad README.
 - **`/health/deep` quirks**: always returns HTTP 200 (status body-only) and
   is the only health path that requires the API key. Both undocumented.
 - **Hardcoded server limits**: `MaxRecvSize` fixed at 16 MB in main.go

@@ -131,6 +131,45 @@ container running `mc mirror` / `aws s3 sync`, or a CSI volume — and point
 
 For more details on storage backends, see the [Storage Backends](/garmr/docs/advanced/storage-backends/) documentation.
 
+## Rate Limiting
+
+Optional token-bucket rate limiting with a global bucket plus per-client
+buckets:
+
+```yaml
+rate_limit:
+  enabled: false
+  rps: 100
+  burst: 200
+  per_client: true
+  client_identifier: "ip"     # ip | header | identity
+  client_rps: 1000
+  client_burst: 100
+  max_clients: 10000
+  trusted_proxies: []
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `rate_limit.enabled` | `false` | Enable rate limiting |
+| `rate_limit.rps` / `rate_limit.burst` | `100` / `200` | Global bucket |
+| `rate_limit.per_client` | `true` | Track a separate bucket per client |
+| `rate_limit.client_identifier` | `ip` | How buckets are keyed: `ip`, `header`, or `identity` |
+| `rate_limit.header_name` | `X-Client-ID` | Header read by the `header` identifier |
+| `rate_limit.client_rps` / `rate_limit.client_burst` | `1000` / `100` | Each client's bucket |
+| `rate_limit.max_clients` | `10000` | Bound on tracked buckets (least-recently-seen eviction) |
+| `rate_limit.trusted_proxies` | _(none)_ | CIDRs whose `X-Forwarded-For` is believed in `ip` mode |
+
+**In a service mesh, use `client_identifier: identity`.** Behind a Consul
+Connect (or any Envoy) sidecar, every caller's `RemoteAddr` is the local
+proxy, so `ip` mode collapses all traffic into a single shared bucket. The
+`identity` mode keys buckets on the mesh-verified SPIFFE URI from the XFCC
+header (`auth.identity_header`) — the same value the audit log records as
+`principal`. Only enable it when a sidecar owns that header; from untrusted
+callers it is spoofable, which would let them mint fresh buckets at will.
+When the header is absent, `identity` mode falls back to the client IP,
+which fails safe (a shared bucket) rather than open.
+
 ## Development Mode
 
 Enable development mode for colored console output and relaxed security settings. This should never be enabled in production.
@@ -167,11 +206,16 @@ shutdown_timeout: "30s"
 # cors:
 #   allowed_origins: []
 
-# Rate limiting (optional)
+# Rate limiting (optional; use client_identifier "identity" in a mesh)
 # rate_limit:
 #   enabled: false
 #   rps: 100
 #   burst: 200
+#   per_client: true
+#   client_identifier: "ip"   # ip | header | identity
+#   client_rps: 1000
+#   client_burst: 100
+#   max_clients: 10000
 #   trusted_proxies: []
 
 # Logging configuration

@@ -65,6 +65,22 @@ type Config struct {
 	RateLimitEnabled   bool
 	RateLimitPerSecond float64
 	RateLimitBurst     int
+	// RateLimitPerClient toggles per-client buckets. Tri-state: nil keeps
+	// the limiter default (true); the pointer form exists because a zero
+	// bool is indistinguishable from "unset" in field-by-field configs.
+	RateLimitPerClient *bool
+	// RateLimitClientIdentifier keys the per-client buckets: "ip" (default),
+	// "header", or "identity" (the SPIFFE URI from the mesh's XFCC header —
+	// the right choice behind a Consul/Envoy sidecar, where every caller's
+	// RemoteAddr is the local proxy).
+	RateLimitClientIdentifier string
+	// RateLimitHeaderName is the header read by the "header" identifier.
+	RateLimitHeaderName string
+	// RateLimitClientRPS / RateLimitClientBurst bound each client's bucket.
+	RateLimitClientRPS   float64
+	RateLimitClientBurst int
+	// RateLimitMaxClients bounds the per-client bucket map.
+	RateLimitMaxClients int
 	// RateLimitTrustedProxies lists CIDRs whose X-Forwarded-For header is
 	// believed for per-client identification. Empty means never trust it.
 	RateLimitTrustedProxies []string
@@ -142,6 +158,27 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 		if cfg.RateLimitBurst > 0 {
 			rlConfig.Burst = cfg.RateLimitBurst
 		}
+		if cfg.RateLimitPerClient != nil {
+			rlConfig.PerClient = *cfg.RateLimitPerClient
+		}
+		if cfg.RateLimitClientIdentifier != "" {
+			rlConfig.ClientIdentifier = cfg.RateLimitClientIdentifier
+		}
+		if cfg.RateLimitHeaderName != "" {
+			rlConfig.HeaderName = cfg.RateLimitHeaderName
+		}
+		if cfg.RateLimitClientRPS > 0 {
+			rlConfig.ClientRequestsPerSecond = cfg.RateLimitClientRPS
+		}
+		if cfg.RateLimitClientBurst > 0 {
+			rlConfig.ClientBurst = cfg.RateLimitClientBurst
+		}
+		if cfg.RateLimitMaxClients > 0 {
+			rlConfig.MaxClients = cfg.RateLimitMaxClients
+		}
+		// The "identity" identifier reads the same mesh header the audit
+		// principal comes from.
+		rlConfig.IdentityHeader = cfg.IdentityHeader
 		rlConfig.TrustedProxies = cfg.RateLimitTrustedProxies
 		s.rateLimiter = ratelimit.New(rlConfig)
 		// Without this the limiter is unobservable: the collector was

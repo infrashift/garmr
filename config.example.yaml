@@ -61,8 +61,22 @@ auth:
 # Rate limiting (optional)
 # rate_limit:
 #   enabled: false
-#   rps: 100
+#   rps: 100                  # global bucket
 #   burst: 200
+#   per_client: true
+#   client_rps: 1000          # each client's own bucket
+#   client_burst: 100
+#   max_clients: 10000        # LRU-evicted bound on tracked buckets
+#   # How per-client buckets are keyed:
+#   #   ip       — client IP (the default). WRONG behind a mesh sidecar:
+#   #              every caller's RemoteAddr is the local Envoy, so all
+#   #              traffic shares one bucket.
+#   #   identity — the mesh-verified SPIFFE URI from the XFCC header
+#   #              (auth.identity_header). Use this under Consul Connect.
+#   #              Only safe when a sidecar owns that header.
+#   #   header   — a caller-supplied header (header_name); trusted callers only.
+#   client_identifier: "ip"
+#   header_name: "X-Client-ID"
 #   # X-Forwarded-For is ignored unless the immediate peer is listed here,
 #   # otherwise any caller can rotate the header to get a fresh bucket.
 #   trusted_proxies: []

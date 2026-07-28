@@ -185,6 +185,44 @@ func TestExtractClientID_UnknownModeFallsBackToIP(t *testing.T) {
 	}
 }
 
+func TestExtractClientID_IdentityMode(t *testing.T) {
+	cfg := testConfig()
+	cfg.ClientIdentifier = "identity"
+	l := New(cfg)
+	defer l.Close()
+
+	// Mesh-verified SPIFFE URI in the XFCC header keys the bucket.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "127.0.0.1:41000" // the sidecar
+	req.Header.Set("X-Forwarded-Client-Cert",
+		`By=spiffe://dc1/ns/default/svc/garmr;Hash=abc;URI=spiffe://dc1/ns/default/svc/web`)
+	if got := l.extractClientID(req); got != "spiffe://dc1/ns/default/svc/web" {
+		t.Errorf("extractClientID = %q, want the SPIFFE URI", got)
+	}
+
+	// Absent or URI-less header falls back to the client IP — behind a
+	// sidecar that collapses to the loopback bucket, which fails safe.
+	bare := httptest.NewRequest(http.MethodGet, "/", nil)
+	bare.RemoteAddr = "127.0.0.1:41000"
+	if got := l.extractClientID(bare); got != "127.0.0.1" {
+		t.Errorf("extractClientID without header = %q, want IP fallback", got)
+	}
+}
+
+func TestExtractClientID_IdentityMode_CustomHeader(t *testing.T) {
+	cfg := testConfig()
+	cfg.ClientIdentifier = "identity"
+	cfg.IdentityHeader = "X-Mesh-Identity"
+	l := New(cfg)
+	defer l.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Mesh-Identity", `URI=spiffe://dc1/ns/default/svc/ci`)
+	if got := l.extractClientID(req); got != "spiffe://dc1/ns/default/svc/ci" {
+		t.Errorf("extractClientID = %q, want SPIFFE URI from the custom header", got)
+	}
+}
+
 // TestClientMap_BoundedByMaxClients covers the memory bound. A caller
 // rotating its identifier must not grow the map without limit.
 func TestClientMap_BoundedByMaxClients(t *testing.T) {

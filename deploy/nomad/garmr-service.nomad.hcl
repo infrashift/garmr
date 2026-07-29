@@ -85,6 +85,11 @@ job "garmr" {
         args = [
           "--http-addr", ":8080",
           "--policy-dir", "/etc/garmr/policies",
+          # Audit records stream to stdout so Nomad's log capture (and
+          # whatever ships alloc logs) carries the decision trail — the
+          # only record of the mesh-verified principal — off-node.
+          # Application logs go to stderr, keeping the streams separable.
+          "--audit-path", "stdout",
           # Drain budget must stay below kill_timeout, or a slow drain is
           # cut short by SIGKILL.
           "--shutdown-timeout", "20s",

@@ -275,11 +275,33 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 	return s, nil
 }
 
-// initAuditLogger initializes the audit log with rotation via lumberjack.
+// initAuditLogger initializes the audit log: a rotated file via lumberjack,
+// or a standard stream for platform-shipped logging.
 func (s *Server) initAuditLogger() error {
 	auditPath := s.config.AuditPath
 	if auditPath == "" {
 		auditPath = "/var/log/garmr/audit.log"
+	}
+
+	// "stdout" / "stderr" stream the audit records instead of writing a
+	// local file, so the platform's log pipeline (Nomad/K8s log capture,
+	// vector, promtail, fluent-bit) ships them off-node — the audit trail
+	// is the only record of the mesh-verified principal, and a file on
+	// local disk dies with the allocation. Application logs go to stderr
+	// (zap's production default), so audit-to-stdout keeps the two streams
+	// separable. Rotation settings do not apply; the platform owns
+	// retention.
+	if auditPath == "stdout" || auditPath == "stderr" {
+		w := os.Stdout
+		if auditPath == "stderr" {
+			w = os.Stderr
+		}
+		// auditFile stays nil: Stop() must not close the process streams.
+		s.auditLogger = slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{
+			Level: slog.LevelInfo,
+		}))
+		s.logger.Info("audit logging enabled", zap.String("sink", auditPath))
+		return nil
 	}
 
 	// Create directory if needed

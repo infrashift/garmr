@@ -227,8 +227,17 @@ Recorded, deliberately not done before the deploy:
   fan-out: its help text now states it mutates one instance's memory,
   comes back on the next reload/restart, and that removing a policy for
   real means deleting it from git and deploying.
-- **Audit log shipping**: the audit file (only record of the mesh-verified
-  `principal`) lives on local disk and nothing ships it off-node.
+- ~~**Audit log shipping**~~ — done (2026-07-28, follow-up commit) by
+  handing shipping to the platform instead of building a shipper:
+  `audit.path` accepts the literal `stdout`/`stderr`, streaming records
+  to the process streams that Nomad/K8s log capture already ships
+  off-node (application logs go to stderr, so audit-to-stdout keeps the
+  streams separable; rotation settings don't apply — the platform owns
+  retention; Stop() never closes the process streams). The Nomad service
+  job now runs `--audit-path stdout`, and the docs recommend it for mesh
+  deployments while keeping file mode for file-tailing setups. Pinned
+  end-to-end: an evaluation with an XFCC header lands a JSON decision
+  record carrying the SPIFFE principal on stdout.
 
 ## Resolved by removal (2026-07-28)
 

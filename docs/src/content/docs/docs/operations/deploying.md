@@ -199,6 +199,13 @@ come from: the Git repository that renders the ConfigMap, the object-storage
 bucket an init container syncs from (enable versioning there), or your usual
 volume snapshot tooling for a PVC. Garmr does not implement its own backup.
 
-Audit logs rotate via lumberjack (`max_size`, `max_backups`, `max_age` in
-`config.audit`). Ship them off the pod to a long-term store — the chart
-mounts them on `emptyDir` so they do not survive a pod restart.
+Audit records are the only durable record of the mesh-verified
+`principal`, so ship them off the node. The recommended posture is
+`audit.path: stdout`: records stream to the process stdout, which the
+platform's log capture (Nomad alloc logs, kubelet, vector/promtail/
+fluent-bit) already ships — no sidecar tailer, no rotation to manage,
+and application logs stay separable on stderr. The file mode
+(`audit.path: /var/log/garmr/audit.log`, rotated via `max_size`,
+`max_backups`, `max_age`) remains for deployments that tail files, but
+note the chart mounts it on `emptyDir`, so an unshipped file dies with
+the pod.

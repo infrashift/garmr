@@ -129,7 +129,15 @@ audit:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `audit.enabled` | `true` | Enable audit logging |
-| `audit.path` | `/var/log/garmr/audit.log` | File path for the audit log |
+| `audit.path` | `/var/log/garmr/audit.log` | File path for the audit log, or the literal `stdout`/`stderr` to stream records for platform-shipped logging |
+| `audit.max_size` / `max_backups` / `max_age` | `100` MB / `10` / `30` days | Rotation (file mode only) |
+
+**In a mesh deployment, prefer `audit.path: stdout`.** The audit trail is
+the only record of the mesh-verified `principal`, and a file on local disk
+dies with the allocation. Streaming to stdout hands shipping to the
+platform's log pipeline (Nomad alloc logs, kubelet, vector/promtail/
+fluent-bit) with no sidecar tailer and no rotation to manage; application
+logs go to stderr, so the streams stay separable.
 
 ## Storage Backend
 

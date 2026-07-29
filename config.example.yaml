@@ -39,6 +39,11 @@ evaluation:
   require_match: true
 
 # Audit logging
+# path may be a file (rotated via max_size/max_backups/max_age) or the
+# literal "stdout"/"stderr" to stream records for platform-shipped logging.
+# In a mesh deployment prefer "stdout": the audit trail is the only record
+# of the mesh-verified principal, and a file on local disk dies with the
+# allocation. Application logs go to stderr, so the streams stay separable.
 audit:
   enabled: true
   path: "/var/log/garmr/audit.log"

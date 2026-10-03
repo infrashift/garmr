@@ -207,7 +207,8 @@ Evaluate input against loaded policies.
       "description": "Containers must not run as root",
       "severity": "high",
       "passed": false,
-      "message": "Container is running as root"
+      "message": "Container is running as root",
+      "remediation": "Set securityContext.runAsNonRoot: true"
     }
   ],
   "summary": {
@@ -243,6 +244,11 @@ Evaluate input against loaded policies.
 | `terminated_early` | bool | True when fail-fast stopped the evaluation |
 | `termination_rule` | object | The rule that triggered fail-fast; present only when `terminated_early` is true |
 | `metrics` | object | Evaluation metrics |
+
+Each entry in `results` carries `policy_name`, `policy_namespace`, `rule_id`,
+`description`, `severity`, `passed`, `message`, and `remediation` — the
+operator-facing hint for fixing the violation, which `garmr eval` renders
+beneath each failure.
 
 A partial evaluation is not the same as a clean one: check
 `evaluation_mode.rules_skipped` and `terminated_early` before treating an
@@ -333,11 +339,24 @@ List loaded policies.
     {
       "name": "container-security",
       "namespace": "security",
-      "rule_count": 5
+      "rule_count": 5,
+      "hash": "9f2b...c41e"
     }
-  ]
+  ],
+  "digest": "1da2206c649e53e18f3a44858694d96c2927e7dd0f064f27934d16066773eb76",
+  "instance_id": "a1b2c3d4-alloc"
 }
 ```
+
+`digest` is a deterministic sha256 over the whole loaded policy set. Compare
+it with `garmr policy digest <dir>` run on the git checkout to confirm the
+server converged on exactly the content that was shipped; `hash` is the
+per-policy equivalent.
+
+`instance_id` names the instance that answered. Behind a service-mesh
+upstream every call load-balances across instances, so a single response
+describes one instance rather than the fleet — collect these across repeated
+calls (or use `garmr policy reload --converge`) to verify all of them agree.
 
 **Examples:**
 
@@ -380,10 +399,17 @@ Reload policies from disk (hot reload).
 {
   "success": true,
   "policies_loaded": 14,
+  "digest": "1da2206c649e53e18f3a44858694d96c2927e7dd0f064f27934d16066773eb76",
   "reload_time_ms": 16,
-  "storage_type": "filesystem"
+  "storage_type": "filesystem",
+  "instance_id": "a1b2c3d4-alloc"
 }
 ```
+
+Reload mutates the one instance that receives the request. `digest` and
+`instance_id` are what make a fleet-wide reload verifiable — see
+`garmr policy reload --converge` for reloading through a mesh upstream that
+load-balances.
 
 **Example:**
 
@@ -432,7 +458,12 @@ Validate a policy without loading it.
 ```
 
 Error objects carry `message` and `code`, plus `line`, `column`, and
-`filename` when position information is available.
+`filename` when position information is available. `code` is `PARSE_ERROR`
+(not valid CUE), `SCHEMA_ERROR` (does not match the policy schema), or
+`COMPILE_ERROR` (matches the schema but the loader would still reject it:
+an invalid regex or semver literal, duplicate rule ids, an exception that
+matches everything). Validation applies exactly the checks the server runs
+when it loads policies.
 
 **Example:**
 

@@ -135,36 +135,18 @@ func TestEvaluate_DryRun(t *testing.T) {
 	}
 }
 
-func TestEvaluate_DryRunOverride(t *testing.T) {
-	// Policy is NOT dry run, but override is set
-	source := makePolicy("dro-test", "default", "dry run override",
-		`{id: "r1", description: "check", severity: "high", expr: {match: {path: "x", equals: 1}}, message: "x must be 1"}`,
-		"deny", "")
-	eng := loadTestPolicy(t, "dro-test", "default", source)
-
-	dryRun := true
-	resp, _ := eng.Evaluate(context.Background(), &EvaluateRequest{
-		Input:   map[string]any{"x": 2.0},
-		Options: EvaluateOptions{DryRunOverride: &dryRun},
-	})
-	if resp.Decision != DecisionWarn {
-		t.Errorf("expected warn (dry run override), got %s", resp.Decision)
-	}
-}
-
 // --- Category/Tag Filtering ---
 
 func TestEvaluate_CategoryFilter(t *testing.T) {
 	source := makePolicy("cat-test", "default", "category filter test",
 		`{id: "r1", description: "security check", severity: "high", category: "security", expr: {match: {path: "x", equals: 1}}, message: "fail"},
 		{id: "r2", description: "quality check", severity: "medium", category: "quality", expr: {match: {path: "x", equals: 1}}, message: "fail"}`,
-		"deny", "")
+		"deny", `evaluation: includeCategories: ["security"]`)
 	eng := loadTestPolicy(t, "cat-test", "default", source)
 
 	// Only evaluate security rules
 	resp, _ := eng.Evaluate(context.Background(), &EvaluateRequest{
-		Input:   map[string]any{"x": 2.0},
-		Options: EvaluateOptions{IncludeCategories: []string{"security"}},
+		Input: map[string]any{"x": 2.0},
 	})
 	// Only the security rule should have been evaluated and failed
 	if len(resp.Results) != 1 {
@@ -176,12 +158,11 @@ func TestEvaluate_TagFilter(t *testing.T) {
 	source := makePolicy("tag-test", "default", "tag filter test",
 		`{id: "r1", description: "prod check", severity: "high", tags: ["prod"], expr: {match: {path: "x", equals: 1}}, message: "fail"},
 		{id: "r2", description: "dev check", severity: "low", tags: ["dev"], expr: {match: {path: "x", equals: 1}}, message: "fail"}`,
-		"deny", "")
+		"deny", `evaluation: excludeTags: ["dev"]`)
 	eng := loadTestPolicy(t, "tag-test", "default", source)
 
 	resp, _ := eng.Evaluate(context.Background(), &EvaluateRequest{
-		Input:   map[string]any{"x": 2.0},
-		Options: EvaluateOptions{ExcludeTags: []string{"dev"}},
+		Input: map[string]any{"x": 2.0},
 	})
 	if len(resp.Results) != 1 {
 		t.Errorf("expected 1 result (excluding dev), got %d", len(resp.Results))
@@ -280,10 +261,8 @@ func TestEvaluate_TimeoutNotDowngradedByDryRun(t *testing.T) {
 		"deny", "dryRun: true", `evaluation: timeout: "1ns"`)
 	eng := loadTestPolicy(t, "timeout-dryrun", "default", source)
 
-	dryRun := true
 	resp, err := eng.Evaluate(context.Background(), &EvaluateRequest{
-		Input:   map[string]any{"x": 2.0},
-		Options: EvaluateOptions{DryRunOverride: &dryRun},
+		Input: map[string]any{"x": 2.0},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -644,7 +623,7 @@ func TestConcurrentCueContextPool_StressCorrectness(t *testing.T) {
 
 	// Load a second policy to stress multi-policy evaluation
 	policyName := makePolicy("check-name", "default", "check name present",
-		`{id: "r2", description: "name must exist", severity: "medium", expr: {exists: {path: "name"}}, message: "name missing"}`,
+		`{id: "r2", description: "name must exist", severity: "medium", expr: {match: {path: "name", exists: true}}, message: "name missing"}`,
 		"deny", "")
 	if err := eng.LoadPolicy(context.Background(), "check-name", "default", policyName); err != nil {
 		t.Fatalf("LoadPolicy check-name: %v", err)
@@ -959,7 +938,7 @@ func TestConcurrentCueContextPool_PoolIsolation(t *testing.T) {
 		},
 		{
 			name:      "exists-check",
-			rules:     `{id: "r5", description: "labels exist", severity: "medium", expr: {exists: {path: "metadata.labels"}}, message: "no labels"}`,
+			rules:     `{id: "r5", description: "labels exist", severity: "medium", expr: {match: {path: "metadata.labels", exists: true}}, message: "no labels"}`,
 			action:    "warn",
 			passInput: map[string]any{"metadata": map[string]any{"labels": map[string]any{"app": "test"}}},
 			failInput: map[string]any{"metadata": map[string]any{}},

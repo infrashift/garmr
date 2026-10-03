@@ -109,11 +109,15 @@
     },
     "/healthz": {
       "get": {
-        "tags": ["health"],
+        "tags": [
+          "health"
+        ],
         "summary": "Liveness probe",
         "description": "Always returns 200 once the process is serving. /livez is an alias.",
         "operationId": "getHealthz",
-        "security": [{}],
+        "security": [
+          {}
+        ],
         "responses": {
           "200": {
             "description": "Process is live"
@@ -123,11 +127,15 @@
     },
     "/readyz": {
       "get": {
-        "tags": ["health"],
+        "tags": [
+          "health"
+        ],
         "summary": "Readiness probe",
         "description": "Returns 200 when the server can serve traffic. Returns 503 while zero policies are loaded and as soon as shutdown begins draining.",
         "operationId": "getReadyz",
-        "security": [{}],
+        "security": [
+          {}
+        ],
         "responses": {
           "200": {
             "description": "Server is ready"
@@ -140,9 +148,11 @@
     },
     "/health/deep": {
       "get": {
-        "tags": ["health"],
+        "tags": [
+          "health"
+        ],
         "summary": "Deep health check",
-        "description": "Runs cheap and deep checkers, including a real round trip to the policy storage. An operator diagnostic, not a probe — and unlike the probe endpoints it requires the API key when one is configured, because every call performs storage I/O.",
+        "description": "Runs cheap and deep checkers, including a real round trip to the policy storage. An operator diagnostic, not a probe \u2014 and unlike the probe endpoints it requires the API key when one is configured, because every call performs storage I/O.",
         "operationId": "getDeepHealth",
         "responses": {
           "200": {
@@ -156,10 +166,14 @@
     },
     "/metrics": {
       "get": {
-        "tags": ["health"],
+        "tags": [
+          "health"
+        ],
         "summary": "Prometheus metrics",
         "operationId": "getMetrics",
-        "security": [{}],
+        "security": [
+          {}
+        ],
         "responses": {
           "200": {
             "description": "Prometheus exposition format",
@@ -313,6 +327,56 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "API key missing or invalid (only when auth.api_key is configured)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Method not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Server shedding load: the request never started, retry is meaningful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -355,6 +419,56 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "API key missing or invalid (only when auth.api_key is configured)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Method not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Server shedding load: the request never started, retry is meaningful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -389,6 +503,36 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "API key missing or invalid (only when auth.api_key is configured)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Method not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -412,8 +556,8 @@
           {
             "name": "namespace",
             "in": "query",
-            "description": "Policy namespace",
-            "required": true,
+            "description": "Policy namespace; defaults to \"default\" when omitted",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -426,6 +570,36 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DeletePolicyResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key missing or invalid (only when auth.api_key is configured)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Method not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -471,6 +645,96 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "API key missing or invalid (only when auth.api_key is configured)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Method not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Server shedding load: the request never started, retry is meaningful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "OpenAPI specification",
+        "description": "Returns this document. The supported way to introspect the API surface.",
+        "operationId": "getOpenAPISpec",
+        "tags": [
+          "Meta"
+        ],
+        "responses": {
+          "200": {
+            "description": "OpenAPI document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/livez": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Liveness probe (alias of /healthz)",
+        "description": "Always returns 200 once the process is serving. /livez is an alias.",
+        "operationId": "getLivez",
+        "security": [
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "Process is live"
           }
         }
       }
@@ -634,8 +898,7 @@
         "required": [
           "decision",
           "request_id",
-          "results",
-          "metrics"
+          "results"
         ]
       },
       "RuleResult": {
@@ -675,6 +938,10 @@
           "message": {
             "type": "string",
             "description": "Failure message (if rule failed)"
+          },
+          "remediation": {
+            "type": "string",
+            "description": "Operator-facing hint for fixing the violation"
           }
         },
         "required": [
@@ -750,7 +1017,19 @@
           },
           "code": {
             "type": "string",
-            "description": "Error category (PARSE_ERROR, SCHEMA_ERROR)"
+            "description": "Error category: PARSE_ERROR (not valid CUE), SCHEMA_ERROR (does not match the policy schema), COMPILE_ERROR (passes the schema but the loader rejects it, e.g. an invalid regex, duplicate rule ids, or an exception that matches everything)"
+          },
+          "line": {
+            "type": "integer",
+            "description": "1-based line of the offending token, when known"
+          },
+          "column": {
+            "type": "integer",
+            "description": "1-based column of the offending token, when known"
+          },
+          "filename": {
+            "type": "string",
+            "description": "Source filename, when the caller supplied one"
           }
         }
       },
@@ -766,6 +1045,10 @@
           "digest": {
             "type": "string",
             "description": "Deterministic sha256 digest of the loaded policy set; compare with `garmr policy digest <dir>` on a git checkout to verify convergence"
+          },
+          "instance_id": {
+            "type": "string",
+            "description": "Identifier of the instance that answered. Behind a load-balancing mesh upstream a caller cannot address instances individually, so convergence is verified by collecting these across repeated calls."
           }
         }
       },
@@ -812,6 +1095,10 @@
           "storage_type": {
             "type": "string",
             "description": "Active storage backend type (filesystem)"
+          },
+          "instance_id": {
+            "type": "string",
+            "description": "Identifier of the instance that answered. Behind a load-balancing mesh upstream a caller cannot address instances individually, so convergence is verified by collecting these across repeated calls."
           }
         }
       },

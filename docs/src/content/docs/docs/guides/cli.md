@@ -223,12 +223,28 @@ garmr policy reload [flags]
 |------|-------------|---------|
 | `--servers` | Reload every listed instance (comma-separated or repeated) | the `--server` address |
 | `--expect-digest` | Fail unless every instance reports this policy-set digest | |
+| `--converge` | Repeat the reload against one address until `--instances` distinct instances have acknowledged | `false` |
+| `--instances` | Number of distinct instances to converge (required with `--converge`) | |
+| `--converge-timeout` | Give up if `--converge` has not reached every instance in this long | `2m` |
+
+Use `--servers` when you can address instances directly. Behind a service-mesh
+upstream you cannot — every call load-balances and there is only one address —
+so `--servers` would reload one arbitrary instance, see a single digest, and
+exit 0 with the rest of the fleet stale. `--converge` handles that case: each
+response carries an `instance_id`, and the command keeps reloading until it has
+seen `--instances` distinct instances all reporting the expected digest,
+failing on timeout, digest mismatch, or divergence.
 
 **Examples:**
 
 ```bash
 # Reload the single configured instance
 garmr policy reload
+
+# Through a mesh upstream that load-balances (e.g. Consul Connect)
+garmr policy reload --server http://localhost:8080 \
+  --converge --instances 2 \
+  --expect-digest "$(garmr policy digest policies/)"
 
 # Fan out to every instance with convergence enforced
 garmr policy reload \

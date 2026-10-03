@@ -19,6 +19,12 @@ const (
 	maxRegexPatternLen = 512
 )
 
+// sharedRegexCache holds patterns that are only known at evaluation time:
+// a `compare` "matches" whose pattern comes from the input, the `matches`
+// builtin, and wildcard selector patterns. Patterns written as literals in a
+// policy are compiled once at load instead.
+var sharedRegexCache = newRegexCache(maxRegexCacheEntries)
+
 // regexCache is an LRU cache of compiled regular expressions.
 //
 // It replaces a sync.Map with no eviction. Correctness did not depend on

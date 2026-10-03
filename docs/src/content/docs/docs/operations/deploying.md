@@ -42,18 +42,24 @@ image:
 policies:
   inline:
     example.cue: |
-      apiVersion: "policy.garmr.io/v1"
-      kind: "Policy"
-      metadata: { name: "example", namespace: "default" }
-      spec:
-        rules: [{
-          id: "r1"
-          description: "env must be prod"
-          severity: "high"
-          expr: { match: { path: "env", equals: "prod" } }
-          message: "env must be prod"
-        }]
-        enforcement: { action: "deny" }
+      package policies
+
+      example: {
+        apiVersion: "policy.garmr.io/v1"
+        kind: "Policy"
+        metadata: { name: "example", namespace: "default" }
+        spec: {
+          target: resources: ["*"]
+          rules: [{
+            id: "r1"
+            description: "env must be prod"
+            severity: "high"
+            expr: { match: { path: "env", equals: "prod" } }
+            message: "env must be prod"
+          }]
+          enforcement: { action: "deny" }
+        }
+      }
 ```
 
 The chart defaults assume:
@@ -167,7 +173,10 @@ Garmr replicas are fully stateless. Each replica:
   to start if that load fails.
 - Re-reads the backend on `POST /v1/policies/reload`. There is no watcher and
   no poller: reload is explicit, or happens implicitly when the pod restarts.
-- Serves evaluation requests from its in-memory compiled policy set.
+- Serves evaluation requests from its in-memory compiled policy set. A
+  reload builds a new set and swaps it in atomically: in-flight evaluations
+  finish on the old set, nothing waits on the reload, and a failed reload
+  publishes nothing.
 
 This means:
 

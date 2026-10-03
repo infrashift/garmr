@@ -24,12 +24,13 @@ This document compares their feature sets side-by-side and highlights capabiliti
 |---|---|---|---|
 | Policy language | CUE | Rego | CUE provides type safety; Rego provides logic programming |
 | Input formats | **JSON and YAML** (auto-detected from extension, content, or Content-Type) | JSON only | **Garmr advantage** — YAML is native in K8s/DevOps workflows |
-| Schema validation | Built-in (CUE type system) | None (Rego is untyped) | **Garmr advantage** — policies are validated against a schema before loading |
-| Policy compilation | Pre-compiled to CUE values | Compiled to IR / WASM | Both compile before eval |
-| Built-in functions | 30+ | 150+ | OPA has far more built-ins |
+| Schema validation | Built-in (CUE type system), including every expression | None (Rego is untyped) | **Garmr advantage** — a misspelled operator or field is a load error, not a silently-passing rule |
+| Policy compilation | Validated with CUE, then compiled to Go evaluation trees; evaluation never touches CUE | Compiled to IR / WASM | Both compile before eval |
+| Evaluation speed (in-process) | 3.0 µs / 6 allocs for a 3-rule policy | 24.6 µs / 166 allocs for the equivalent Rego | **Garmr advantage** — see [Performance](/garmr/docs/comparisons/opa-performance/) |
+| Built-in functions | 33 | 150+ | OPA has far more built-ins |
 | Custom functions | Registered via Go API | Registered via Go API | Equivalent |
-| Expression operators | 20+ (match, compare, forEach, contains, all/any/not) | Rego operators + comprehensions | Different paradigms |
-| Data references | `input.` path resolution, `func` calls | `input`, `data`, imports | OPA's `data` document is more flexible |
+| Expression operators | `match` (21 field operators), `compare`, `forEach`, `func`, `all`/`any`/`not` | Rego operators + comprehensions | Rego is more expressive (variables, joins, user functions); Garmr is declarative |
+| Data references | Input paths, literals, builtin calls; static reference data via CUE packages | `input`, `data`, imports | OPA's runtime `data` document is more flexible |
 | Partial evaluation | Not implemented | Compile API | OPA advantage |
 | WASM compilation | Not implemented | Supported | OPA advantage |
 
@@ -53,7 +54,7 @@ This document compares their feature sets side-by-side and highlights capabiliti
 | Rule categories | Built-in field per rule | Not built-in | **Garmr advantage** |
 | Rule tags | Built-in tag arrays per rule | Not built-in | **Garmr advantage** |
 | Remediation guidance | Built-in `remediation` field per rule | Not built-in | **Garmr advantage** |
-| Category/tag filtering | Request-time and policy-level include/exclude | Not built-in | **Garmr advantage** |
+| Category/tag filtering | Policy-level include/exclude | Not built-in | **Garmr advantage** |
 | Policy namespaces | Built-in namespace hierarchy | Package system | Both provide organization |
 
 ### Target Matching & Exceptions
@@ -88,7 +89,7 @@ This document compares their feature sets side-by-side and highlights capabiliti
 | Policy bundles | Not implemented | Full bundle system with signing | **OPA advantage** |
 | Bundle discovery | Not implemented | Discovery service | **OPA advantage** |
 | Lock files | Built-in (`garmr policy lock`) for GitOps | Not built-in | **Garmr advantage** — see [GitOps Lock Files](#5-gitops-lock-files) |
-| Policy validation | `garmr validate` via API | `opa check` (local) | Both provide validation |
+| Policy validation | `garmr validate` (runs the server's loader locally; `--remote` uses the API) | `opa check` (local) | Both provide validation |
 | Policy push | Not yet implemented | REST API `PUT /v1/policies` | OPA advantage |
 
 ### CLI & CI/CD Integration
@@ -319,7 +320,7 @@ Garmr validates policy files against a CUE schema before loading them. Invalid p
 
 **Why this matters:**
 
-- **Catch errors early.** Typos, wrong types, missing required fields — all caught at policy load time, not at evaluation time.
+- **Catch errors early.** Typos, wrong types, missing required fields — all caught at policy load time, not at evaluation time. This covers rule expressions too: a misspelled operator, two operators in one expression, an invalid regex or semver literal, or an unknown builtin fails the load.
 - **Self-documenting.** The schema defines what a valid policy looks like. New policy authors can read the schema to understand available fields, types, and constraints.
 - **IDE support.** CUE has LSP support, so editors can provide autocompletion and inline validation for policy files.
 

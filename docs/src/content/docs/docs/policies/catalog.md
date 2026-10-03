@@ -34,12 +34,13 @@ policy tree — point it at yours.
 
 ## `advanced-operators`
 
-`forEach`, `length`, `semver`, `datetime`, and cross-field `compare`.
+`forEach` (including `where` filters and counting), rule `when`, `length`, `semver`, `datetime`, cross-field `compare`, `[*]` projections, and messages that name the failing element.
 
 Source: `example-policies/advanced-operators/`
 
 | Policy | Rules | Description |
 |--------|-------|-------------|
+| `aggregate-checks` | 5 | Checks across all containers: total CPU via a `[*]` projection, a counted `forEach`, undeclared ports (`where`) with per-container messages, unique names, and a production-only rule (`when`) |
 | `compare-cross-field` | 2 | Compares two fields from the input against each other |
 | `compare-env` | 1 | Compares a deployment target against the cluster it was approved for |
 | `compare-literal` | 2 | Compares input fields against literal values using various operators |
@@ -50,6 +51,7 @@ Source: `example-policies/advanced-operators/`
 | `foreach-nested` | 1 | Complex per-element checks combining forEach with logical operators |
 | `length-constraints` | 5 | Validates array and string lengths using various length operators |
 | `semver-constraints` | 3 | Validates semantic versioning constraints on application versions |
+| `service-selectors` | 1 | Joins Services to Deployments by name (`where`) and checks each selector with `compare` `subsetOf` |
 
 
 ## `builtins`
@@ -81,7 +83,7 @@ Source: `example-policies/real-world/`
 
 ## `collections`
 
-`contains` against lists, with `value` / `all` / `any`.
+List membership with `match.containsAll` and `match.containsAny`.
 
 Source: `example-policies/collections/`
 
@@ -100,11 +102,11 @@ Source: `example-policies/condition-operators/`
 
 | Policy | Rules | Description |
 |--------|-------|-------------|
-| `absent-operator` | 2 | Validates field absence using absent operator |
+| `absent-operator` | 2 | Validates field absence using match.exists: false |
 | `equals-boolean` | 1 | Validates boolean field matching using the equals operator |
 | `equals-numeric` | 1 | Validates exact numeric matching using the equals operator |
 | `equals-string` | 2 | Validates exact string matching using the equals operator |
-| `exists-operator` | 2 | Validates field existence using exists and absent operators |
+| `exists-operator` | 2 | Validates field existence using match.exists |
 | `logical-all` | 1 | Demonstrates the 'all' (AND) combinator — every condition must pass |
 | `logical-any` | 1 | Demonstrates the 'any' (OR) combinator — at least one condition must pass |
 | `logical-nested` | 1 | Demonstrates nested logical operators: all containing any and not |

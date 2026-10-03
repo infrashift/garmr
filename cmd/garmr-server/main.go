@@ -93,10 +93,16 @@ func init() {
 	rootCmd.Flags().Duration("read-timeout", 30*time.Second, "HTTP server read timeout")
 	rootCmd.Flags().Duration("write-timeout", 60*time.Second, "HTTP server write timeout")
 	rootCmd.Flags().Duration("idle-timeout", 120*time.Second, "HTTP server idle-connection timeout")
+	rootCmd.Flags().Duration("evaluation-timeout", 10*time.Second,
+		"max time for one evaluate/validate request, including waiting for an evaluation slot (keep below the sidecar's request timeout)")
+	rootCmd.Flags().Int("max-validate-size", 1024*1024,
+		"max CUE source size in bytes accepted by /v1/validate (validation compiles caller-supplied source; keep well below max-recv-size)")
 	mustBind("max_recv_size", rootCmd.Flags().Lookup("max-recv-size"))
 	mustBind("read_timeout", rootCmd.Flags().Lookup("read-timeout"))
 	mustBind("write_timeout", rootCmd.Flags().Lookup("write-timeout"))
 	mustBind("idle_timeout", rootCmd.Flags().Lookup("idle-timeout"))
+	mustBind("evaluation.timeout", rootCmd.Flags().Lookup("evaluation-timeout"))
+	mustBind("max_validate_size", rootCmd.Flags().Lookup("max-validate-size"))
 
 	// Evaluation posture: fail-closed when no policy matches (default true)
 	rootCmd.Flags().Bool("require-match", true, "return DENY when no policy matches the evaluation (fail-closed)")
@@ -236,6 +242,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 		ReadTimeout:        viper.GetDuration("read_timeout"),
 		WriteTimeout:       viper.GetDuration("write_timeout"),
 		IdleTimeout:        viper.GetDuration("idle_timeout"),
+		EvaluationTimeout:  viper.GetDuration("evaluation.timeout"),
+		MaxValidateSize:    viper.GetInt("max_validate_size"),
 		Version:            version,
 		AuditEnabled:       viper.GetBool("audit.enabled"),
 		AuditPath:          viper.GetString("audit.path"),

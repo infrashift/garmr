@@ -88,8 +88,10 @@ jobs:
 
       - name: Install Garmr CLI
         run: |
-          curl -sL https://github.com/infrashift/garmr/releases/latest/download/garmr-linux-amd64 -o garmr
-          chmod +x garmr
+          # Extract the CLI from the published container image.
+          docker create --name garmr-cli ghcr.io/infrashift/garmr:latest
+          docker cp garmr-cli:/usr/local/bin/garmr ./garmr
+          docker rm garmr-cli
           sudo mv garmr /usr/local/bin/
 
       - name: Evaluate Kubernetes manifests
@@ -251,8 +253,9 @@ stages:
             inputs:
               targetType: 'inline'
               script: |
-                curl -sL https://github.com/infrashift/garmr/releases/latest/download/garmr-linux-amd64 -o garmr
-                chmod +x garmr
+                docker create --name garmr-cli ghcr.io/infrashift/garmr:latest
+                docker cp garmr-cli:/usr/local/bin/garmr ./garmr
+                docker rm garmr-cli
                 sudo mv garmr /usr/local/bin/
 
           - task: Bash@3
@@ -298,8 +301,9 @@ jobs:
       - run:
           name: Install Garmr CLI
           command: |
-            curl -sL https://github.com/infrashift/garmr/releases/latest/download/garmr-linux-amd64 -o garmr
-            chmod +x garmr
+            docker create --name garmr-cli ghcr.io/infrashift/garmr:latest
+            docker cp garmr-cli:/usr/local/bin/garmr ./garmr
+            docker rm garmr-cli
             sudo mv garmr /usr/local/bin/
       - run:
           name: Evaluate Policies

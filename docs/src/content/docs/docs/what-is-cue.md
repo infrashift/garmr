@@ -56,7 +56,7 @@ We evaluated several languages for Garmr's policy engine -- Rego (OPA), CEL, Jso
 
 **No "policy for your policy" problem.** With Turing-complete policy languages, you often need meta-policies to guard against dangerous constructs (infinite loops, excessive resource use, nondeterminism). CUE eliminates this category entirely. Every policy is safe by construction.
 
-**Configuration and policy in one language.** Many teams already use (or should use) CUE for Kubernetes manifests, Terraform configurations, CI/CD pipelines, and API schemas. Using CUE for policy means your team learns one language for both configuration and governance. The same constraints that validate your deployment manifests can feed directly into your policy definitions.
+**Configuration and policy in one language.** Many teams already use (or should use) CUE for Kubernetes manifests, Terraform configurations, CI/CD pipelines, and API schemas. Using CUE for policy means your team learns one language for both configuration and governance. Shared CUE definitions, such as a list of allowed registries or approved regions, can feed directly into your policy definitions.
 
 **Review-friendly diffs.** CUE's declarative nature means policy changes produce clean, readable diffs in pull requests. There is no imperative logic to trace, no function call chains to follow -- just constraints that tighten or loosen.
 
@@ -104,28 +104,33 @@ A Garmr policy looks like this:
 ```go
 package policies
 
-policy: {
-    name:        "container-security"
-    description: "Enforce container image policies"
-    namespace:   "security"
-    enforcement: "deny"
+containerSecurity: {
+    apiVersion: "policy.garmr.io/v1"
+    kind:       "Policy"
+    metadata: {
+        name:      "container-security"
+        namespace: "security"
+    }
+    spec: {
+        description: "Enforce container image policies"
+        target: resources: ["Deployment", "Pod"]
 
-    targets: ["deployment", "pod"]
-
-    rules: [{
-        id:       "SEC-001"
-        name:     "no-privileged-containers"
-        severity: "critical"
-        message:  "Containers must not run in privileged mode"
-        match: {
-            path:   "spec.privileged"
-            equals: false
-        }
-    }]
+        rules: [{
+            id:          "SEC-001"
+            description: "No privileged containers"
+            severity:    "critical"
+            message:     "Containers must not run in privileged mode"
+            expr: match: {
+                path:   "spec.privileged"
+                equals: false
+            }
+        }]
+        enforcement: action: "deny"
+    }
 }
 ```
 
-This is plain CUE. The Garmr schema validates the structure, and the engine evaluates the rules against input data at runtime.
+This is plain CUE. The Garmr schema validates the structure when the policy loads. Each rule's `expr` uses Garmr's operators (`match`, `compare`, `forEach`, `func`, combined with `all`/`any`/`not`), not raw CUE constraints on the input. CUE is used only at load time: the loader compiles each rule into a Go evaluation tree, and the engine evaluates that tree against input data at runtime without running CUE.
 
 ## CUE Beyond Policy
 

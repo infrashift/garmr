@@ -9,25 +9,95 @@ Three rounds are recorded: `feature/refactor` (2026-07-08/09),
 hardening pass (2026-07-28, Phases A–G) targeting the Nomad + Consul
 Connect deployment.
 
-## Engine — deferred cleanups (behavior-neutral)
+## CUE-free evaluator and schema tightening (2026-10-03)
 
-1. Replica rebuild cost: `LoadPolicy` recompiles the source once per replica
-   (K× compiles). Fine for startup/tests; if bulk incremental loading ever
-   becomes a hot path, add a batch-load API.
-2. `forEach` per-element cost is still O(input size) inside CUE itself: each
-   element context is a new value tree that CUE re-evaluates on lookup
-   (measured ~1.4 ms/element on a 200-field input vs ~60 µs on a small one;
-   see `BenchmarkForEach_LargeInput`). Our plumbing is already minimal
-   (FillPath, no decode/re-encode). Fixing this means layered path
-   resolution (element struct first, falling back to the original input
-   value) threaded through every operator's lookup — only worth it with
-   profiling evidence from real large-document workloads.
+Done on `feature/review-fix-refactor`, after an OPA-parity review. Both
+earlier "deferred engine cleanups" (K× replica rebuilds; O(input) `forEach`
+inside CUE) are resolved by it.
+
+- **Evaluation no longer touches CUE.** CUE validates, hashes and decodes a
+  policy at load; each rule's `expr` is compiled into a Go node tree
+  (`internal/engine/compile_expr.go`, `eval.go`, `path.go`, `value.go`) that
+  evaluates the request's decoded JSON directly. The replica pool
+  (`replica.go`), per-request `Encode`, `FillPath` element binding and the
+  8-way parallelism cap are gone; the set is an immutable snapshot behind
+  `atomic.Pointer`, swapped by copy-on-write loads. Measured: simple policy
+  226 µs → 3 µs (3,447 → 6 allocs); forEach on a large input 58 ms → 16 µs;
+  vs OPA v1.21.1 on the same scenarios, 8–28× faster
+  (`scripts/bench-opa`, `docs/.../comparisons/opa-performance.md`).
+- **Breaking schema changes (pre-1.0).** Raw CUE constraint rules removed;
+  `expr` is a closed `#Expression` with exactly one operator per node, so
+  typos fail the load. Removed duplicate surface: expression-level
+  `exists`/`absent`/`contains` (use `match` — `containsAny` is new),
+  `length.min`/`max`, compare op aliases, the `count`/`jsonPath`/`regex`/
+  `contains`/`startsWith`/`endsWith`/`semver`/`cidr` builtins, and the
+  `"input.x"` func-argument strings (args are `#Value`s, like compare). Dead
+  definitions (`#Condition`, `#PolicyRef`, `#EvaluationResult`, `#RuleResult`,
+  `#SeverityWeight`, `#DefaultPriority`) deleted. `expiry` is `time.Time`,
+  `timeout` is `time.Duration`.
+- **Fail-open bugs fixed:** `not`/`any` turned evaluation errors into passes
+  (now three-valued: pass/fail/error); multiple operators in one expression
+  evaluated only the first; a missing `"input.x"` func arg became the literal
+  string; an unparseable exception `expiry` never expired; a match-everything
+  exception disabled the policy; an unparseable `timeout` was dropped;
+  `withinDays` passed any past date; `compare notIn` passed against a
+  non-list; equality coerced types (`"1" == 1`, `nil == "<nil>"`); paths
+  with hyphenated or `_` keys never resolved (`_index` was unreachable), so
+  `exists: false` passed on present fields; `/v1/validate` skipped the
+  loader's compile checks; duplicate `namespace/name` across files silently
+  shadowed; duplicate rule ids accepted; `apiGroup` compared against the
+  whole `apiVersion`; `forEach` ignored the deadline; semver prerelease
+  ordering was lexical (`rc.10 < rc.2`).
+
+## Expressiveness additions (2026-10-03)
+
+Closing the gap with Rego's variables/joins without adding a language:
+
+- **Projection paths** — `spec.containers[*].cpu` is a list with one value
+  per element (null where missing, so aggregates fail closed; nested `[*]`
+  flattens). Works everywhere a path does.
+- **Counted `forEach`** — `count: {lessThanOrEqual: 1}` checks how many
+  elements pass; `{{.count}}` is bound for messages.
+- **Message templates** — `{{path}}` reads the input, `{{alias.field}}` the
+  failing `forEach` element (rendered once per failing element; failures
+  inside passing `any`/`not` branches are dropped).
+- **`compare` `subsetOf`** — object key/values (selector ⊆ labels) or list
+  elements.
+- **Rule `when` and `forEach` `where`** — "when A, B must hold" and "of the
+  elements where A, ..." replace the `any: [{not A}, B]` guard idiom, so
+  conditional rules and joins read as stated. A guard that cannot be
+  evaluated fails the rule; it never skips the check.
+
+Worked example: `example-policies/advanced-operators/aggregate.cue`.
+
+## Deferred: OPA parity (reviewed 2026-10-03)
+
+Recorded, deliberately not done in the engine pass:
+
+1. **Per-rule exceptions and actions.** `#Exception.rules?: [...string]` to
+   exempt specific rules; `#Rule.action?` to override `enforcement.action`
+   per rule (one policy cannot mix deny and warn today).
+2. **`spec.inputSchema`.** A CUE definition the input must satisfy, surfaced
+   as a distinct `invalid-input` verdict — CUE's real advantage over Rego's
+   untyped input. The evaluator is CUE-free, so validate at the API edge
+   (once per request, before evaluation) rather than inside rules.
+3. **Builtins.** The use cases need `x509` parsing (the certificate example),
+   `jwt.decode`, `sha256`, `glob.match`, `replace`, and JSON/YAML parse; OPA
+   has ~200.
+4. **Tooling.** Rule coverage in `garmr test`; a `garmr bench` wrapper over
+   the engine. An evaluation trace stays deferred (see "Resolved by
+   removal").
+5. **Embedding.** A small public `pkg/garmr` (`Compile`, `Evaluate`); the
+   engine is `internal/`.
+6. Not pursued: runtime external data / `http.send` (static data via CUE
+   packages instead), bundle signing (the digest check covers CI integrity),
+   partial evaluation, WASM, Envoy ext_authz.
 
 ## Implemented since the review
 
 - **Advanced set operators** (2026-07-08): `unique`, `uniqueBy`, `sorted`,
-  `containsAll`, `subsetOf` as `match:` operators
-  (`internal/engine/expr_set.go`), documented in
+  `containsAll`, `subsetOf` as `match:` operators (now in
+  `internal/engine/compile_expr.go`), documented in
   `reference/policy-schema.md`, demonstrated by the `set-advanced` example
   policy and `testdata/condition-operators/` fixtures.
 - **`garmr test` rebuilt on the real engine** (2026-07-09): the runner
@@ -61,8 +131,9 @@ Connect deployment.
   item #3. `schemas/policy.cue` is embedded via go:embed (the `schemas` Go
   package) and unified with every document the directory loader compiles.
   The diverged hand-maintained copy in `engine.go` is gone. `#Rule.id` was
-  relaxed to a bounded token; `#Rule.expr` stays `_` because raw CUE
-  constraint expressions are a feature.
+  relaxed to a bounded token; `#Rule.expr` stayed `_` because raw CUE
+  constraint expressions were a feature (superseded 2026-10-03: raw
+  constraints removed, `expr` is a closed `#Expression`).
 - **Fail-closed loading + serialized mutations + digest** (Phase C):
   resolves old item #4. Compile/schema failures abort the load naming the
   policy; zero policies fails startup (nonzero exit) and reload (HTTP 500,

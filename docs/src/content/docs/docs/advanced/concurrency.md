@@ -8,139 +8,101 @@ sidebar:
 
 ## Architecture
 
-Garmr uses a read-write lock with a CUE context pool to support safe concurrent evaluation.
+Garmr uses CUE only at load time. Evaluation runs against compiled Go data structures, reads the loaded policy set without taking a lock, and runs fully in parallel. Nothing limits it: there is no context pool, no replica cap, and no queue.
+
+### Load: CUE to Go
+
+When a policy loads (at server startup or on reload), the engine:
+
+1. Unifies the policy with the embedded schema (`schemas/policy.cue`), which rejects unknown fields, typos, and wrong types.
+2. Hashes it (this feeds the policy-set digest).
+3. Decodes it into Go structs.
+4. Compiles each rule's `expr` into a Go evaluation tree. Regexes written in the policy, semver and datetime literals, and literal sets for `in`/`notIn` are compiled up front.
+
+A fresh CUE context is created for each load and thrown away after it. Evaluation never touches CUE.
 
 ### Engine Structure
 
 ```go
 type Engine struct {
-    mu         sync.RWMutex
-    ctx        *cue.Context       // Schema/init operations only (under write lock)
-    ctxPool    *cueContextPool    // Thread-safe pool for evaluation
-    policies   map[string]*CompiledPolicy
-    data       cue.Value
-    schema     cue.Value
-    logger     *zap.Logger
-    builtins   map[string]BuiltinFunc
-    regexCache sync.Map           // Compiled regex pattern cache
-    obs        *observability.Provider
+    loadMu sync.Mutex                  // serializes load / reload / delete
+    set    atomic.Pointer[policySet]   // live, immutable policy set
+
+    logger       *zap.Logger
+    builtins     map[string]BuiltinFunc
+    obs          atomic.Pointer[observability.Provider]
+    requireMatch atomic.Bool
 }
 ```
 
-### Locking Strategy
+A `policySet` is an immutable snapshot of the loaded policies. It indexes policies by target kind, so an input is checked only against policies that could match its `kind` (plus policies whose selectors use a wildcard kind). It also holds the precomputed policy-set digest.
 
-- `Evaluate()` -- takes **read lock** (multiple evaluations run concurrently)
-- `LoadPolicy()` -- takes **write lock** (blocks evaluations during policy reload)
-- Policy reloads are infrequent, so write lock contention is minimal
+### Snapshot Swapping
 
-## CUE Context Pool
+- `Evaluate()` loads the current set once through the atomic pointer and uses that set for the whole evaluation. It takes no lock, so any number of evaluations run at the same time.
+- Load, reload, and delete take `loadMu`, build a **new** set from the current one, and publish it with one atomic store. Two mutations can't run at once, so one can't drop the other's change.
+- In-flight evaluations finish against the set they started with. A reload never blocks them.
+- A failed load publishes nothing. The previous set stays live.
+- Readiness and digest reads (`PolicyCount`, `PolicySetDigest`) also read the current set without locking.
 
-CUE contexts are not thread-safe for concurrent compilation and encoding. Garmr solves this with a `sync.Pool` that provides each concurrent evaluation its own context.
+### Backpressure
 
-```go
-type cueContextPool struct {
-    pool sync.Pool
-}
-
-func newCueContextPool() *cueContextPool {
-    return &cueContextPool{
-        pool: sync.Pool{
-            New: func() any {
-                return cuecontext.New()
-            },
-        },
-    }
-}
-```
-
-### How It Works
-
-1. Each `Evaluate()` call borrows a CUE context from the pool
-2. The context is stored in the Go context for downstream access
-3. Input encoding and rule evaluation use the borrowed context
-4. The context is returned to the pool when evaluation completes
-
-```go
-func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateResponse, error) {
-    // Borrow a CUE context from the pool
-    cueCtx := e.ctxPool.get()
-    defer e.ctxPool.put(cueCtx)
-
-    // Store in Go context for downstream methods
-    ctx = withCueContext(ctx, cueCtx)
-
-    // Encode input with dedicated context (thread-safe)
-    inputVal := cueCtx.Encode(req.Input)
-    // ...
-}
-```
-
-### Pool Sizing
-
-The pool uses Go's `sync.Pool`, which dynamically manages its size:
-
-- Grows automatically as concurrent demand increases
-- Shrinks during garbage collection when demand is low
-- No fixed upper bound -- scales with actual concurrency
-
-This is preferable to a fixed-size channel-based pool because it adapts to load without blocking or wasting memory during low-traffic periods.
+`Evaluate` returns `ErrEvaluationUnavailable` (HTTP 503) only when the caller's context has already ended before work starts, for example because the client disconnected or its deadline passed. Garmr has no evaluation slots to run out of.
 
 ## Rule Evaluation
 
-Rules within a policy are currently evaluated sequentially:
+Each request's input is normalized to JSON shape (maps, slices, `float64`, strings, bools, nil) once. Then the candidate policies are evaluated one after another, and the rules within each policy run in order:
 
 ```go
+ec := &evalCtx{ctx: ctx, done: ctx.Done(), root: input}
 for _, rule := range policy.Rules {
-    if !e.shouldEvaluateRule(rule, policy.Evaluation, opts) {
+    if !shouldEvaluateRule(rule, policy.Evaluation) {
         continue
     }
-    result := e.evaluateRule(ctx, policy, rule, input, opts)
-    results = append(results, result)
+    if ctx.Err() != nil { // policy timeout: deny, never a silent pass
+        out.timedOut = true
+        return out
+    }
+    result := e.evaluateRule(ec, policy, rule)
+    out.results = append(out.results, result)
 
-    // Fail-fast: stop at first failure
     if policy.Evaluation.FailFast && !result.Passed {
-        return results, true, nil
+        out.failFast = true
+        return out
     }
 }
 ```
 
-Sequential evaluation is correct and supports fail-fast semantics. Parallel rule evaluation is a potential future optimization for policies with many independent rules.
+Running rules in order is correct and keeps fail-fast semantics. Concurrency comes from running requests in parallel, not from splitting one request across goroutines.
 
 ## Caching
 
 ### Regex Pattern Cache
 
-Compiled regular expressions are cached in a `sync.Map` to avoid recompilation on repeated evaluations:
-
-```go
-regexCache sync.Map // map[string]*regexp.Regexp
-```
-
-This is lock-free for reads and safe for concurrent access.
+Patterns written as literals in a policy are compiled at load. Patterns known only at evaluation time go into a bounded LRU cache (1024 entries, patterns up to 512 characters). These are patterns from a `compare` `matches` whose right-hand side is an input path, the `matches` builtin, and wildcard selector patterns. Because the cache is bounded, a client can't grow server memory without limit by sending new patterns.
 
 ## Performance Characteristics
 
-### For a 4 CPU / 16GB VM
+The engine benchmarks (`internal/engine/bench_test.go`) run the same scenarios as an OPA v1.21.1 `rego.PreparedEvalQuery` harness in `scripts/bench-opa`. Both are in-process, with the policy compiled up front. Measured on an i7-9700K:
 
-| Scenario | Estimated Throughput | Latency (p50) | Latency (p99) |
-|----------|---------------------|---------------|---------------|
-| Simple policy (5 rules) | 3,000-5,000 req/sec | 1ms | 5ms |
-| Medium policy (20 rules) | 1,500-2,500 req/sec | 3ms | 15ms |
-| Complex policy (50 rules) | 500-1,000 req/sec | 8ms | 40ms |
+| Scenario | Garmr | OPA |
+|----------|-------|-----|
+| Simple 3-rule policy | 3.0µs, 6 allocs | 24.6µs, 166 allocs |
+| Simple policy, parallel | 0.49µs | 5.7µs |
+| 500 policies loaded | 1.9µs | 15.9µs |
+| `forEach` over 50 elements, 200-key input | 16.5µs | 461µs |
 
-### Memory Usage
-
-| Component | Estimate |
-|-----------|----------|
-| Base process | ~50MB |
-| CUE contexts (pool) | ~200MB |
-| Compiled policies (100) | ~100MB |
-| HTTP buffers | ~100MB |
-| **Total** | **~400MB-800MB** |
+These numbers measure the engine only. HTTP handling, JSON decoding, and audit logging come on top of them.
 
 ## Benchmarking
 
 ```bash
+# Engine benchmarks
+go test ./internal/engine -run '^$' -bench 'BenchmarkEvaluate|BenchmarkForEach' -benchmem
+
+# OPA comparison (separate module, so OPA is never a Garmr dependency)
+cd scripts/bench-opa && go test -run '^$' -bench . -benchmem
+
 # HTTP benchmarking with hey
 go install github.com/rakyll/hey@latest
 
@@ -152,5 +114,4 @@ hey -n 10000 -c 100 -m POST \
 
 ## Future Optimizations
 
-- **Parallel rule evaluation** -- evaluate independent rules concurrently within a policy using a worker pool
-- **Result caching** -- LRU cache with TTL for repeated inputs (common in admission control scenarios)
+- **Result caching**: an LRU cache with a TTL for repeated inputs, which are common in admission control

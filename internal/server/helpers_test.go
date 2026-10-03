@@ -6,39 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/infrashift/garmr/internal/engine"
 )
-
-func TestDecisionToString(t *testing.T) {
-	cases := map[engine.Decision]string{
-		engine.DecisionAllow:   "allow",
-		engine.DecisionDeny:    "deny",
-		engine.DecisionWarn:    "warn",
-		engine.Decision("???"): "unknown",
-	}
-	for d, want := range cases {
-		if got := decisionToString(d); got != want {
-			t.Errorf("decisionToString(%q) = %q, want %q", d, got, want)
-		}
-	}
-}
-
-func TestSeverityToString(t *testing.T) {
-	cases := map[engine.Severity]string{
-		engine.SeverityCritical:  "critical",
-		engine.SeverityHigh:      "high",
-		engine.SeverityMedium:    "medium",
-		engine.SeverityLow:       "low",
-		engine.SeverityInfo:      "info",
-		engine.Severity("bogus"): "unknown",
-	}
-	for s, want := range cases {
-		if got := severityToString(s); got != want {
-			t.Errorf("severityToString(%q) = %q, want %q", s, got, want)
-		}
-	}
-}
 
 func TestStorageType(t *testing.T) {
 	cases := []struct {

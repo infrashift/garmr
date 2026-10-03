@@ -27,6 +27,24 @@ job "garmr-eval" {
   }
 
   group "eval" {
+    # A deny is a verdict, not a task failure.
+    #
+    # `garmr eval` exits 1 on DENY and the wrapper propagates it. Nomad's
+    # default batch restart policy (attempts = 3, mode = "fail") reads that
+    # nonzero exit as a crash and re-runs the evaluation three more times,
+    # plus a reschedule — so a single denied artifact was evaluated four
+    # times, each re-compiling the whole policy set, and the pipeline saw
+    # "failed" rather than the deny/allow contract documented above.
+    restart {
+      attempts = 0
+      mode     = "fail"
+    }
+
+    reschedule {
+      attempts  = 0
+      unlimited = false
+    }
+
     volume "policies" {
       type      = "host"
       source    = "garmr-policies"

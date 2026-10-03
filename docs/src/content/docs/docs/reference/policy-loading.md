@@ -13,8 +13,27 @@ Garmr is designed to be deployed in containerized environments where policies ar
 ## Directory Structure
 
 The loader walks the tree recursively; each directory containing `.cue`
-files is loaded as a CUE package. The layout below is a convention, not a
-mechanism — directory names carry no meaning to the loader:
+files is loaded as a CUE package, and the walk continues into that
+directory's subdirectories. The layout below is a convention, not a
+mechanism — directory names carry no meaning to the loader.
+
+Nesting is unlimited, and a directory may hold both policies of its own and
+subdirectories holding more:
+
+```
+/policies/
+└── security/
+    ├── base.cue                    # loaded
+    └── k8s/
+        ├── pod.cue                 # also loaded
+        └── rbac/
+            └── role.cue            # also loaded
+```
+
+`testdata/` directories are skipped, as are dotfiles, `node_modules`,
+`vendor`, and `cue.mod`. CUE excludes `*_test.cue` files itself. This
+matches the storage backend's default exclude patterns, so what the loader
+enforces and what `/health/deep` reports agree.
 
 ```
 /policies/                          # Root directory (configurable)
@@ -50,9 +69,10 @@ my_policy: {
 }
 ```
 
-Policies are keyed by `namespace/name`; two documents with the same
+Policies are keyed by `namespace/name`. Two documents with the same
 `metadata.name` in different directories collide unless their namespaces
-differ.
+differ, and a collision fails the load: the same `namespace/name` declared in
+two files is rejected rather than letting one silently win.
 
 ## Reloading Policies
 
@@ -62,9 +82,9 @@ Reload is **explicit**. Garmr does not watch the filesystem and does not poll.
 curl -X POST http://localhost:8080/v1/policies/reload
 ```
 
-The reload compiles a complete new policy set in fresh CUE contexts and swaps
+The reload compiles a complete new policy set in a fresh CUE context and swaps
 it in atomically: in-flight evaluations finish against the old set, and if the
-new set fails to compile the old one stays live. A reload never leaves the
+new set fails to compile or validate the old one stays live. A reload never leaves the
 server serving a partially-loaded policy set.
 
 ### In Kubernetes
@@ -79,7 +99,13 @@ pod start — so a rollout is also the reload mechanism. See
 
 ### Startup behaviour
 
-A policy set that cannot be loaded **fails startup**, and a server with zero
+A policy set that cannot be loaded **fails startup**. Besides CUE syntax and
+schema errors (an unknown field or a misspelled operator), the loader rejects
+an expression that does not set exactly one operator, a duplicate rule id
+within a policy, an exception whose `match` narrows nothing, an exception
+`expiry` that is not RFC3339, a `spec.evaluation.timeout` that is not a Go
+duration, and the same `namespace/name` declared twice. `garmr validate` and
+`/v1/validate` apply exactly these checks. A server with zero
 policies loaded reports `503` on `/readyz` and `/ready`. Running with no
 policies is not a safe default: under `require_match` (the default) it denies
 everything, and without it, allows everything.
@@ -176,17 +202,20 @@ Policies are compiled once at load time and held in memory, so evaluation does
 no file I/O. Reload cost scales with the size of the policy set, not with
 request volume.
 
-The engine keeps a pool of compiled policy replicas (one per CPU, capped at 8)
-so evaluations run concurrently without sharing a CUE context. Each replica
-holds a full copy of the compiled policy set, which trades memory for
-concurrency.
+CUE is used only at load: each policy is unified with the schema, hashed,
+decoded, and its rules compiled into Go evaluation trees. Evaluation never
+touches CUE. The loaded set is a single immutable snapshot that evaluations
+read without locking, so they run fully in parallel with no pool and no
+per-CPU copies. Policies are indexed by target kind, so an input is checked
+only against policies that could match it. See
+[Concurrency](/garmr/docs/advanced/concurrency/).
 
 ### Recommendations
 
 1. **Large policy sets** — organise with CUE packages (shared definitions
    in a sibling file of the same package).
 2. **Reload frequency** — reload on deploy, not on a timer; each reload
-   recompiles every policy into every replica.
+   recompiles every policy.
 3. **GitOps** — use lock files as a repo-side review gate, and the policy-set
    digest to verify what a running server actually loaded.
 

@@ -77,9 +77,9 @@ curl -s -X POST http://localhost:8080/v1/evaluate \
 
 ### Using the CLI
 
-The `garmr` CLI is a thin client over the same REST API — `garmr eval`, `garmr validate`, and the `garmr policy` management subcommands all require a running server. By default the CLI targets `http://localhost:8080`; override with `--server` or the `GARMR_SERVER` environment variable.
+The `garmr` CLI is a thin client over the same REST API. `garmr eval` and the `garmr policy list`/`get`/`delete`/`reload` subcommands require a running server. By default the CLI targets `http://localhost:8080`; override with `--server` or the `GARMR_SERVER` environment variable.
 
-Only a few commands run entirely locally without a server: `garmr test`, `garmr docs generate`, and `garmr policy lock`/`validate-lock`/`diff`.
+These commands run entirely locally, with no server needed: `garmr validate` (add `--remote` to validate against a server instead), `garmr policy digest`, `garmr test`, `garmr docs generate`, and `garmr policy lock`/`validate-lock`/`diff`. That is what lets a CI job validate a checkout and compute its policy-set digest before anything is deployed.
 
 ## Example Test Data
 
@@ -346,7 +346,7 @@ lsof -i :8080
 ### Policies not loading
 
 ```bash
-# Check policy syntax (requires a running server; accepts files or directories)
+# Check policy syntax (runs locally; accepts files or directories)
 ./bin/garmr validate ./example-policies
 
 # Enable debug logging

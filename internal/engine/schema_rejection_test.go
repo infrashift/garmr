@@ -32,7 +32,7 @@ spec: {
 		resources: [{kind: "*"}]
 		conditions: [{path: "env", equals: "prod"}]
 	}
-	rules: [{id: "R-001", description: "d", severity: "high", expr: {exists: "x"}}]
+	rules: [{id: "R-001", description: "d", severity: "high", expr: {match: {path: "x", exists: true}}}]
 	enforcement: action: "deny"
 }`,
 			wantErrHas: "target.conditions is not supported",
@@ -46,7 +46,7 @@ metadata: {name: "t", namespace: "default"}
 spec: {
 	description: "d"
 	target: resources: [{kind: "*"}]
-	rules: [{id: "R-001", description: "d", severity: "high", expr: {exists: "x"}}]
+	rules: [{id: "R-001", description: "d", severity: "high", expr: {match: {path: "x", exists: true}}}]
 	enforcement: {
 		action: "deny"
 		webhook: {url: "https://example.com/hook"}
@@ -63,7 +63,7 @@ metadata: {name: "t", namespace: "default"}
 spec: {
 	description: "d"
 	target: resources: [{kind: "*"}]
-	rules: [{id: "R-001", description: "d", severity: "high", expr: {exists: "x"}, continueOnFail: false}]
+	rules: [{id: "R-001", description: "d", severity: "high", expr: {match: {path: "x", exists: true}}, continueOnFail: false}]
 	enforcement: action: "deny"
 }`,
 			wantErrHas: "'continueOnFail' is not supported",
@@ -136,7 +136,7 @@ spec: {
 		id:          "R-001"
 		description: "d"
 		severity:    "high"
-		expr: {exists: "x"}
+		expr: {match: {path: "x", exists: true}}
 		url: "https://runbooks.example.com/R-001"
 	}]
 	enforcement: {

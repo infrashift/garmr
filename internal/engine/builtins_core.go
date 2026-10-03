@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 func builtinLen(ctx context.Context, args ...any) (any, error) {
@@ -15,7 +15,7 @@ func builtinLen(ctx context.Context, args ...any) (any, error) {
 	}
 	switch v := args[0].(type) {
 	case string:
-		return len(v), nil
+		return utf8.RuneCountInString(v), nil
 	case []any:
 		return len(v), nil
 	case map[string]any:
@@ -45,56 +45,23 @@ func builtinUpper(ctx context.Context, args ...any) (any, error) {
 	return nil, errors.New("upper: argument must be string")
 }
 
-func builtinContains(ctx context.Context, args ...any) (any, error) {
-	if len(args) != 2 {
-		return nil, errors.New("contains requires exactly 2 arguments")
-	}
-	s, ok1 := args[0].(string)
-	substr, ok2 := args[1].(string)
-	if ok1 && ok2 {
-		return strings.Contains(s, substr), nil
-	}
-	return nil, errors.New("contains: arguments must be strings")
-}
-
-func builtinStartsWith(ctx context.Context, args ...any) (any, error) {
-	if len(args) != 2 {
-		return nil, errors.New("startsWith requires exactly 2 arguments")
-	}
-	s, ok1 := args[0].(string)
-	prefix, ok2 := args[1].(string)
-	if ok1 && ok2 {
-		return strings.HasPrefix(s, prefix), nil
-	}
-	return nil, errors.New("startsWith: arguments must be strings")
-}
-
-func builtinEndsWith(ctx context.Context, args ...any) (any, error) {
-	if len(args) != 2 {
-		return nil, errors.New("endsWith requires exactly 2 arguments")
-	}
-	s, ok1 := args[0].(string)
-	suffix, ok2 := args[1].(string)
-	if ok1 && ok2 {
-		return strings.HasSuffix(s, suffix), nil
-	}
-	return nil, errors.New("endsWith: arguments must be strings")
-}
-
+// builtinMatches reports whether a string matches a regular expression:
+// matches(s, pattern). Patterns go through the bounded shared cache, since
+// they may come from the input.
 func builtinMatches(ctx context.Context, args ...any) (any, error) {
 	if len(args) != 2 {
 		return nil, errors.New("matches requires exactly 2 arguments")
 	}
 	s, ok1 := args[0].(string)
 	pattern, ok2 := args[1].(string)
-	if ok1 && ok2 {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			return nil, fmt.Errorf("matches: invalid pattern: %w", err)
-		}
-		return re.MatchString(s), nil
+	if !ok1 || !ok2 {
+		return nil, errors.New("matches: arguments must be strings")
 	}
-	return nil, errors.New("matches: arguments must be strings")
+	re, err := sharedRegexCache.get(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("matches: invalid pattern: %w", err)
+	}
+	return re.MatchString(s), nil
 }
 
 func builtinNow(ctx context.Context, args ...any) (any, error) {

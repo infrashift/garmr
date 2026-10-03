@@ -16,32 +16,32 @@ This document describes what Garmr can do today and where it's headed.
 - Three-outcome decisions: pass, fail, warn
 - Fail-fast evaluation, category/tag filtering, exception handling
 - Timeout enforcement and dry-run mode
-- CUE context pool for thread-safe concurrent evaluation
-- Regex pattern caching
+- Policies compiled once at load (CUE is used only at load) into Go evaluation trees; evaluation is lock-free and fully parallel against an immutable policy snapshot
+- Regexes, semver/datetime literals, and literal sets precompiled at load; bounded LRU cache for runtime regex patterns
 
 ### Condition Operators
 
-- **Existence:** `exists`, `absent`
+- **Expressions:** `all`, `any`, `not`, `match`, `compare`, `forEach`, `func` (exactly one per expression, schema-checked at load)
+- **Existence:** `exists: true`, `exists: false`
 - **Equality:** `equals`
 - **Comparison:** `greaterThan`, `greaterThanOrEqual`, `lessThan`, `lessThanOrEqual`
 - **String:** `contains`, `hasPrefix`, `hasSuffix`, `pattern`
 - **Set:** `in`, `notIn`
-- **Logical:** `all`, `any`, `not`
-- **Advanced:** `forEach`, `length`, `semver`, `datetime`, `compare`
+- **Lists:** `containsAll`, `containsAny`, `subsetOf`, `unique`, `uniqueBy`, `sorted`
+- **Advanced:** `length`, `semver`, `datetime`
 
 ### Built-in Functions (30+)
 
+- **Core:** len
 - **Aggregates:** sum, min, max, avg
-- **String:** len, lower, upper, contains, startsWith, endsWith, matches, trim, split, join, regex
+- **String:** lower, upper, trim, trimPrefix, trimSuffix, split, join, matches, format
 - **Encoding:** base64Decode, base64Encode
-- **Time:** now, duration, parseTime, format
+- **Time:** now, duration, parseTime
 - **Type:** typeOf, isType
-- **Object:** hasKey, keys, values
-- **Network:** cidr, cidrContains, cidrOverlap, ipVersion
+- **Object:** hasKey, keys, values, lookup
+- **Network:** cidrContains, cidrOverlap, ipVersion
 - **Kubernetes:** unitsParse
-- **Array:** flatten, unique, sort, filter, lookup
-- **Versioning:** semver
-- **Path:** jsonPath
+- **Array:** flatten, unique, sort, filter
 
 ### APIs
 
@@ -56,7 +56,7 @@ This document describes what Garmr can do today and where it's headed.
 
 ### Security & Networking
 
-- TLS for HTTP (minimum TLS 1.2)
+- Plain HTTP only; TLS/mTLS is the service mesh's (or a fronting proxy's) job
 - API key authentication
 - Service-mesh caller identity: SPIFFE URI parsed from `X-Forwarded-Client-Cert` (XFCC) and recorded as `principal` on every audit entry
 - Configurable CORS
@@ -81,7 +81,7 @@ This document describes what Garmr can do today and where it's headed.
 - JSON audit logging with request correlation, file rotation, and SPIFFE
   `principal` + W3C `trace_id` on every entry
 - Prometheus metrics endpoint (evaluations, latency histograms, violations,
-  cache, rate limits, recovered panics, Go runtime) served from `/metrics`
+  policies loaded, reloads, rate limits, recovered panics, Go runtime) served from `/metrics`
 - OpenTelemetry tracing via `otelhttp`:
   - Incoming `traceparent` is always extracted for log correlation
   - OTLP exporter is opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`

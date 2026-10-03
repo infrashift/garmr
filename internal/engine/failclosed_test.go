@@ -44,25 +44,25 @@ func TestFunc_FalseyResultsFail(t *testing.T) {
 	}{
 		{
 			name:       "len of empty list is falsey",
-			rule:       `{id: "r1", description: "d", severity: "high", expr: {func: {name: "len", args: ["input.items"]}}}`,
+			rule:       `{id: "r1", description: "d", severity: "high", expr: {func: {name: "len", args: [{path: "items"}]}}}`,
 			input:      map[string]any{"items": []any{}},
 			wantDenied: true,
 		},
 		{
 			name:       "len of non-empty list is truthy",
-			rule:       `{id: "r1", description: "d", severity: "high", expr: {func: {name: "len", args: ["input.items"]}}}`,
+			rule:       `{id: "r1", description: "d", severity: "high", expr: {func: {name: "len", args: [{path: "items"}]}}}`,
 			input:      map[string]any{"items": []any{"a"}},
 			wantDenied: false,
 		},
 		{
 			name:       "empty string is falsey",
-			rule:       `{id: "r1", description: "d", severity: "high", expr: {func: {name: "lower", args: ["input.name"]}}}`,
+			rule:       `{id: "r1", description: "d", severity: "high", expr: {func: {name: "lower", args: [{path: "name"}]}}}`,
 			input:      map[string]any{"name": ""},
 			wantDenied: true,
 		},
 		{
 			name:       "non-empty string is truthy",
-			rule:       `{id: "r1", description: "d", severity: "high", expr: {func: {name: "lower", args: ["input.name"]}}}`,
+			rule:       `{id: "r1", description: "d", severity: "high", expr: {func: {name: "lower", args: [{path: "name"}]}}}`,
 			input:      map[string]any{"name": "Web"},
 			wantDenied: false,
 		},
@@ -116,32 +116,24 @@ func TestMatch_NumericOperatorOnNonNumericFailsWithReason(t *testing.T) {
 	}
 }
 
-// TestCompare_UnknownValueSourceFailsClosed covers the `data:` value source,
-// which is declared in the policy schema but was never implemented. It used to
-// resolve to nil silently; it must now name itself as unsupported.
-func TestCompare_UnknownValueSourceFailsClosed(t *testing.T) {
+// TestCompare_UnknownValueSourceRejectedAtLoad covers the `data:` value
+// source, which was declared in the policy schema but never implemented. It
+// used to resolve to nil silently; it is now refused when the policy loads.
+func TestCompare_UnknownValueSourceRejectedAtLoad(t *testing.T) {
 	rule := `{id: "r1", description: "d", severity: "high", expr: {compare: {left: {path: "a"}, op: "==", right: {data: "somewhere"}}}}`
-	decision, msg := evalRule(t, rule, map[string]any{"a": 1.0})
-
-	if decision != DecisionDeny {
-		t.Errorf("decision = %v, want %v", decision, DecisionDeny)
-	}
-	if !strings.Contains(msg, "'path', 'literal', or 'func'") {
-		t.Errorf("message = %q, want it to name the supported value sources", msg)
+	src := makePolicy("p", "default", "d", rule, "deny", "")
+	if err := newTestEngine(t).LoadPolicy(context.Background(), "p", "default", src); err == nil {
+		t.Error("policy with an unknown value source loaded; it must be rejected")
 	}
 }
 
-// TestCompare_UnknownBuiltinFailsClosed ensures a typo'd builtin name in a
-// compare operand is reported rather than resolving to nil.
-func TestCompare_UnknownBuiltinFailsClosed(t *testing.T) {
+// TestCompare_UnknownBuiltinRejectedAtLoad ensures a typo'd builtin name is
+// refused when the policy loads rather than resolving to nil per request.
+func TestCompare_UnknownBuiltinRejectedAtLoad(t *testing.T) {
 	rule := `{id: "r1", description: "d", severity: "high", expr: {compare: {left: {func: {name: "lenn", args: [{path: "a"}]}}, op: ">", right: {literal: 0}}}}`
-	decision, msg := evalRule(t, rule, map[string]any{"a": []any{1.0}})
-
-	if decision != DecisionDeny {
-		t.Errorf("decision = %v, want %v", decision, DecisionDeny)
-	}
-	if !strings.Contains(msg, "unknown builtin") {
-		t.Errorf("message = %q, want it to report the unknown builtin", msg)
+	src := makePolicy("p", "default", "d", rule, "deny", "")
+	if err := newTestEngine(t).LoadPolicy(context.Background(), "p", "default", src); err == nil {
+		t.Error("policy with an unknown builtin loaded; it must be rejected")
 	}
 }
 
@@ -153,7 +145,8 @@ func TestResolveValue_PropagatesContext(t *testing.T) {
 	eng := newTestEngine(t)
 
 	gotCancelled := make(chan bool, 1)
-	eng.builtins["blockUntilCancelled"] = func(ctx context.Context, args ...any) (any, error) {
+	// Override a real builtin: names are checked against the schema.
+	eng.builtins["now"] = func(ctx context.Context, args ...any) (any, error) {
 		select {
 		case <-ctx.Done():
 			gotCancelled <- true
@@ -165,7 +158,7 @@ func TestResolveValue_PropagatesContext(t *testing.T) {
 	}
 
 	source := makePolicy("ctx", "default", "context propagation",
-		`{id: "r1", description: "d", severity: "high", expr: {compare: {left: {func: {name: "blockUntilCancelled"}}, op: "==", right: {literal: true}}}}`,
+		`{id: "r1", description: "d", severity: "high", expr: {compare: {left: {func: {name: "now"}}, op: "==", right: {literal: true}}}}`,
 		"deny", "")
 	if err := eng.LoadPolicy(context.Background(), "ctx", "default", source); err != nil {
 		t.Fatalf("LoadPolicy failed: %v", err)

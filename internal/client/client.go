@@ -193,7 +193,7 @@ type ValidateResult struct {
 }
 
 // ValidationError is a validation error. The server reports a message and a
-// coarse code (PARSE_ERROR, SCHEMA_ERROR); it has no position information.
+// coarse code (PARSE_ERROR, SCHEMA_ERROR, COMPILE_ERROR); it has no position information.
 type ValidationError struct {
 	Message string `json:"message"`
 	Code    string `json:"code,omitempty"`
@@ -249,6 +249,10 @@ type PolicyInfo struct {
 type PolicyList struct {
 	Policies []PolicyInfo `json:"policies"`
 	Digest   string       `json:"digest"`
+	// InstanceID names the instance that answered. Behind a mesh upstream
+	// every call load-balances, so this is the only way to tell one
+	// instance's answer from another's.
+	InstanceID string `json:"instance_id,omitempty"`
 }
 
 // ListPolicies lists all policies along with the policy-set digest.
@@ -358,6 +362,9 @@ type ReloadResult struct {
 	ReloadTimeMs   int64  `json:"reload_time_ms"`
 	StorageType    string `json:"storage_type"`
 	Error          string `json:"error,omitempty"`
+	// InstanceID names the instance that performed this reload; convergence
+	// across a fleet is checked by collecting these.
+	InstanceID string `json:"instance_id,omitempty"`
 }
 
 // ReloadPolicies reloads policies from the configured directory.

@@ -1,6 +1,7 @@
 // example-policies/builtins/func-calls.cue
-// Demonstrates the func expression for calling builtin functions
-// Builtins can validate, transform, and inspect input data
+// Demonstrates the func expression for calling builtin functions.
+// Arguments are values, like compare operands: {path: ...}, {literal: ...},
+// or a nested {func: ...}.
 package builtins
 
 // CIDR network validation — check if an IP is within a network range
@@ -21,7 +22,7 @@ cidrValidationPolicy: {
 				severity:    "critical"
 				expr: "func": {
 					name: "cidrContains"
-					args: ["10.244.0.0/16", "input.spec.podIP"]
+					args: [{literal: "10.244.0.0/16"}, {path: "spec.podIP"}]
 					expect: true
 				}
 				message:  "pod IP must be within 10.244.0.0/16 cluster CIDR"
@@ -34,7 +35,7 @@ cidrValidationPolicy: {
 				severity:    "high"
 				expr: "func": {
 					name: "ipVersion"
-					args: ["input.spec.serviceIP"]
+					args: [{path: "spec.serviceIP"}]
 					expect: 4
 				}
 				message:  "service IP must be IPv4"
@@ -99,7 +100,7 @@ typeCheckPolicy: {
 				severity:    "high"
 				expr: "func": {
 					name: "isType"
-					args: ["input.spec.replicas", "number"]
+					args: [{path: "spec.replicas"}, {literal: "number"}]
 					expect: true
 				}
 				message: "spec.replicas must be a number, not a string"
@@ -110,7 +111,7 @@ typeCheckPolicy: {
 				severity:    "medium"
 				expr: "func": {
 					name: "isType"
-					args: ["input.metadata.labels", "map"]
+					args: [{path: "metadata.labels"}, {literal: "object"}]
 					expect: true
 				}
 				message: "metadata.labels must be an object/map"
@@ -138,7 +139,7 @@ encodingPolicy: {
 				severity:    "high"
 				expr: "func": {
 					name: "base64Decode"
-					args: ["input.spec.secretData"]
+					args: [{path: "spec.secretData"}]
 					bind: "decodedSecret"
 				}
 				message: "spec.secretData must be valid base64-encoded data"
@@ -147,10 +148,10 @@ encodingPolicy: {
 				id:          "FN-007"
 				description: "Namespace must be lowercase"
 				severity:    "medium"
-				expr: "func": {
-					name: "lower"
-					args: ["input.metadata.namespace"]
-					expect: "input.metadata.namespace"
+				expr: compare: {
+					left: {func: {name: "lower", args: [{path: "metadata.namespace"}]}}
+					op: "=="
+					right: {path: "metadata.namespace"}
 				}
 				message: "metadata.namespace must be all lowercase"
 			},
@@ -177,7 +178,7 @@ mapOperationsPolicy: {
 				severity:    "medium"
 				expr: "func": {
 					name: "hasKey"
-					args: ["input.metadata.annotations", "managed-by"]
+					args: [{path: "metadata.annotations"}, {literal: "managed-by"}]
 					expect: true
 				}
 				message:     "metadata.annotations must include the 'managed-by' key"

@@ -158,7 +158,7 @@ func TestCompare_NonNumericFailsClosed(t *testing.T) {
 	source := makePolicy("cmp-num", "default", "compare numeric",
 		`{id: "r1", description: "replica floor", severity: "high", expr: {compare: {
 			left: {path: "replicas"}
-			op: "gt"
+			op: ">"
 			right: {literal: 5}
 		}}}`,
 		"deny", "")
@@ -184,27 +184,20 @@ func TestRef_RejectedAtCompileTime(t *testing.T) {
 		"deny", "")
 	eng := newTestEngine(t)
 	err := eng.LoadPolicy(context.Background(), "ref-pol", "default", source)
-	if err == nil || !strings.Contains(err.Error(), "'ref' is not supported") {
-		t.Errorf("expected compile-time rejection of 'ref', got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "field not allowed") {
+		t.Errorf("expected load-time rejection of 'ref', got %v", err)
 	}
 }
 
-func TestRef_NestedFailsClosed(t *testing.T) {
-	// A ref nested inside any/all escapes the compile-time top-level check;
-	// the evaluation backstop must still fail it closed.
+func TestRef_NestedRejectedAtLoad(t *testing.T) {
+	// Expressions are typed all the way down, so a ref nested inside
+	// any/all is rejected at load like a top-level one.
 	source := makePolicy("ref-nested", "default", "nested ref",
 		`{id: "r1", description: "nested ref", severity: "high", expr: {any: [{ref: "other-policy"}]}}`,
 		"deny", "")
-	eng := loadTestPolicy(t, "ref-nested", "default", source)
-
-	resp, err := eng.Evaluate(context.Background(), &EvaluateRequest{
-		Input: map[string]any{"kind": "Pod"},
-	})
-	if err != nil {
-		t.Fatalf("evaluate failed: %v", err)
-	}
-	if resp.Decision != DecisionDeny {
-		t.Errorf("expected nested 'ref' to fail closed, got %s", resp.Decision)
+	eng := newTestEngine(t)
+	if err := eng.LoadPolicy(context.Background(), "ref-nested", "default", source); err == nil {
+		t.Error("expected load-time rejection of a nested 'ref'")
 	}
 }
 
@@ -260,15 +253,6 @@ func TestEvaluate_SummaryPopulated(t *testing.T) {
 	s := resp.Summary
 	if s.TotalRules != 2 || s.Passed != 1 || s.Failed != 1 || s.Skipped != 0 {
 		t.Errorf("summary counts wrong: %+v", s)
-	}
-	if s.BySeverity[SeverityHigh].Failed != 1 {
-		t.Errorf("expected 1 high-severity failure, got %+v", s.BySeverity)
-	}
-	if s.ByCategory["security"].Failed != 1 || s.ByCategory["quality"].Passed != 1 {
-		t.Errorf("category counts wrong: %+v", s.ByCategory)
-	}
-	if s.ByNamespace["default"].Failed != 1 {
-		t.Errorf("namespace counts wrong: %+v", s.ByNamespace)
 	}
 }
 

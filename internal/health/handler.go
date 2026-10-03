@@ -5,6 +5,7 @@ package health
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -126,7 +127,7 @@ func (h *Handler) runCheckers(ctx context.Context, includeDeep bool) *Response {
 			defer wg.Done()
 
 			start := time.Now()
-			check := checker(ctx)
+			check := runChecker(ctx, name, checker)
 			check.Name = name
 			check.Latency = time.Since(start)
 
@@ -145,6 +146,32 @@ func (h *Handler) runCheckers(ctx context.Context, includeDeep bool) *Response {
 
 	wg.Wait()
 	return resp
+}
+
+// runChecker invokes one checker, converting a panic or a nil result into an
+// unhealthy check.
+//
+// Checkers run on their own goroutines, so the server's recovery middleware —
+// which only wraps the request goroutine — cannot catch a panic here: one
+// misbehaving checker took the whole process down instead of reporting 503.
+// A checker that returns nil did the same via a nil dereference.
+func runChecker(ctx context.Context, name string, checker Checker) (check *Check) {
+	defer func() {
+		if r := recover(); r != nil {
+			check = &Check{
+				Status:  StatusUnhealthy,
+				Message: fmt.Sprintf("check panicked: %v", r),
+			}
+		}
+	}()
+
+	if check = checker(ctx); check == nil {
+		check = &Check{
+			Status:  StatusUnhealthy,
+			Message: "check returned no result",
+		}
+	}
+	return check
 }
 
 // LivenessHandler returns the liveness probe handler.

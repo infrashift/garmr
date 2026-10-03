@@ -5,12 +5,21 @@
 # syncs the git checkout onto that volume, then either re-runs this job to
 # roll the allocations (each new alloc loads at startup and FAILS CLOSED on a
 # broken or empty policy tree, so auto_revert keeps the old version serving)
-# or calls POST /v1/policies/reload on every alloc (also fail-closed: a bad
+# or reloads in place with garmr-reload.nomad.hcl (also fail-closed: a bad
 # tree returns 500 and the old set keeps serving).
 #
-# Verify convergence after either path:
-#   garmr policy digest policies/                          # in CI, from git
-#   curl -s http://<alloc>:8080/v1/policies | jq -r .digest  # per alloc
+# PREREQUISITE — apply the service-defaults config entry first:
+#
+#   consul config write deploy/nomad/garmr-service-defaults.hcl
+#
+# Without it Consul proxies this service at L4 and Envoy never injects
+# X-Forwarded-Client-Cert, so every audit record ships an empty "principal"
+# and identity-based rate limiting silently degrades to one shared bucket.
+#
+# Verify convergence after either path with garmr-reload.nomad.hcl, which
+# dials Garmr as a Connect upstream. Note that the upstream load-balances
+# across allocs, so convergence is checked by collecting instance_id from the
+# responses rather than by addressing allocs individually — see that file.
 #
 # The app serves plain HTTP; Consul Connect provides mTLS and forwards the
 # verified caller identity via X-Forwarded-Client-Cert (audit-logged as
@@ -67,6 +76,10 @@ job "garmr" {
       # expose=true has Nomad configure an Envoy expose path so Consul can
       # reach /readyz without a mesh certificate. /readyz is 503 until
       # policies are loaded and again as soon as shutdown begins draining.
+      #
+      # Only the health check is exposed. The v1 API stays inside the mesh and
+      # is reached as a Connect upstream (garmr-reload.nomad.hcl), so it is
+      # governed by intentions rather than by whoever can reach the host.
       check {
         name     = "garmr-ready"
         type     = "http"
@@ -96,6 +109,19 @@ job "garmr" {
         ]
       }
 
+      env {
+        # Bounds the evaluation replica count: the engine builds
+        # K = min(GOMAXPROCS, 8) CUE contexts, each holding a full compiled
+        # copy of the policy set, and a reload holds the old and new sets at
+        # once (up to 2K copies at peak).
+        #
+        # This must be set explicitly. Nomad's docker driver applies CPU
+        # *shares*, not a cpuset, so GOMAXPROCS defaults to the host's core
+        # count — on a 16-core client that is 8 compiled copies against the
+        # memory cap below, sized for far fewer.
+        GOMAXPROCS = "2"
+      }
+
       volume_mount {
         volume      = "policies"
         destination = "/etc/garmr/policies"
@@ -105,8 +131,12 @@ job "garmr" {
       kill_timeout = "30s"
 
       resources {
-        cpu    = 500
-        memory = 256
+        cpu = 500
+        # Sized for GOMAXPROCS=2 (2 compiled policy-set copies, 4 at reload
+        # peak) plus request buffers. Raise this together with GOMAXPROCS or
+        # with a substantially larger policy tree — the failure mode is an
+        # OOM kill during reload, not a graceful error.
+        memory = 512
       }
     }
   }

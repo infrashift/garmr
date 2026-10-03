@@ -1,6 +1,6 @@
 // example-policies/advanced-operators/length.cue
 // Demonstrates the length expression for array and string length constraints
-// Supports: equals, greaterThan, lessThan, min, max
+// Supports: equals, greaterThan, greaterThanOrEqual, lessThan, lessThanOrEqual
 package advanced
 
 lengthPolicy: {
@@ -20,7 +20,7 @@ lengthPolicy: {
 				severity:    "high"
 				expr: match: {
 					path: "spec.containers"
-					length: min: 1
+					length: greaterThanOrEqual: 1
 				}
 				message: "at least one container is required"
 			},
@@ -30,7 +30,7 @@ lengthPolicy: {
 				severity:    "medium"
 				expr: match: {
 					path: "spec.containers"
-					length: max: 5
+					length: lessThanOrEqual: 5
 				}
 				message: "at most 5 containers are allowed per pod"
 			},

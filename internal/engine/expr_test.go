@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 )
 
 // --- Expression Evaluation: Match Operators ---
@@ -175,7 +176,7 @@ func TestEvaluate_MatchPattern(t *testing.T) {
 
 func TestEvaluate_Exists(t *testing.T) {
 	source := makePolicy("exists-test", "default", "exists test",
-		`{id: "r1", description: "check labels", severity: "high", expr: {exists: "metadata.labels"}, message: "labels required"}`,
+		`{id: "r1", description: "check labels", severity: "high", expr: {match: {path: "metadata.labels", exists: true}}, message: "labels required"}`,
 		"deny", "")
 	eng := loadTestPolicy(t, "exists-test", "default", source)
 
@@ -196,7 +197,7 @@ func TestEvaluate_Exists(t *testing.T) {
 
 func TestEvaluate_Absent(t *testing.T) {
 	source := makePolicy("absent-test", "default", "absent test",
-		`{id: "r1", description: "check hostNetwork", severity: "critical", expr: {absent: "spec.hostNetwork"}, message: "hostNetwork must not be set"}`,
+		`{id: "r1", description: "check hostNetwork", severity: "critical", expr: {match: {path: "spec.hostNetwork", exists: false}}, message: "hostNetwork must not be set"}`,
 		"deny", "")
 	eng := loadTestPolicy(t, "absent-test", "default", source)
 
@@ -297,7 +298,7 @@ func TestEvaluate_ForEach(t *testing.T) {
 			expr: {forEach: {
 				path: "spec.containers"
 				as: "container"
-				condition: {exists: "container.image"}
+				condition: {match: {path: "container.image", exists: true}}
 			}}
 			message: "all containers need image"
 		}`,
@@ -474,11 +475,11 @@ func BenchmarkForEach_LargeInput(b *testing.B) {
 
 // --- Contains Expression ---
 
-func TestEvaluate_ContainsExpr(t *testing.T) {
-	source := makePolicy("contains-expr", "default", "contains expr test",
-		`{id: "r1", description: "check tags", severity: "medium", expr: {contains: {path: "tags", value: "production"}}, message: "must have production tag"}`,
+func TestEvaluate_MatchContainsAny(t *testing.T) {
+	source := makePolicy("contains-any", "default", "containsAny test",
+		`{id: "r1", description: "check tags", severity: "medium", expr: {match: {path: "tags", containsAny: ["production", "prod"]}}, message: "must have production tag"}`,
 		"deny", "")
-	eng := loadTestPolicy(t, "contains-expr", "default", source)
+	eng := loadTestPolicy(t, "contains-any", "default", source)
 
 	resp, _ := eng.Evaluate(context.Background(), &EvaluateRequest{
 		Input: map[string]any{"tags": []any{"production", "reviewed"}},
@@ -528,7 +529,7 @@ func TestEvaluate_Func(t *testing.T) {
 	source := makePolicy("func-test", "default", "func test",
 		`{id: "r1", description: "check length", severity: "medium", expr: {func: {
 			name: "len"
-			args: ["input.items"]
+			args: [{path: "items"}]
 			expect: 3
 		}}, message: "must have exactly 3 items"}`,
 		"deny", "")
@@ -745,9 +746,9 @@ func TestEvaluate_MatchLength_LessThanOrEqual(t *testing.T) {
 	}
 }
 
-func TestEvaluate_MatchLength_MinMax(t *testing.T) {
-	source := makePolicy("len-minmax", "default", "length min/max",
-		`{id: "r1", description: "check", severity: "medium", expr: {match: {path: "replicas", length: {min: 2, max: 5}}}, message: "replicas must be 2-5"}`,
+func TestEvaluate_MatchLength_Range(t *testing.T) {
+	source := makePolicy("len-minmax", "default", "length range",
+		`{id: "r1", description: "check", severity: "medium", expr: {match: {path: "replicas", length: {greaterThanOrEqual: 2, lessThanOrEqual: 5}}}, message: "replicas must be 2-5"}`,
 		"deny", "")
 	eng := loadTestPolicy(t, "len-minmax", "default", source)
 
@@ -1057,12 +1058,21 @@ func TestEvaluate_MatchDatetime_WithinDays(t *testing.T) {
 		"deny", "")
 	eng := loadTestPolicy(t, "dt-withindays", "default", source)
 
-	// Today should pass
+	// A recent date is within the window.
 	resp, _ := eng.Evaluate(context.Background(), &EvaluateRequest{
-		Input: map[string]any{"deploy_date": "2020-01-01T00:00:00Z"},
+		Input: map[string]any{"deploy_date": time.Now().AddDate(0, 0, -10).UTC().Format(time.RFC3339)},
 	})
 	if resp.Decision != DecisionAllow {
 		t.Errorf("expected allow for past date within window, got %s", resp.Decision)
+	}
+
+	// A date years in the past is not "within 365 days of now". Only the
+	// future bound used to be checked, so any past date passed.
+	resp, _ = eng.Evaluate(context.Background(), &EvaluateRequest{
+		Input: map[string]any{"deploy_date": "2020-01-01T00:00:00Z"},
+	})
+	if resp.Decision != DecisionDeny {
+		t.Errorf("expected deny for a date far in the past, got %s", resp.Decision)
 	}
 
 	// Far future should fail

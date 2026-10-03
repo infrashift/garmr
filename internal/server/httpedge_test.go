@@ -315,8 +315,10 @@ func TestReady_ReflectsFailingChecks(t *testing.T) {
 	srv := newMetricsTestServer(t)
 	handler := srv.Handler()
 
+	// "policies" is derived live from the engine snapshot, so use a latched
+	// check to exercise the aggregation itself.
 	srv.mu.Lock()
-	srv.checks["policies"] = false
+	srv.checks["http"] = false
 	srv.mu.Unlock()
 
 	rec := httptest.NewRecorder()

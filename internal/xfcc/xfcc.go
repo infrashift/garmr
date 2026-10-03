@@ -11,7 +11,7 @@ import "strings"
 const DefaultHeader = "X-Forwarded-Client-Cert"
 
 // ParseSPIFFEIdentity walks one or more XFCC header values and returns the
-// first URI= field (quoted or unquoted). Returns "" if none found.
+// LAST URI= field (quoted or unquoted). Returns "" if none found.
 //
 // XFCC format (Envoy):
 //
@@ -19,7 +19,20 @@ const DefaultHeader = "X-Forwarded-Client-Cert"
 //
 // Multiple certs in the chain are comma-separated at the top level. Values
 // containing delimiters or backslashes are double-quoted.
+//
+// The last entry is the one to trust, and reading the first was a spoofing
+// hole. Under Envoy's APPEND_FORWARD mode — what a mesh uses when it wants to
+// preserve an existing chain — the sidecar appends its own verified entry
+// after whatever the downstream already sent, so a caller that supplies its
+// own X-Forwarded-Client-Cert header wins a first-match parse and forges the
+// principal on every decision it makes. Reading the last entry takes the
+// sidecar's, and is identical under SANITIZE_SET (which leaves exactly one
+// entry), so this is correct regardless of how the proxy is configured.
+//
+// This mirrors how the rate limiter treats X-Forwarded-For, which likewise
+// believes only the right-most entry — the one its trusted proxy vouches for.
 func ParseSPIFFEIdentity(values []string) string {
+	identity := ""
 	for _, v := range values {
 		for _, entry := range split(v, ',') {
 			for _, field := range split(entry, ';') {
@@ -28,12 +41,12 @@ func ParseSPIFFEIdentity(values []string) string {
 					continue
 				}
 				if strings.EqualFold(key, "URI") && value != "" {
-					return value
+					identity = value
 				}
 			}
 		}
 	}
-	return ""
+	return identity
 }
 
 // split splits s on sep, respecting double-quoted runs.

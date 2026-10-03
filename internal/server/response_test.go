@@ -9,6 +9,21 @@ import (
 	"github.com/infrashift/garmr/internal/engine"
 )
 
+// wireBody renders a response body to JSON and back, so tests assert the
+// shape clients actually receive.
+func wireBody(t *testing.T, body any) map[string]any {
+	t.Helper()
+	b, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return out
+}
+
 // TestEvaluateResponseBody_CarriesSummaryAndMode pins the fields the engine
 // has always computed but the API never returned. `garmr eval --help`
 // promises that the response says whether fail-fast triggered, which rule
@@ -35,7 +50,7 @@ func TestEvaluateResponseBody_CarriesSummaryAndMode(t *testing.T) {
 		PolicyName: "p", PolicyNamespace: "ns", RuleID: "R-001", Severity: engine.SeverityHigh, Message: "boom",
 	}
 
-	body := evaluateResponseBody(result, "req-1")
+	body := wireBody(t, evaluateResponseBody(result, "req-1"))
 
 	if body["decision"] != "deny" {
 		t.Errorf("decision = %v, want deny", body["decision"])
@@ -44,28 +59,28 @@ func TestEvaluateResponseBody_CarriesSummaryAndMode(t *testing.T) {
 		t.Error("terminated_early missing or false")
 	}
 
-	summary, ok := body["summary"].(map[string]interface{})
+	summary, ok := body["summary"].(map[string]any)
 	if !ok {
 		t.Fatalf("summary missing or wrong type: %T", body["summary"])
 	}
-	for key, want := range map[string]int{"total_rules": 5, "passed": 0, "failed": 1, "skipped": 4} {
+	for key, want := range map[string]float64{"total_rules": 5, "passed": 0, "failed": 1, "skipped": 4} {
 		if summary[key] != want {
-			t.Errorf("summary[%q] = %v, want %d", key, summary[key], want)
+			t.Errorf("summary[%q] = %v, want %v", key, summary[key], want)
 		}
 	}
 
-	mode, ok := body["evaluation_mode"].(map[string]interface{})
+	mode, ok := body["evaluation_mode"].(map[string]any)
 	if !ok {
 		t.Fatalf("evaluation_mode missing or wrong type: %T", body["evaluation_mode"])
 	}
 	if mode["fail_fast"] != true || mode["short_circuited"] != true {
 		t.Errorf("evaluation_mode = %v, want fail_fast and short_circuited true", mode)
 	}
-	if mode["rules_skipped"] != 4 || mode["rules_evaluated"] != 1 {
+	if mode["rules_skipped"] != 4.0 || mode["rules_evaluated"] != 1.0 {
 		t.Errorf("evaluation_mode counts = %v, want 1 evaluated / 4 skipped", mode)
 	}
 
-	tr, ok := body["termination_rule"].(map[string]interface{})
+	tr, ok := body["termination_rule"].(map[string]any)
 	if !ok {
 		t.Fatalf("termination_rule missing or wrong type: %T", body["termination_rule"])
 	}
@@ -79,7 +94,7 @@ func TestEvaluateResponseBody_CarriesSummaryAndMode(t *testing.T) {
 func TestEvaluateResponseBody_OmitsTerminationRuleWhenAbsent(t *testing.T) {
 	result := &engine.EvaluateResponse{Decision: engine.DecisionAllow}
 
-	body := evaluateResponseBody(result, "req-2")
+	body := wireBody(t, evaluateResponseBody(result, "req-2"))
 
 	if _, present := body["termination_rule"]; present {
 		t.Error("termination_rule present when the evaluation did not terminate early")

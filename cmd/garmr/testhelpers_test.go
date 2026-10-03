@@ -345,6 +345,9 @@ func newTestCmd(t *testing.T, flags ...flagSpec) *cobraCmd {
 		case "bool":
 			v, _ := f.Value.(bool)
 			cmd.Flags().Bool(f.Name, v, "")
+		case "int":
+			v, _ := f.Value.(int)
+			cmd.Flags().Int(f.Name, v, "")
 		case "stringSlice":
 			v, _ := f.Value.([]string)
 			cmd.Flags().StringSlice(f.Name, v, "")

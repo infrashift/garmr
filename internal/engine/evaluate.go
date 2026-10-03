@@ -3,35 +3,29 @@ package engine
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
-
-	"cuelang.org/go/cue"
-	"go.uber.org/zap"
 )
 
 // Evaluate evaluates input against loaded policies.
 func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateResponse, error) {
-	e.mu.RLock()
-	set := e.set
-	requireMatch := e.requireMatch
-	e.mu.RUnlock()
+	// A caller whose deadline has already passed (or whose client hung up)
+	// gets no work done on its behalf. Callers surface this as
+	// backpressure — 503, not a decision.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrEvaluationUnavailable, err)
+	}
 
-	// Track active evaluations for metrics
+	set := e.set.Load()
+	requireMatch := e.requireMatch.Load()
+
 	e.observability().Metrics().IncActiveEvaluations()
 	defer e.observability().Metrics().DecActiveEvaluations()
 
-	// Check out a policy replica for the duration of this evaluation. The
-	// replica's CUE context and every compiled policy value in it form a
-	// single unit, so the input and the policy expressions it unifies with
-	// always share one context, and no two goroutines ever share one.
-	rep := set.get()
-	defer set.put(rep)
-
-	// Store the replica's CUE context in the Go context so all downstream
-	// evaluation methods can access it without signature changes.
-	ctx = withCueContext(ctx, rep.ctx)
+	input, err := normalizeInput(req.Input)
+	if err != nil {
+		return nil, err
+	}
 
 	start := time.Now()
 	resp := &EvaluateResponse{
@@ -39,14 +33,9 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 		Metrics:  &Metrics{},
 	}
 
-	// Convert input to CUE value using the replica's context
-	inputVal := rep.ctx.Encode(req.Input)
-	if inputVal.Err() != nil {
-		return nil, fmt.Errorf("%w: encoding input: %w", ErrInvalidInput, inputVal.Err())
-	}
-
 	// Find applicable policies
-	policies := e.findApplicablePolicies(rep, req)
+	res := resourceOf(input)
+	policies := e.findApplicablePolicies(set, req, res)
 	resp.Metrics.PoliciesEvaluated = len(policies)
 
 	// Fail-closed on no match. Returning DecisionAllow with zero rules
@@ -57,7 +46,7 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 	// missing, empty namespace, or no target match) applied.
 	if len(policies) == 0 && requireMatch {
 		resp.Decision = DecisionDeny
-		resp.Results = append(resp.Results, e.buildNoMatchResult(rep, req))
+		resp.Results = append(resp.Results, e.buildNoMatchResult(set, req))
 		resp.Metrics.EvaluationTimeNs = time.Since(start).Nanoseconds()
 		e.observability().Metrics().RecordEvaluation(
 			"",
@@ -81,7 +70,7 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 	// and maxRules caps) so fail-fast skip counts and the summary are accurate.
 	totalRulesInScope := 0
 	for _, p := range policies {
-		totalRulesInScope += e.countRulesInScope(p, req)
+		totalRulesInScope += e.countRulesInScope(p, res)
 	}
 	acc := newEvalAccumulator(resp, totalRulesInScope)
 
@@ -89,19 +78,7 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 	// fold reports whether the evaluation must stop (engine failure,
 	// timeout, or fail-fast).
 	for _, policy := range policies {
-		outcome, err := e.evaluatePolicy(ctx, policy, inputVal, req)
-		if err != nil {
-			// Fail closed: a policy that could not be evaluated is not
-			// evidence of compliance. Continuing here would let the overall
-			// decision stay Allow while a rule silently never ran.
-			e.logger.Error("policy evaluation failed",
-				zap.String("policy", policy.Name),
-				zap.String("namespace", policy.Namespace),
-				zap.Error(err),
-			)
-			acc.engineFailure(policy, err)
-			break
-		}
+		outcome := e.evaluatePolicy(ctx, policy, input, res)
 		if stop := acc.fold(e, policy, outcome, req, ctx.Err()); stop {
 			break
 		}
@@ -145,19 +122,7 @@ type evalAccumulator struct {
 
 func newEvalAccumulator(resp *EvaluateResponse, totalRulesInScope int) *evalAccumulator {
 	resp.Summary.TotalRules = totalRulesInScope
-	// Initialise eagerly so a response with zero results still serialises
-	// empty maps rather than null.
-	resp.Summary.BySeverity = make(map[Severity]SeverityCounts)
-	resp.Summary.ByCategory = make(map[string]CategoryCounts)
-	resp.Summary.ByNamespace = make(map[string]NamespaceCounts)
 	return &evalAccumulator{resp: resp, totalRulesInScope: totalRulesInScope}
-}
-
-// engineFailure records a policy that could not be evaluated at all. Deny
-// unconditionally — fail closed.
-func (a *evalAccumulator) engineFailure(policy *CompiledPolicy, err error) {
-	a.resp.Decision = DecisionDeny
-	a.resp.Results = append(a.resp.Results, buildEvaluationErrorResult(policy, err))
 }
 
 // fold merges one policy's outcome and reports whether evaluation must stop.
@@ -177,11 +142,7 @@ func (a *evalAccumulator) fold(e *Engine, policy *CompiledPolicy, outcome policy
 	a.rulesEvaluated += len(results)
 	a.resp.Metrics.RulesEvaluated += len(results)
 
-	// Determine dry run mode
 	isDryRun := policy.Enforcement.DryRun
-	if req.Options.DryRunOverride != nil {
-		isDryRun = *req.Options.DryRunOverride
-	}
 
 	// Compute this policy's effective decision in isolation, then merge.
 	// A dry-run policy is capped at Warn but must never lower a Deny
@@ -189,9 +150,10 @@ func (a *evalAccumulator) fold(e *Engine, policy *CompiledPolicy, outcome policy
 	policyDecision := DecisionAllow
 
 	for _, result := range results {
-		e.recordSummary(&a.resp.Summary, policy, result)
-
-		if !result.Passed {
+		if result.Passed {
+			a.resp.Summary.Passed++
+		} else {
+			a.resp.Summary.Failed++
 			e.observability().Metrics().RecordViolation(policy.Name, policy.Namespace, result.RuleID, string(result.Severity))
 
 			switch policy.Enforcement.Action {
@@ -264,55 +226,47 @@ func (a *evalAccumulator) finish() {
 	}
 }
 
-// findApplicablePolicies returns policies from the replica that match the request.
-func (e *Engine) findApplicablePolicies(rep *policyReplica, req *EvaluateRequest) []*CompiledPolicy {
+// findApplicablePolicies returns the policies that apply to the request.
+func (e *Engine) findApplicablePolicies(set *policySet, req *EvaluateRequest, res resource) []*CompiledPolicy {
 	var result []*CompiledPolicy
 
-	// If specific policies requested, return only those
+	// If specific policies requested, return only those, in request order.
 	if len(req.Policies) > 0 {
+		seen := make(map[string]bool, len(req.Policies))
 		for _, name := range req.Policies {
-			ns := req.Namespace
-			if ns == "" {
-				ns = "default"
+			key := policyKey(req.Namespace, name)
+			if seen[key] {
+				continue // naming a policy twice must not evaluate it twice
 			}
-			key := policyKey(ns, name)
-			if p, ok := rep.policies[key]; ok {
-				if e.policyMatchesInput(p, req.Input) {
-					result = append(result, p)
-				}
+			seen[key] = true
+			if p, ok := set.policies[key]; ok && e.policyMatchesInput(p, res) {
+				result = append(result, p)
 			}
 		}
 		return result
 	}
 
-	// Otherwise, return all policies in namespace that match the input
-	for _, p := range rep.policies {
-		if req.Namespace == "" || p.Namespace == req.Namespace {
-			if e.policyMatchesInput(p, req.Input) {
-				result = append(result, p)
-			}
+	// Otherwise every policy in the namespace whose target matches. The kind
+	// index narrows the candidates; they come back sorted, so results
+	// ordering, fail-fast winners and timeout tie-breaks are reproducible.
+	for _, p := range set.candidates(res.kind) {
+		if (req.Namespace == "" || p.Namespace == req.Namespace) && e.policyMatchesInput(p, res) {
+			result = append(result, p)
 		}
 	}
-
-	// Map iteration order is random; sort so results ordering, fail-fast
-	// winners, and timeout tie-breaks are reproducible across runs.
-	sort.Slice(result, func(i, j int) bool {
-		return policyKey(result[i].Namespace, result[i].Name) < policyKey(result[j].Namespace, result[j].Name)
-	})
-
 	return result
 }
 
 // countRulesInScope returns the number of rules of a policy that would be
 // evaluated for this request: rules surviving category/tag filters, zero when
 // an exception matches, capped by the policy's maxRules setting.
-func (e *Engine) countRulesInScope(policy *CompiledPolicy, req *EvaluateRequest) int {
-	if len(policy.Enforcement.Exceptions) > 0 && e.matchesException(policy.Enforcement.Exceptions, req.Input) {
+func (e *Engine) countRulesInScope(policy *CompiledPolicy, res resource) int {
+	if len(policy.Enforcement.Exceptions) > 0 && e.matchesException(policy.Enforcement.Exceptions, res) {
 		return 0
 	}
 	n := 0
 	for _, rule := range policy.Rules {
-		if e.shouldEvaluateRule(rule, policy.Evaluation, req.Options) {
+		if shouldEvaluateRule(rule, policy.Evaluation) {
 			n++
 		}
 	}
@@ -322,121 +276,85 @@ func (e *Engine) countRulesInScope(policy *CompiledPolicy, req *EvaluateRequest)
 	return n
 }
 
-// recordSummary updates the response summary counts for a single rule result.
-func (e *Engine) recordSummary(s *ResultSummary, policy *CompiledPolicy, result RuleResult) {
-	if s.BySeverity == nil {
-		s.BySeverity = make(map[Severity]SeverityCounts)
-		s.ByCategory = make(map[string]CategoryCounts)
-		s.ByNamespace = make(map[string]NamespaceCounts)
-	}
+// resource identifies an input for target and exception matching. It is
+// computed once per evaluation; labels and annotations are read in place.
+type resource struct {
+	kind, group, name, namespace string
+	labels, annotations          map[string]any
+}
 
-	sev := s.BySeverity[result.Severity]
-	cat := s.ByCategory[result.Category]
-	ns := s.ByNamespace[policy.Namespace]
-	if result.Passed {
-		s.Passed++
-		sev.Passed++
-		cat.Passed++
-		ns.Passed++
-	} else {
-		s.Failed++
-		sev.Failed++
-		cat.Failed++
-		ns.Failed++
+func resourceOf(input map[string]any) resource {
+	md, _ := input["metadata"].(map[string]any)
+	r := resource{
+		kind:      NestedString(input, "kind"),
+		group:     apiGroupOf(NestedString(input, "apiVersion")),
+		name:      NestedString(md, "name"),
+		namespace: NestedString(md, "namespace"),
 	}
-	s.BySeverity[result.Severity] = sev
-	s.ByCategory[result.Category] = cat
-	s.ByNamespace[policy.Namespace] = ns
+	r.labels, _ = md["labels"].(map[string]any)
+	r.annotations, _ = md["annotations"].(map[string]any)
+	return r
 }
 
 // policyMatchesInput checks if a policy's target matches the input resource.
-func (e *Engine) policyMatchesInput(policy *CompiledPolicy, input map[string]any) bool {
+func (e *Engine) policyMatchesInput(policy *CompiledPolicy, res resource) bool {
 	// If no target resources defined, policy applies to everything
 	if len(policy.Target.Resources) == 0 {
 		return true
 	}
-
-	// Extract resource identifiers from input
-	inputKind := NestedString(input, "kind")
-	inputAPIGroup := NestedString(input, "apiVersion")
-	inputName := NestedString(input, "metadata", "name")
-	inputNamespace := NestedString(input, "metadata", "namespace")
-	inputLabels := getMapField(input, "metadata", "labels")
-	inputAnnotations := getMapField(input, "metadata", "annotations")
-
-	// Check if any target selector matches
 	for _, selector := range policy.Target.Resources {
-		if e.selectorMatchesInput(selector, inputKind, inputAPIGroup, inputName, inputNamespace, inputLabels, inputAnnotations) {
+		if e.selectorMatchesInput(selector, res) {
 			return true
 		}
 	}
-
 	return false
 }
 
+// apiGroupOf returns the API group of a Kubernetes-style apiVersion:
+// "apps/v1" -> "apps", and "v1" (no slash) -> "" (the core group).
+func apiGroupOf(apiVersion string) string {
+	if i := strings.LastIndex(apiVersion, "/"); i >= 0 {
+		return apiVersion[:i]
+	}
+	return ""
+}
+
 // selectorMatchesInput checks if a resource selector matches the input.
-func (e *Engine) selectorMatchesInput(selector ResourceSelector, kind, apiGroup, name, namespace string, labels, annotations map[string]string) bool {
-	// Check Kind (supports wildcards)
-	if selector.Kind != "" && selector.Kind != "*" {
-		if !e.matchesPatternCached(selector.Kind, kind) {
+func (e *Engine) selectorMatchesInput(selector ResourceSelector, res resource) bool {
+	if selector.Kind != "" && selector.Kind != "*" && !e.matchesPatternCached(selector.Kind, res.kind) {
+		return false
+	}
+	// "" is the core group, so only "*" is a wildcard.
+	if selector.APIGroup != "*" && !e.matchesPatternCached(selector.APIGroup, res.group) {
+		return false
+	}
+	if len(selector.Names) > 0 && !e.anyPatternMatches(selector.Names, res.name) {
+		return false
+	}
+	if len(selector.Namespaces) > 0 && !e.anyPatternMatches(selector.Namespaces, res.namespace) {
+		return false
+	}
+	// Every specified label and annotation must match.
+	for k, v := range selector.Labels {
+		if got, ok := res.labels[k].(string); !ok || !e.matchesPatternCached(v, got) {
 			return false
 		}
 	}
-
-	// Check APIGroup
-	if selector.APIGroup != "" && selector.APIGroup != "*" {
-		if !e.matchesPatternCached(selector.APIGroup, apiGroup) {
+	for k, v := range selector.Annotations {
+		if got, ok := res.annotations[k].(string); !ok || !e.matchesPatternCached(v, got) {
 			return false
 		}
 	}
-
-	// Check Names (if specified, name must be in the list)
-	if len(selector.Names) > 0 {
-		found := false
-		for _, n := range selector.Names {
-			if e.matchesPatternCached(n, name) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-
-	// Check Namespaces (if specified, namespace must be in the list)
-	if len(selector.Namespaces) > 0 {
-		found := false
-		for _, ns := range selector.Namespaces {
-			if e.matchesPatternCached(ns, namespace) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-
-	// Check Labels (all specified labels must match)
-	if len(selector.Labels) > 0 {
-		for k, v := range selector.Labels {
-			if labelVal, ok := labels[k]; !ok || !e.matchesPatternCached(v, labelVal) {
-				return false
-			}
-		}
-	}
-
-	// Check Annotations (all specified annotations must match)
-	if len(selector.Annotations) > 0 {
-		for k, v := range selector.Annotations {
-			if annVal, ok := annotations[k]; !ok || !e.matchesPatternCached(v, annVal) {
-				return false
-			}
-		}
-	}
-
 	return true
+}
+
+func (e *Engine) anyPatternMatches(patterns []string, value string) bool {
+	for _, p := range patterns {
+		if e.matchesPatternCached(p, value) {
+			return true
+		}
+	}
+	return false
 }
 
 // policyOutcome is the result of evaluating one policy: the per-rule results,
@@ -451,20 +369,18 @@ type policyOutcome struct {
 }
 
 // evaluatePolicy evaluates a single policy against input.
-func (e *Engine) evaluatePolicy(ctx context.Context, policy *CompiledPolicy, input cue.Value, req *EvaluateRequest) (policyOutcome, error) {
+func (e *Engine) evaluatePolicy(ctx context.Context, policy *CompiledPolicy, input map[string]any, res resource) policyOutcome {
 	var out policyOutcome
-	opts := req.Options
 
 	// Check if any exception matches the input, skip evaluation if so
-	if len(policy.Enforcement.Exceptions) > 0 {
-		if e.matchesException(policy.Enforcement.Exceptions, req.Input) {
-			return out, nil
-		}
+	if len(policy.Enforcement.Exceptions) > 0 && e.matchesException(policy.Enforcement.Exceptions, res) {
+		return out
 	}
+	out.results = make([]RuleResult, 0, len(policy.Rules))
 
+	ec := &evalCtx{ctx: ctx, done: ctx.Done(), root: input}
 	for _, rule := range policy.Rules {
-		// Category/tag filtering: skip rules that don't match filters
-		if !e.shouldEvaluateRule(rule, policy.Evaluation, opts) {
+		if !shouldEvaluateRule(rule, policy.Evaluation) {
 			continue
 		}
 
@@ -475,25 +391,29 @@ func (e *Engine) evaluatePolicy(ctx context.Context, policy *CompiledPolicy, inp
 		// exists to prevent.
 		if ctx.Err() != nil {
 			out.timedOut = true
-			return out, nil
+			return out
 		}
 
-		result := e.evaluateRule(ctx, policy, rule, input, opts)
+		result := e.evaluateRule(ec, policy, rule)
+		// A deadline that expired during the rule (inside a forEach) means
+		// the rule did not finish: that is a timeout, not a verdict.
+		if ctx.Err() != nil {
+			out.timedOut = true
+			return out
+		}
 		out.results = append(out.results, result)
 
-		// Fail-fast: stop at first failure if configured
 		if policy.Evaluation.FailFast && !result.Passed {
 			out.failFast = true
-			return out, nil
+			return out
 		}
 
-		// maxRules: stop once the configured evaluation cap is reached
 		if policy.Evaluation.MaxRules > 0 && len(out.results) >= policy.Evaluation.MaxRules {
 			break
 		}
 	}
 
-	return out, nil
+	return out
 }
 
 // buildTimeoutResult returns the synthetic failing result emitted when a
@@ -522,26 +442,8 @@ func buildTimeoutResult(policy *CompiledPolicy, cause error) RuleResult {
 	}
 }
 
-// buildEvaluationErrorResult returns the synthetic failing result emitted when
-// a policy cannot be evaluated at all. Like buildTimeoutResult it lives in the
-// reserved system namespace and fails closed.
-func buildEvaluationErrorResult(policy *CompiledPolicy, cause error) RuleResult {
-	return RuleResult{
-		PolicyNamespace: ReservedSystemNamespace,
-		PolicyName:      SystemPolicyNameTimeout,
-		RuleID:          RuleIDTimeout,
-		RuleDescription: "Policy evaluation did not complete",
-		Severity:        SeverityCritical,
-		Passed:          false,
-		Message: fmt.Sprintf("Evaluation of policy %s/%s failed: %v. The request was denied because the policy's rules did not run.",
-			policy.Namespace, policy.Name, cause),
-		Remediation: "Inspect the server logs for the underlying error and re-run `garmr validate` against this policy.",
-		Bindings:    map[string]any{},
-	}
-}
-
 // evaluateRule evaluates a single rule against input.
-func (e *Engine) evaluateRule(ctx context.Context, policy *CompiledPolicy, rule CompiledRule, input cue.Value, opts EvaluateOptions) RuleResult {
+func (e *Engine) evaluateRule(ec *evalCtx, policy *CompiledPolicy, rule CompiledRule) RuleResult {
 	result := RuleResult{
 		PolicyName:      policy.Name,
 		PolicyNamespace: policy.Namespace,
@@ -552,25 +454,33 @@ func (e *Engine) evaluateRule(ctx context.Context, policy *CompiledPolicy, rule 
 		Priority:        rule.Priority,
 		Category:        rule.Category,
 		Tags:            rule.Tags,
-		Passed:          true,
-		Bindings:        make(map[string]any),
 	}
 
-	// No rule-level timeout check: the caller's loop tests ctx.Err() before
-	// each rule and reports a policy-level timeout instead. Returning a
-	// passing result here would fail open.
+	ec.wantBinds, ec.wantFrames = rule.msg.hasBinds, rule.msg.hasFrames
+	ec.binds, ec.failures = ec.binds[:0], ec.failures[:0]
+	r := rule.expr.eval(ec)
 
-	// Evaluate the expression by unifying with input
-	passed, bindings, msg := e.evaluateExpression(ctx, rule.Expression, input)
-	result.Passed = passed
-	result.Bindings = bindings
+	// Anything but a pass fails the rule. An error is reported, never
+	// inverted or skipped.
+	result.Passed = r.out == pass
+	if len(ec.binds) > 0 {
+		result.Bindings = make(map[string]any, len(ec.binds))
+		for _, b := range ec.binds {
+			result.Bindings[b.name] = b.value
+		}
+	}
 
-	if !passed {
-		if rule.Message != "" {
-			result.Message = e.interpolateMessage(rule.Message, bindings)
-		} else if msg != "" {
-			result.Message = msg
-		} else {
+	if !result.Passed {
+		switch {
+		case r.out == errored:
+			// The rule could not be evaluated as written; the author's
+			// message would misdescribe that, so say what went wrong.
+			result.Message = fmt.Sprintf("Rule %s could not be evaluated: %s", rule.ID, r.msg)
+		case rule.Message != "":
+			result.Message = rule.msg.message(ec.root, result.Bindings, ec.failures)
+		case r.msg != "":
+			result.Message = r.msg
+		default:
 			result.Message = fmt.Sprintf("Rule %s failed: %s", rule.ID, rule.Description)
 		}
 	}
@@ -578,92 +488,36 @@ func (e *Engine) evaluateRule(ctx context.Context, policy *CompiledPolicy, rule 
 	return result
 }
 
-// shouldEvaluateRule returns false if the rule should be skipped based on category/tag filters.
-// Both policy-level and request-level filters are applied (both must pass).
-func (e *Engine) shouldEvaluateRule(rule CompiledRule, policyConfig EvaluationConfig, opts EvaluateOptions) bool {
-	// Check policy-level category filters
-	if len(policyConfig.IncludeCategories) > 0 {
-		if !stringInSlice(rule.Category, policyConfig.IncludeCategories) {
-			return false
-		}
+// shouldEvaluateRule returns false if the policy's category/tag filters
+// exclude the rule.
+func shouldEvaluateRule(rule CompiledRule, cfg EvaluationConfig) bool {
+	if len(cfg.IncludeCategories) > 0 && !stringInSlice(rule.Category, cfg.IncludeCategories) {
+		return false
 	}
-	if len(policyConfig.ExcludeCategories) > 0 {
-		if stringInSlice(rule.Category, policyConfig.ExcludeCategories) {
-			return false
-		}
+	if len(cfg.ExcludeCategories) > 0 && stringInSlice(rule.Category, cfg.ExcludeCategories) {
+		return false
 	}
-
-	// Check policy-level tag filters
-	if len(policyConfig.IncludeTags) > 0 {
-		if !anyTagMatches(rule.Tags, policyConfig.IncludeTags) {
-			return false
-		}
+	if len(cfg.IncludeTags) > 0 && !anyTagMatches(rule.Tags, cfg.IncludeTags) {
+		return false
 	}
-	if len(policyConfig.ExcludeTags) > 0 {
-		if anyTagMatches(rule.Tags, policyConfig.ExcludeTags) {
-			return false
-		}
+	if len(cfg.ExcludeTags) > 0 && anyTagMatches(rule.Tags, cfg.ExcludeTags) {
+		return false
 	}
-
-	// Check request-level category filters
-	if len(opts.IncludeCategories) > 0 {
-		if !stringInSlice(rule.Category, opts.IncludeCategories) {
-			return false
-		}
-	}
-	if len(opts.ExcludeCategories) > 0 {
-		if stringInSlice(rule.Category, opts.ExcludeCategories) {
-			return false
-		}
-	}
-
-	// Check request-level tag filters
-	if len(opts.IncludeTags) > 0 {
-		if !anyTagMatches(rule.Tags, opts.IncludeTags) {
-			return false
-		}
-	}
-	if len(opts.ExcludeTags) > 0 {
-		if anyTagMatches(rule.Tags, opts.ExcludeTags) {
-			return false
-		}
-	}
-
 	return true
 }
 
 // matchesException checks if any non-expired exception matches the input.
-func (e *Engine) matchesException(exceptions []ExceptionSpec, input map[string]any) bool {
-	inputKind := NestedString(input, "kind")
-	inputAPIGroup := NestedString(input, "apiVersion")
-	inputName := NestedString(input, "metadata", "name")
-	inputNamespace := NestedString(input, "metadata", "namespace")
-	inputLabels := getMapField(input, "metadata", "labels")
-	inputAnnotations := getMapField(input, "metadata", "annotations")
-
+func (e *Engine) matchesException(exceptions []ExceptionSpec, res resource) bool {
+	now := time.Now()
 	for _, exc := range exceptions {
-		// Check if exception has expired
-		if exc.Expiry != nil && time.Now().After(*exc.Expiry) {
+		if exc.Expiry != nil && now.After(*exc.Expiry) {
 			continue
 		}
-
-		// Check if the exception's match selector applies to this input
-		if e.selectorMatchesInput(exc.Match, inputKind, inputAPIGroup, inputName, inputNamespace, inputLabels, inputAnnotations) {
+		if e.selectorMatchesInput(exc.Match, res) {
 			return true
 		}
 	}
-
 	return false
-}
-
-// interpolateMessage replaces template variables in a message.
-func (e *Engine) interpolateMessage(msg string, bindings map[string]any) string {
-	result := msg
-	for k, v := range bindings {
-		placeholder := fmt.Sprintf("{{.%s}}", k)
-		result = strings.ReplaceAll(result, placeholder, fmt.Sprintf("%v", v))
-	}
-	return result
 }
 
 // buildNoMatchResult produces the synthetic RuleResult that accompanies a
@@ -672,12 +526,12 @@ func (e *Engine) interpolateMessage(msg string, bindings map[string]any) string 
 // request and the current policy set, so users get actionable remediation
 // (typo'd namespace, missing policy name, or target-selector mismatch)
 // instead of a generic deny.
-func (e *Engine) buildNoMatchResult(rep *policyReplica, req *EvaluateRequest) RuleResult {
+func (e *Engine) buildNoMatchResult(set *policySet, req *EvaluateRequest) RuleResult {
 	const remediation = "Verify the namespace and policy names in your request, and run `garmr policy list` to inspect loaded policies."
 
 	var message string
 	switch {
-	case len(rep.policies) == 0:
+	case len(set.policies) == 0:
 		message = "No policies are loaded on the server. Check the server's policy directory and ensure policies compiled successfully."
 	case len(req.Policies) > 0:
 		ns := req.Namespace
@@ -686,7 +540,7 @@ func (e *Engine) buildNoMatchResult(rep *policyReplica, req *EvaluateRequest) Ru
 		}
 		var missing []string
 		for _, name := range req.Policies {
-			if _, ok := rep.policies[policyKey(ns, name)]; !ok {
+			if _, ok := set.policies[policyKey(ns, name)]; !ok {
 				missing = append(missing, fmt.Sprintf("%s/%s", ns, name))
 			}
 		}
@@ -699,7 +553,7 @@ func (e *Engine) buildNoMatchResult(rep *policyReplica, req *EvaluateRequest) Ru
 				strings.Join(req.Policies, ", "),
 			)
 		}
-	case req.Namespace != "" && !namespaceHasPolicies(rep, req.Namespace):
+	case req.Namespace != "" && !namespaceHasPolicies(set, req.Namespace):
 		message = fmt.Sprintf("No policies found in namespace %q. Run `garmr policy list` to see available namespaces.", req.Namespace)
 	default:
 		message = fmt.Sprintf("No policy targets this input (kind=%q apiVersion=%q). Check resource selectors on your policies or the `kind` field of your input.",
@@ -721,9 +575,9 @@ func (e *Engine) buildNoMatchResult(rep *policyReplica, req *EvaluateRequest) Ru
 	}
 }
 
-// namespaceHasPolicies reports whether any policy in the replica belongs to ns.
-func namespaceHasPolicies(rep *policyReplica, ns string) bool {
-	for _, p := range rep.policies {
+// namespaceHasPolicies reports whether any policy in the set belongs to ns.
+func namespaceHasPolicies(set *policySet, ns string) bool {
+	for _, p := range set.all {
 		if p.Namespace == ns {
 			return true
 		}

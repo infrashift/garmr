@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -234,14 +235,26 @@ an error and the previous policy set keeps serving. This command exits
 nonzero if any instance fails, if --expect-digest does not match, or if
 the instances end up with diverging digests.
 
+Behind a service-mesh upstream the instances cannot be addressed
+individually — every call load-balances — so --servers has nothing to
+enumerate. Use --converge --instances N there: the reload is repeated
+against the one upstream address until N distinct instances have each
+acknowledged the expected digest, which is what makes the digest check
+mean anything when you cannot pick who answers.
+
 Examples:
   # Single instance (the --server address)
   garmr policy reload
 
-  # Every alloc of a Nomad job, with convergence enforced against the
+  # Every alloc addressed directly, with convergence enforced against the
   # digest of the git checkout that was just synced
   garmr policy reload \
     --servers http://10.0.0.11:8080,http://10.0.0.12:8080 \
+    --expect-digest "$(garmr policy digest policies/)"
+
+  # Through a Consul Connect upstream, where the sidecar picks the instance
+  garmr policy reload --server http://localhost:8080 \
+    --converge --instances 2 \
     --expect-digest "$(garmr policy digest policies/)"`,
 	RunE: runPolicyReload,
 }
@@ -271,6 +284,12 @@ func init() {
 		"reload every listed instance (comma-separated or repeated); default is the single --server address")
 	policyReloadCmd.Flags().String("expect-digest", "",
 		"fail unless every instance reports this policy-set digest (compute with 'garmr policy digest')")
+	policyReloadCmd.Flags().Bool("converge", false,
+		"repeat the reload against one address until --instances distinct instances have acknowledged (for mesh upstreams that load-balance)")
+	policyReloadCmd.Flags().Int("instances", 0,
+		"number of distinct instances to converge (required with --converge)")
+	policyReloadCmd.Flags().Duration("converge-timeout", 2*time.Minute,
+		"give up if --converge has not reached every instance within this long")
 
 	// Lock flags
 	policyLockCmd.Flags().String("version", "", "version to embed in lock file")
@@ -382,8 +401,9 @@ Examples:
   # Validate a single policy
   garmr policy validate-lock policies/release/prod-release.cue
 
-  # Validate all policies (in CI)
-  garmr policy validate-lock --recursive policies/ || exit 1`,
+  # Validate all policies (in CI). Directories are always expanded
+  # recursively — there is no --recursive flag on this command.
+  garmr policy validate-lock policies/ || exit 1`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runPolicyValidateLock,
 }
@@ -818,8 +838,22 @@ type reloadOutcome struct {
 func runPolicyReload(cmd *cobra.Command, args []string) error {
 	servers, _ := cmd.Flags().GetStringSlice("servers")
 	expectDigest, _ := cmd.Flags().GetString("expect-digest")
+	converge, _ := cmd.Flags().GetBool("converge")
 	if len(servers) == 0 {
 		servers = []string{viper.GetString("server")}
+	}
+
+	if converge {
+		instances, _ := cmd.Flags().GetInt("instances")
+		timeout, _ := cmd.Flags().GetDuration("converge-timeout")
+		if instances < 1 {
+			return fmt.Errorf("--converge requires --instances (the number of instances behind the address)")
+		}
+		if len(servers) > 1 {
+			return fmt.Errorf("--converge takes a single address: it repeats the reload through one " +
+				"load-balancing upstream. Use --servers on its own to address instances directly")
+		}
+		return runPolicyReloadConverge(servers[0], expectDigest, instances, timeout)
 	}
 
 	outcomes := make([]reloadOutcome, 0, len(servers))
@@ -870,6 +904,101 @@ func runPolicyReload(cmd *cobra.Command, args []string) error {
 	}
 
 	if failed {
+		osExit(1)
+	}
+	return nil
+}
+
+// convergeReport is the JSON shape of a --converge run.
+type convergeReport struct {
+	Server    string   `json:"server"`
+	Converged bool     `json:"converged"`
+	Want      int      `json:"instances_wanted"`
+	Seen      []string `json:"instances_seen"`
+	Digest    string   `json:"digest,omitempty"`
+	Attempts  int      `json:"attempts"`
+	Error     string   `json:"error,omitempty"`
+}
+
+// runPolicyReloadConverge reloads through a single load-balancing address
+// until every instance behind it has acknowledged.
+//
+// Behind a mesh upstream the caller cannot choose which instance answers, so
+// one reload call proves nothing about the fleet: the plain fan-out would see
+// a single success and a single digest and report convergence while the
+// instances it never reached kept serving the old policy set. Repeating the
+// call and collecting the instance IDs turns that into a real check —
+// success means every instance was observed acknowledging the expected
+// digest, not that some instance did.
+func runPolicyReloadConverge(addr, expectDigest string, want int, timeout time.Duration) error {
+	report := convergeReport{Server: addr, Want: want}
+	seen := make(map[string]string, want) // instance ID -> digest
+	deadline := time.Now().Add(timeout)
+
+	for len(seen) < want && time.Now().Before(deadline) {
+		report.Attempts++
+		outcome := reloadInstance(addr, expectDigest)
+
+		switch {
+		case outcome.Error != "":
+			report.Error = outcome.Error
+		case outcome.Result == nil || !outcome.Result.Success:
+			report.Error = "reload reported failure"
+		case outcome.Result.InstanceID == "":
+			// Without an instance ID there is no way to tell a second
+			// instance from the same one answering twice, so converging is
+			// not something this command can honestly claim.
+			report.Error = "server did not report instance_id; " +
+				"--converge needs a server new enough to identify itself (use --servers instead)"
+		default:
+			seen[outcome.Result.InstanceID] = outcome.Result.Digest
+			report.Digest = outcome.Result.Digest
+		}
+
+		if report.Error != "" {
+			break
+		}
+		if len(seen) < want {
+			// Give the upstream's load balancing a chance to pick a different
+			// instance rather than hammering it.
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+
+	for id := range seen {
+		report.Seen = append(report.Seen, id)
+	}
+	sort.Strings(report.Seen)
+
+	// Every instance must agree, or the fleet is split regardless of count.
+	digests := make(map[string]bool, len(seen))
+	for _, d := range seen {
+		digests[d] = true
+	}
+	if report.Error == "" && len(digests) > 1 {
+		report.Error = fmt.Sprintf("instances diverged: %d distinct digests", len(digests))
+	}
+	if report.Error == "" && len(seen) < want {
+		report.Error = fmt.Sprintf("timed out after %s: reached %d of %d instances",
+			timeout, len(seen), want)
+	}
+	report.Converged = report.Error == "" && len(seen) == want
+
+	if viper.GetString("output") == "json" {
+		data, _ := json.MarshalIndent(report, "", "  ")
+		fmt.Println(string(data))
+	} else if report.Converged {
+		fmt.Printf("✓ %s: %d/%d instances converged after %d reloads\n",
+			addr, len(seen), want, report.Attempts)
+		fmt.Printf("  Digest:    %s\n", report.Digest)
+		fmt.Printf("  Instances: %s\n", strings.Join(report.Seen, ", "))
+	} else {
+		fmt.Printf("✗ %s: %s\n", addr, report.Error)
+		fmt.Printf("  Reached %d of %d instances in %d reloads: %s\n",
+			len(seen), want, report.Attempts, strings.Join(report.Seen, ", "))
+	}
+
+	if !report.Converged {
 		osExit(1)
 	}
 	return nil

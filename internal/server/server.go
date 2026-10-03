@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -57,7 +58,20 @@ type Config struct {
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
-	Version      string // reported in /health and the health handler; injected via ldflags in main
+	// EvaluationTimeout bounds a single /v1/evaluate or /v1/validate,
+	// including time spent waiting for a validation slot (default 10s).
+	//
+	// This is the only bound that actually stops work: WriteTimeout expires
+	// the connection but does not cancel the handler, and the per-policy
+	// timeout is optional and unset by default. Keep it below the sidecar's
+	// request timeout so the server, not the proxy, decides the outcome.
+	EvaluationTimeout time.Duration
+	// MaxValidateSize caps the CUE source accepted by /v1/validate (default
+	// 1 MiB). Deliberately far below MaxRecvSize: validation compiles
+	// caller-supplied CUE, and unification cost grows with the source's
+	// disjunctions rather than its length.
+	MaxValidateSize int
+	Version         string // reported in /health and the health handler; injected via ldflags in main
 	// Audit logging
 	AuditEnabled    bool
 	AuditPath       string
@@ -121,6 +135,12 @@ type Server struct {
 	obs            *observability.Provider
 	storageBackend storage.Backend
 
+	// validateSem bounds concurrent /v1/validate compilations. Evaluation is
+	// cheap compiled Go and needs no bound; validation compiles
+	// caller-supplied CUE, so without this every concurrent request spun up
+	// its own CUE evaluator.
+	validateSem chan struct{}
+
 	mu       sync.RWMutex
 	ready    bool
 	checks   map[string]bool
@@ -136,12 +156,13 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 	obs := observability.NewProvider()
 
 	s := &Server{
-		config:    cfg,
-		engine:    eng,
-		logger:    logger,
-		startTime: time.Now(),
-		checks:    make(map[string]bool),
-		obs:       obs,
+		config:      cfg,
+		engine:      eng,
+		logger:      logger,
+		startTime:   time.Now(),
+		checks:      make(map[string]bool),
+		obs:         obs,
+		validateSem: make(chan struct{}, validateConcurrency()),
 	}
 
 	// Wire observability into the engine
@@ -187,10 +208,38 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 		if cfg.RateLimitMaxClients > 0 {
 			rlConfig.MaxClients = cfg.RateLimitMaxClients
 		}
+		// A typo in the identifier used to fall through to IP keying
+		// silently, which behind a sidecar means one shared bucket for every
+		// caller — the limiter looks configured and enforces nothing useful.
+		switch rlConfig.ClientIdentifier {
+		case "ip", "header", "identity":
+		default:
+			return nil, fmt.Errorf(
+				"invalid rate limit client identifier %q: want one of ip, header, identity",
+				rlConfig.ClientIdentifier)
+		}
 		// The "identity" identifier reads the same mesh header the audit
 		// principal comes from.
 		rlConfig.IdentityHeader = cfg.IdentityHeader
 		rlConfig.TrustedProxies = cfg.RateLimitTrustedProxies
+		// Probes must never be rate limited: a 429 on /readyz reads as an
+		// unhealthy instance and gets it pulled from the mesh.
+		rlConfig.ExemptPaths = append(append([]string{}, probePaths...), cfg.AuthExemptPaths...)
+
+		if rlConfig.ClientIdentifier == "identity" {
+			// Identity keying degrades silently: with no XFCC header the
+			// limiter falls back to the client IP, which behind a sidecar is
+			// the local proxy — one shared bucket for every caller, looking
+			// exactly like a working per-client limit.
+			logger.Info("rate limiting keyed on mesh identity",
+				zap.String("header", rlConfig.IdentityHeader),
+				zap.String("requires",
+					"a sidecar that sets the identity header; on Consul this needs "+
+						"service-defaults protocol=http, or the header is never injected "+
+						"and every caller shares one bucket"),
+			)
+		}
+
 		s.rateLimiter = ratelimit.New(rlConfig)
 		// Without this the limiter is unobservable: the collector was
 		// registered but garmr_rate_limit_hits_total was never incremented.
@@ -226,10 +275,17 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 		}
 	})
 
-	// Register a policy loader health checker
+	// Register a policy loader health checker.
+	//
+	// PolicyCount reads an atomic snapshot and never blocks. This checker
+	// once went through a path that waited on busy evaluations; it blocked
+	// past the probe deadline (health.runCheckers waits on the checkers
+	// without observing its own context), the mesh health check timed out,
+	// and the instance was evicted under exactly the load it was handling
+	// correctly.
 	s.healthHandler.Register("policies", func(ctx context.Context) *health.Check {
-		policies := eng.ListPolicies("")
-		if len(policies) == 0 {
+		count := eng.PolicyCount()
+		if count == 0 {
 			return &health.Check{
 				Status:  health.StatusDegraded,
 				Message: "no policies loaded",
@@ -237,7 +293,7 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 		}
 		return &health.Check{
 			Status:  health.StatusHealthy,
-			Message: fmt.Sprintf("%d policies loaded", len(policies)),
+			Message: fmt.Sprintf("%d policies loaded", count),
 		}
 	})
 
@@ -414,13 +470,14 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
-	// Mark as ready. The policies check reflects reality rather than being
-	// hardcoded true — otherwise legacy /ready reported 200 with zero
-	// policies loaded while /readyz reported 503, so the two probes
-	// contradicted each other.
+	// Mark as ready. The policies check is not recorded here: it is derived
+	// live in handleReady from the engine snapshot. Latching it at startup
+	// meant /ready kept reporting the boot-time answer forever — still 200
+	// after a reload emptied the set or every policy was deleted — while
+	// /readyz recomputed correctly, so the two probes contradicted each other
+	// again in the opposite direction.
 	s.mu.Lock()
 	s.ready = true
-	s.checks["policies"] = len(s.engine.ListPolicies("")) > 0
 	s.checks["http"] = true
 	s.mu.Unlock()
 
@@ -520,7 +577,6 @@ func (s *Server) MarkReady() {
 	if s.checks == nil {
 		s.checks = make(map[string]bool)
 	}
-	s.checks["policies"] = true
 	s.checks["http"] = true
 }
 
@@ -647,6 +703,62 @@ func bodyErrorMessage(err error) string {
 	return "Failed to read request body"
 }
 
+// evaluateErrorStatus maps an engine error to an HTTP status.
+//
+// Everything used to be a 500, which put two very different failures behind
+// one code: input the caller could fix, and the server shedding load. A
+// client sending malformed input could drive the error-rate SLO and the error
+// log without ever learning what was wrong.
+func evaluateErrorStatus(err error) (int, string) {
+	switch {
+	case errors.Is(err, engine.ErrEvaluationUnavailable):
+		// Never started — retry is meaningful, so say so.
+		return http.StatusServiceUnavailable, "Server busy, retry later"
+	case errors.Is(err, engine.ErrInvalidInput):
+		return http.StatusBadRequest, "Invalid input"
+	default:
+		return http.StatusInternalServerError, "Evaluation failed"
+	}
+}
+
+// DefaultEvaluationTimeout bounds a single evaluation when none is configured.
+const DefaultEvaluationTimeout = 10 * time.Second
+
+// DefaultMaxValidateSize caps /v1/validate source when none is configured.
+const DefaultMaxValidateSize = 1 << 20
+
+// maxValidateSize returns the byte cap for /v1/validate bodies: the tighter
+// of the validate-specific cap and the global body cap, so lowering
+// MaxRecvSize still applies everywhere an operator would expect it to.
+func (s *Server) maxValidateSize() int64 {
+	limit := int64(s.config.MaxValidateSize)
+	if limit <= 0 {
+		limit = DefaultMaxValidateSize
+	}
+	if global := int64(s.config.MaxRecvSize); global > 0 && global < limit {
+		return global
+	}
+	return limit
+}
+
+// validateConcurrency bounds concurrent CUE compilations on /v1/validate to
+// min(GOMAXPROCS, 8), so validation cannot outcompete evaluation for CPU.
+func validateConcurrency() int {
+	n := runtime.GOMAXPROCS(0)
+	if n > 8 {
+		n = 8
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// evaluationTimeout returns the configured per-request evaluation budget.
+func (s *Server) evaluationTimeout() time.Duration {
+	return durationOr(s.config.EvaluationTimeout, DefaultEvaluationTimeout)
+}
+
 // HTTP Handlers
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -680,6 +792,14 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	// recoveryMiddleware cannot catch.
 	checks := maps.Clone(s.checks)
 	s.mu.RUnlock()
+
+	if checks == nil {
+		checks = make(map[string]bool)
+	}
+	// Derived live, not latched at startup, so this tracks reloads and
+	// deletes the way /readyz does. PolicyCount reads an atomic snapshot, so
+	// a probe cannot block behind an in-flight evaluation or a reload.
+	checks["policies"] = s.engine.PolicyCount() > 0
 
 	// A failing check means not ready. Reporting 200 while a check is false
 	// made this endpoint disagree with /readyz, which runs the same checks
@@ -737,9 +857,17 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.engine.Evaluate(r.Context(), engineReq)
+	// Bound the evaluation. Without this the only limit was the per-policy
+	// timeout, which is optional and unset by default, and WriteTimeout —
+	// which expires the connection but never cancels the handler, so the work
+	// (and the memory it holds) continued after the client was gone.
+	ctx, cancel := context.WithTimeout(r.Context(), s.evaluationTimeout())
+	defer cancel()
+
+	result, err := s.engine.Evaluate(ctx, engineReq)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "Evaluation failed", err)
+		status, msg := evaluateErrorStatus(err)
+		s.writeError(w, status, msg, err)
 		return
 	}
 
@@ -794,87 +922,159 @@ func (s *Server) auditDecision(r *http.Request, requestID string, req *engine.Ev
 		}
 	}
 
+	// Metrics is set by every Evaluate path today, but the response builder
+	// guards it too — and a panic here would happen after the decision was
+	// computed and before it was written, turning a served request into a 500.
+	policiesEvaluated, rulesEvaluated := 0, 0
+	if result.Metrics != nil {
+		policiesEvaluated = result.Metrics.PoliciesEvaluated
+		rulesEvaluated = result.Metrics.RulesEvaluated
+	}
+
 	s.auditLogger.Info("decision",
-		"request_id", requestID,
+		"request_id", auditField(requestID),
 		"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
-		"decision", decisionToString(result.Decision),
-		"namespace", req.Namespace,
-		"policies_evaluated", result.Metrics.PoliciesEvaluated,
-		"rules_evaluated", result.Metrics.RulesEvaluated,
+		"decision", string(result.Decision),
+		"namespace", auditField(req.Namespace),
+		"policies_evaluated", policiesEvaluated,
+		"rules_evaluated", rulesEvaluated,
 		"violations", violations,
 		"duration_ms", time.Since(startTime).Milliseconds(),
 		"source_ip", r.RemoteAddr,
-		"principal", PrincipalFromContext(r.Context()),
+		"principal", auditField(PrincipalFromContext(r.Context())),
 		"trace_id", observability.TraceIDFromContext(r.Context()),
-		"user_agent", r.UserAgent(),
-		"input_kind", req.Input["kind"],
-		"input_name", engine.NestedString(req.Input, "metadata", "name"),
+		"user_agent", auditField(r.UserAgent()),
+		"input_kind", auditAny(req.Input["kind"]),
+		"input_name", auditField(engine.NestedString(req.Input, "metadata", "name")),
 	)
 }
 
-// evaluateResponseBody converts an engine response into the JSON body shape.
+// maxAuditFieldBytes bounds each caller-controlled audit field.
 //
-// Kept pure and separate from the handler so it can be unit-tested directly.
-// It also carries the fields the engine has always computed but the API never
-// returned: summary, evaluation_mode, terminated_early and termination_rule,
-// which `garmr eval --help` promises.
-func evaluateResponseBody(result *engine.EvaluateResponse, requestID string) map[string]interface{} {
-	results := make([]map[string]interface{}, len(result.Results))
+// Audit records are newline-delimited JSON, and with audit.path set to stdout
+// each record is a single write to a pipe. Writes above PIPE_BUF (4 KiB on
+// Linux) are not atomic, so one caller sending a large User-Agent or
+// X-Request-Id could interleave its record with another's and corrupt exactly
+// the log that is meant to be the authoritative decision trail. 256 bytes
+// keeps a whole record comfortably under that bound.
+const maxAuditFieldBytes = 256
+
+// auditField truncates a caller-controlled string for the audit log, marking
+// any value it shortened so a truncated field is never mistaken for the
+// caller's actual input.
+func auditField(s string) string {
+	if len(s) <= maxAuditFieldBytes {
+		return s
+	}
+	return s[:maxAuditFieldBytes] + "…[truncated]"
+}
+
+// auditAny truncates a value pulled from caller-supplied input, which is only
+// bounded when it happens to be a string.
+func auditAny(v any) any {
+	if s, ok := v.(string); ok {
+		return auditField(s)
+	}
+	return v
+}
+
+// evaluateBody is the /v1/evaluate response. It carries the fields the
+// engine has always computed and `garmr eval --help` promises: summary,
+// evaluation_mode, terminated_early and termination_rule.
+type evaluateBody struct {
+	Decision        engine.Decision    `json:"decision"`
+	RequestID       string             `json:"request_id"`
+	Results         []ruleResultBody   `json:"results"`
+	Summary         summaryBody        `json:"summary"`
+	EvaluationMode  evaluationModeBody `json:"evaluation_mode"`
+	TerminatedEarly bool               `json:"terminated_early"`
+	TerminationRule *terminationBody   `json:"termination_rule,omitempty"`
+	Metrics         *metricsBody       `json:"metrics,omitempty"`
+}
+
+type ruleResultBody struct {
+	PolicyName      string          `json:"policy_name"`
+	PolicyNamespace string          `json:"policy_namespace"`
+	RuleID          string          `json:"rule_id"`
+	Description     string          `json:"description"`
+	Severity        engine.Severity `json:"severity"`
+	Passed          bool            `json:"passed"`
+	Message         string          `json:"message"`
+	Remediation     string          `json:"remediation"`
+}
+
+type summaryBody struct {
+	TotalRules int `json:"total_rules"`
+	Passed     int `json:"passed"`
+	Failed     int `json:"failed"`
+	Skipped    int `json:"skipped"`
+}
+
+// Field order mirrors engine.EvaluationMode so it converts directly.
+type evaluationModeBody struct {
+	FailFast          bool `json:"fail_fast"`
+	ShortCircuited    bool `json:"short_circuited"`
+	TotalRulesInScope int  `json:"total_rules_in_scope"`
+	RulesEvaluated    int  `json:"rules_evaluated"`
+	RulesSkipped      int  `json:"rules_skipped"`
+	DryRun            bool `json:"dry_run"`
+}
+
+type terminationBody struct {
+	PolicyName      string          `json:"policy_name"`
+	PolicyNamespace string          `json:"policy_namespace"`
+	RuleID          string          `json:"rule_id"`
+	Description     string          `json:"description"`
+	Severity        engine.Severity `json:"severity"`
+	Message         string          `json:"message"`
+}
+
+type metricsBody struct {
+	EvaluationTimeNs  int64 `json:"evaluation_time_ns"`
+	PoliciesEvaluated int   `json:"policies_evaluated"`
+	RulesEvaluated    int   `json:"rules_evaluated"`
+}
+
+// evaluateResponseBody converts an engine response into the JSON body.
+func evaluateResponseBody(result *engine.EvaluateResponse, requestID string) evaluateBody {
+	body := evaluateBody{
+		Decision:        result.Decision,
+		RequestID:       requestID,
+		Results:         make([]ruleResultBody, len(result.Results)),
+		Summary:         summaryBody(result.Summary),
+		EvaluationMode:  evaluationModeBody(result.EvaluationMode),
+		TerminatedEarly: result.TerminatedEarly,
+	}
 	for i, r := range result.Results {
-		results[i] = map[string]interface{}{
-			"policy_name":      r.PolicyName,
-			"policy_namespace": r.PolicyNamespace,
-			"rule_id":          r.RuleID,
-			"description":      r.RuleDescription,
-			"severity":         severityToString(r.Severity),
-			"passed":           r.Passed,
-			"message":          r.Message,
-			"remediation":      r.Remediation,
+		body.Results[i] = ruleResultBody{
+			PolicyName:      r.PolicyName,
+			PolicyNamespace: r.PolicyNamespace,
+			RuleID:          r.RuleID,
+			Description:     r.RuleDescription,
+			Severity:        r.Severity,
+			Passed:          r.Passed,
+			Message:         r.Message,
+			Remediation:     r.Remediation,
 		}
 	}
-
-	resp := map[string]interface{}{
-		"decision":   decisionToString(result.Decision),
-		"request_id": requestID,
-		"results":    results,
-		"summary": map[string]interface{}{
-			"total_rules": result.Summary.TotalRules,
-			"passed":      result.Summary.Passed,
-			"failed":      result.Summary.Failed,
-			"skipped":     result.Summary.Skipped,
-		},
-		"evaluation_mode": map[string]interface{}{
-			"dry_run":              result.EvaluationMode.DryRun,
-			"fail_fast":            result.EvaluationMode.FailFast,
-			"short_circuited":      result.EvaluationMode.ShortCircuited,
-			"total_rules_in_scope": result.EvaluationMode.TotalRulesInScope,
-			"rules_evaluated":      result.EvaluationMode.RulesEvaluated,
-			"rules_skipped":        result.EvaluationMode.RulesSkipped,
-		},
-		"terminated_early": result.TerminatedEarly,
-	}
-
-	if result.TerminationRule != nil {
-		tr := result.TerminationRule
-		resp["termination_rule"] = map[string]interface{}{
-			"policy_name":      tr.PolicyName,
-			"policy_namespace": tr.PolicyNamespace,
-			"rule_id":          tr.RuleID,
-			"description":      tr.RuleDescription,
-			"severity":         severityToString(tr.Severity),
-			"message":          tr.Message,
+	if tr := result.TerminationRule; tr != nil {
+		body.TerminationRule = &terminationBody{
+			PolicyName:      tr.PolicyName,
+			PolicyNamespace: tr.PolicyNamespace,
+			RuleID:          tr.RuleID,
+			Description:     tr.RuleDescription,
+			Severity:        tr.Severity,
+			Message:         tr.Message,
 		}
 	}
-
-	if result.Metrics != nil {
-		resp["metrics"] = map[string]interface{}{
-			"evaluation_time_ns": result.Metrics.EvaluationTimeNs,
-			"policies_evaluated": result.Metrics.PoliciesEvaluated,
-			"rules_evaluated":    result.Metrics.RulesEvaluated,
+	if m := result.Metrics; m != nil {
+		body.Metrics = &metricsBody{
+			EvaluationTimeNs:  m.EvaluationTimeNs,
+			PoliciesEvaluated: m.PoliciesEvaluated,
+			RulesEvaluated:    m.RulesEvaluated,
 		}
 	}
-
-	return resp
+	return body
 }
 
 func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
@@ -888,12 +1088,11 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 		requestID = uuid.New().String()
 	}
 
-	// Apply request body size limit
-	maxSize := int64(s.config.MaxRecvSize)
-	if maxSize <= 0 {
-		maxSize = 1 << 20
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
+	// Validation compiles caller-supplied CUE in a throwaway context, so its
+	// cost is driven by the source's structure, not its length: unification
+	// is exponential in the number of disjunctions. Cap the source well below
+	// MaxRecvSize rather than letting a 16 MiB body reach the compiler.
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxValidateSize())
 
 	var req struct {
 		Policy   string `json:"policy"`
@@ -909,6 +1108,19 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validation compiles caller-supplied CUE, so every request would
+	// otherwise get its own concurrent CUE evaluator. Bound the concurrency
+	// and shed the excess.
+	ctx, cancel := context.WithTimeout(r.Context(), s.evaluationTimeout())
+	defer cancel()
+	select {
+	case s.validateSem <- struct{}{}:
+		defer func() { <-s.validateSem }()
+	case <-ctx.Done():
+		s.writeError(w, http.StatusServiceUnavailable, "Server busy, retry later", ctx.Err())
+		return
+	}
+
 	errors, warnings := s.engine.Validate(req.Policy)
 
 	valid := len(errors) == 0
@@ -916,13 +1128,13 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	// Audit log
 	if s.auditLogger != nil {
 		s.auditLogger.Info("validate",
-			"request_id", requestID,
+			"request_id", auditField(requestID),
 			"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
 			"valid", valid,
 			"error_count", len(errors),
 			"warning_count", len(warnings),
 			"source_ip", r.RemoteAddr,
-			"principal", PrincipalFromContext(r.Context()),
+			"principal", auditField(PrincipalFromContext(r.Context())),
 			"trace_id", observability.TraceIDFromContext(r.Context()),
 		)
 	}
@@ -960,6 +1172,10 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 			// `garmr policy digest <dir>` on the git checkout to verify the
 			// server converged on the content CI shipped.
 			"digest": s.engine.PolicySetDigest(),
+			// Which instance answered. Behind a mesh upstream the caller
+			// cannot address instances individually, so without this a digest
+			// read says nothing about the instances it did not happen to hit.
+			"instance_id": InstanceID(),
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -979,13 +1195,13 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 		// Audit log
 		if s.auditLogger != nil {
 			s.auditLogger.Info("policy_delete",
-				"request_id", requestID,
+				"request_id", auditField(requestID),
 				"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
-				"policy_name", name,
-				"policy_namespace", namespace,
+				"policy_name", auditField(name),
+				"policy_namespace", auditField(namespace),
 				"deleted", deleted,
 				"source_ip", r.RemoteAddr,
-				"principal", PrincipalFromContext(r.Context()),
+				"principal", auditField(PrincipalFromContext(r.Context())),
 				"trace_id", observability.TraceIDFromContext(r.Context()),
 			)
 		}
@@ -1027,13 +1243,13 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 		// Audit log failure
 		if s.auditLogger != nil {
 			s.auditLogger.Info("policy_reload",
-				"request_id", requestID,
+				"request_id", auditField(requestID),
 				"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
 				"success", false,
 				"error", err.Error(),
 				"reload_time_ms", time.Since(startTime).Milliseconds(),
 				"source_ip", r.RemoteAddr,
-				"principal", PrincipalFromContext(r.Context()),
+				"principal", auditField(PrincipalFromContext(r.Context())),
 				"trace_id", observability.TraceIDFromContext(r.Context()),
 			)
 		}
@@ -1050,13 +1266,13 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 	// Audit log success
 	if s.auditLogger != nil {
 		s.auditLogger.Info("policy_reload",
-			"request_id", requestID,
+			"request_id", auditField(requestID),
 			"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
 			"success", true,
 			"policies_loaded", count,
 			"reload_time_ms", time.Since(startTime).Milliseconds(),
 			"source_ip", r.RemoteAddr,
-			"principal", PrincipalFromContext(r.Context()),
+			"principal", auditField(PrincipalFromContext(r.Context())),
 			"trace_id", observability.TraceIDFromContext(r.Context()),
 		)
 	}
@@ -1067,6 +1283,10 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 		"digest":          s.engine.PolicySetDigest(),
 		"reload_time_ms":  time.Since(startTime).Milliseconds(),
 		"storage_type":    s.storageType(),
+		// Identifies which instance this reload actually reached, so a caller
+		// going through a load-balancing mesh upstream can tell whether the
+		// whole fleet converged or it just hit the same instance twice.
+		"instance_id": InstanceID(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
@@ -1090,38 +1310,6 @@ func (s *Server) storageType() string {
 		return "filesystem"
 	}
 	return "none"
-}
-
-// Helper functions
-
-func decisionToString(d engine.Decision) string {
-	switch d {
-	case engine.DecisionAllow:
-		return "allow"
-	case engine.DecisionDeny:
-		return "deny"
-	case engine.DecisionWarn:
-		return "warn"
-	default:
-		return "unknown"
-	}
-}
-
-func severityToString(s engine.Severity) string {
-	switch s {
-	case engine.SeverityCritical:
-		return "critical"
-	case engine.SeverityHigh:
-		return "high"
-	case engine.SeverityMedium:
-		return "medium"
-	case engine.SeverityLow:
-		return "low"
-	case engine.SeverityInfo:
-		return "info"
-	default:
-		return "unknown"
-	}
 }
 
 // handleOpenAPI serves the OpenAPI specification. There is deliberately no
@@ -1221,6 +1409,12 @@ func corsMiddleware(h http.Handler, allowedOrigins []string) http.Handler {
 	})
 }
 
+// probePaths are the liveness/readiness endpoints an orchestrator polls.
+// They are exempt from both authentication and rate limiting: a 401 or 429
+// here is indistinguishable from an unhealthy instance, so either one gets a
+// working server pulled out of the mesh.
+var probePaths = []string{"/health", "/ready", "/healthz", "/readyz", "/livez"}
+
 // authMiddleware provides API key authentication.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1239,9 +1433,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Always exempt health/ready endpoints
-		if r.URL.Path == "/health" || r.URL.Path == "/ready" || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/livez" {
-			next.ServeHTTP(w, r)
-			return
+		for _, path := range probePaths {
+			if r.URL.Path == path {
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
 
 		// Check API key

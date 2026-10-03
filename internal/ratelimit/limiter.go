@@ -65,6 +65,16 @@ type Config struct {
 	// ExemptClients are client identifiers exempt from rate limiting
 	ExemptClients []string `json:"exemptClients"`
 
+	// ExemptPaths are request paths never subject to rate limiting.
+	//
+	// Health and readiness probes belong here. The limiter wraps the whole
+	// mux — deliberately, so unauthenticated floods are rejected before auth
+	// sees them — which also put it in front of the probe endpoints. Behind a
+	// mesh sidecar every caller shares one bucket (RemoteAddr is the local
+	// proxy), so one client's burst returned 429 to the platform's readiness
+	// probe and the instance was evicted for someone else's traffic.
+	ExemptPaths []string `json:"exemptPaths"`
+
 	// TrustedProxies lists CIDRs whose X-Forwarded-For header is believed
 	// when ClientIdentifier is "ip". Empty means never trust the header.
 	//
@@ -115,9 +125,10 @@ type Limiter struct {
 	global *rate.Limiter
 
 	// Per-client limiters
-	clients   map[string]*clientLimiter
-	clientsMu sync.RWMutex
-	exemptSet map[string]bool
+	clients       map[string]*clientLimiter
+	clientsMu     sync.RWMutex
+	exemptSet     map[string]bool
+	exemptPathSet map[string]bool
 
 	// trustedProxies are the parsed Config.TrustedProxies CIDRs.
 	trustedProxies []*net.IPNet
@@ -149,11 +160,12 @@ func (c *clientLimiter) touch() {
 // New creates a new rate limiter.
 func New(cfg Config) *Limiter {
 	l := &Limiter{
-		config:      cfg,
-		clients:     make(map[string]*clientLimiter),
-		exemptSet:   make(map[string]bool),
-		maxClients:  cfg.MaxClients,
-		stopCleanup: make(chan struct{}),
+		config:        cfg,
+		clients:       make(map[string]*clientLimiter),
+		exemptSet:     make(map[string]bool),
+		exemptPathSet: make(map[string]bool),
+		maxClients:    cfg.MaxClients,
+		stopCleanup:   make(chan struct{}),
 	}
 
 	if l.maxClients <= 0 {
@@ -166,6 +178,9 @@ func New(cfg Config) *Limiter {
 	// Build exempt set
 	for _, client := range cfg.ExemptClients {
 		l.exemptSet[client] = true
+	}
+	for _, path := range cfg.ExemptPaths {
+		l.exemptPathSet[path] = true
 	}
 
 	// Parse trusted proxy CIDRs. A malformed entry is skipped rather than
@@ -334,6 +349,15 @@ func (l *Limiter) Close() {
 // Middleware returns an HTTP middleware for rate limiting.
 func (l *Limiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Probes are exempt before anything else. A 429 on a readiness probe
+		// is read by the orchestrator as an unhealthy instance, so limiting
+		// them converts one client's burst into an eviction of a server that
+		// is serving everyone else correctly.
+		if l.exemptPathSet[r.URL.Path] {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		clientID := l.extractClientID(r)
 
 		result := l.Allow(clientID)

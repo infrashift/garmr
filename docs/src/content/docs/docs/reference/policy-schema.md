@@ -7,13 +7,64 @@ sidebar:
 ---
 
 Complete reference for Garmr condition operators with CLI and API examples.
+The schema itself is [`schemas/policy.cue`](https://github.com/infrashift/garmr/blob/main/schemas/policy.cue);
+every policy is unified with it when it loads.
 
 ## Overview
 
-Garmr supports 20+ condition operators organized into:
+A rule's `expr` is an **expression**, and an expression sets **exactly one**
+of these operators:
 
-- **Condition Operators**: Basic operations (exists, equals, comparison, string, set, logical)
-- **Advanced Operators**: Complex operations (forEach, length, semver, datetime, compare)
+| Operator | Checks |
+|----------|--------|
+| `match` | A field at `path`: presence, equality, comparison, strings, sets, `length`, `semver`, `datetime` |
+| `compare` | Two values (input paths, literals, or builtin results) against each other |
+| `forEach` | Every element (or, with `mode: "any"`, at least one) of a list |
+| `func` | The result of a builtin function |
+| `all` / `any` / `not` | Combine expressions: AND, OR, NOT |
+
+Expressions are typed by the schema, so a misspelled operator (`mach:`,
+`greaterThen:`) or two operators in one expression is rejected **when the
+policy loads** — at server startup or reload, by `garmr validate`, and by
+`/v1/validate` — never discovered at evaluation time. Combine checks with
+`all` / `any`.
+
+Policies are compiled once at load into Go evaluation trees (regular
+expressions, versions, dates and value sets are parsed up front), so an
+evaluation never touches CUE.
+
+### Paths
+
+Paths are dot-separated field names into the input: `spec.containers`.
+
+- Quote a key that contains dots or other punctuation:
+  `metadata.labels."app.kubernetes.io/name"`.
+- Index a list with `[N]`: `spec.containers[0].image`.
+- Project a list with `[*]`: `spec.containers[*].cpu` is the list of every
+  container's `cpu`, ready for `sum`, `len`, `unique`, `containsAll` and the
+  other list operators, or for `forEach`. A container without the field
+  contributes `null`, so `sum` fails rather than under-counting. Nested
+  projections flatten (`spec.containers[*].ports[*].containerPort`); a
+  container with no `ports` list contributes nothing.
+- Keys such as `host-network` or `_private` work as written.
+- Inside `forEach`, a path that starts with the alias (`container.image`)
+  reads the current element, and `_index` is its position. The alias shadows
+  an input field of the same name.
+
+### Evaluation semantics
+
+- **Equality is strict and JSON-typed.** Numbers compare by value (`1` equals
+  `1.0`); every other pair must have the same type, so `"1"` does not equal
+  `1` and `"true"` does not equal `true`. This applies to `equals`, `in`,
+  `notIn`, the set operators, and `compare` `==` / `!=`.
+- **A missing field fails the check.** So `not: {match: {path:
+  "securityContext.privileged", equals: true}}` passes when the field is
+  absent.
+- **An operand of the wrong type is an evaluation error**, not a failure: a
+  string where a number is needed, an unparseable semver or datetime, a list
+  operator on a non-list, a builtin that returns an error. An error fails
+  the rule **even under `not` or `any`**, and the violation message says the
+  rule could not be evaluated.
 
 ## Input Formats
 
@@ -90,7 +141,7 @@ Note: several example policies in the `condition-operators` namespace target all
 
 A `match` block may specify more than one operator alongside `path`; every specified operator must pass (AND semantics). The same holds inside the `length`, `semver`, and `datetime` blocks, so `datetime: {after: X, before: Y}` is a range check and `semver: {greaterThanOrEqual: "1.0.0", lessThan: "2.0.0"}` bounds a version. When several operators fail, the violation message reports each unmet check.
 
-### exists / absent
+### exists
 
 Validates field presence or absence.
 
@@ -104,9 +155,12 @@ expr: match: {
 
 expr: match: {
     path:   "deprecatedField"
-    absent: true
+    exists: false
 }
 ```
+
+`exists: true` passes when the field is present and not null; `exists:
+false` passes when it is absent or null.
 
 **CLI:**
 ```bash
@@ -282,7 +336,7 @@ curl -X POST http://localhost:8080/v1/evaluate \
 
 ### Set Operators
 
-Set membership and array validation: `in`, `notIn`, `unique`, `uniqueBy`, `sorted`, `containsAll`, `subsetOf`.
+Set membership and array validation: `in`, `notIn`, `unique`, `uniqueBy`, `sorted`, `containsAll`, `containsAny`, `subsetOf`.
 
 **Policy:** `example-policies/condition-operators/set.cue`
 
@@ -317,9 +371,9 @@ curl -X POST http://localhost:8080/v1/evaluate \
 
 #### Advanced Set Operators
 
-Array validation operators. Element equality is numeric-aware (`1` and
-`1.0` are the same value), and a non-array value at the path fails the
-rule with a diagnostic.
+Array validation operators. Element equality is the strict equality above
+(`1` and `1.0` are the same value; `"1"` and `1` are not), and a non-array
+value at the path is an evaluation error.
 
 **Policy:** `example-policies/condition-operators/set.cue` (the
 `set-advanced` policy, targeting `kind: "test-set-advanced"`)
@@ -353,8 +407,8 @@ places no constraint.
 ##### sorted
 
 Validates array is in sorted order (`"asc"` or `"desc"`). Equal neighbors
-are allowed. Elements are compared numerically when both are numbers,
-otherwise as strings; arrays of objects are not orderable and fail the rule.
+are allowed. Elements must be all numbers or all strings; anything else
+(objects, mixed kinds) is not orderable and fails the rule.
 
 ```cue
 // Ascending order
@@ -389,6 +443,17 @@ expr: match: {
 - DR compliance: must deploy to all required regions
 - Must include all mandatory labels
 - Must have all required capabilities
+
+##### containsAny
+
+Validates array contains at least one of the listed values.
+
+```cue
+expr: match: {
+    path: "spec.logging.formats"
+    containsAny: ["json", "structured"]
+}
+```
 
 ##### subsetOf
 
@@ -532,11 +597,52 @@ expr: {
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `path` | string | JSONPath to array |
-| `as` | string | Variable name for current item |
-| `mode` | string | `all` (default) or `any` |
-| `allowEmpty` | bool | Pass if array is empty |
-| `condition` | object | Condition to evaluate per item |
+| `path` | string | Path to the list |
+| `as` | string | Name the condition uses for the current element (default `item`) |
+| `mode` | string | `all` (default): every element must pass; `any`: at least one |
+| `allowEmpty` | bool | Whether an empty list passes (default `true`) |
+| `where` | expression | Only elements for which this holds are checked (and counted) |
+| `condition` | expression | Expression evaluated per element |
+
+Inside `condition`, paths starting with the alias read the element and
+`_index` is its position; other paths read the input. `forEach` nests, and
+an inner condition can refer to both aliases. A missing list fails; a
+non-list value is an evaluation error. The evaluation deadline is checked on
+every element.
+
+**Filtering.** `where` selects the elements the condition applies to; the
+others are skipped entirely. `allowEmpty`, `mode: "any"` and `count` apply
+to the selected elements, so `allowEmpty: false` means "at least one element
+must match `where`".
+
+```cue
+// Application containers (not sidecars) must not run privileged.
+expr: forEach: {
+    path:  "spec.containers"
+    as:    "c"
+    where: not: match: {path: "c.name", hasPrefix: "istio-"}
+    condition: match: {path: "c.securityContext.privileged", equals: false}
+}
+```
+
+**Counting.** `count` checks how many elements pass instead of requiring
+all or any of them. It takes the same operators as `length` and replaces
+`mode` and `allowEmpty` (an empty list counts 0). The count is available to
+the message as `{{.count}}`.
+
+```cue
+// At most one container may run privileged.
+expr: forEach: {
+    path: "spec.containers"
+    as:   "c"
+    count: lessThanOrEqual: 1
+    condition: match: {path: "c.securityContext.privileged", equals: true}
+}
+message: "{{.count}} containers run privileged; at most 1 may"
+```
+
+If any element cannot be evaluated, the count is unknown and the rule fails
+with an evaluation error.
 
 **CLI:**
 ```bash
@@ -558,7 +664,7 @@ Validates string or array length.
 ```cue
 expr: match: {
     path: "metadata.name"
-    length: {min: 3, max: 63}
+    length: {greaterThanOrEqual: 3, lessThanOrEqual: 63}
 }
 
 expr: match: {
@@ -572,7 +678,10 @@ expr: match: {
 }
 ```
 
-**Operators:** `equals`, `greaterThan`, `greaterThanOrEqual`, `lessThan`, `lessThanOrEqual`, `min`, `max`
+**Operators:** `equals`, `greaterThan`, `greaterThanOrEqual`, `lessThan`, `lessThanOrEqual`
+
+Lists count elements; strings count characters (not bytes). The length is
+available to the rule's `message` as `{{.length}}`.
 
 **CLI:**
 ```bash
@@ -653,7 +762,7 @@ expr: match: {
 
 **Operators:**
 - `after`, `before`, `afterOrEqual`, `beforeOrEqual` - Compare to date
-- `withinDays`, `withinHours` - Within time window
+- `withinDays`, `withinHours` - Within N days/hours of now, in either direction
 - `expiresAfterDays` - Must be valid for N days
 - `notExpired` - Must be in the future
 
@@ -698,12 +807,23 @@ expr: compare: {
 }
 ```
 
+Each side is a value: exactly one of `path` (an input field; a missing
+field resolves to null), `literal`, or `func` (a builtin call, see below).
+
 **Operators:**
-- Numeric: `==`, `!=`, `>`, `>=`, `<`, `<=`
+- Equality: `==`, `!=` (strict, as above)
+- Ordering: `>`, `>=`, `<`, `<=` — two numbers, or two strings (lexical)
+- Membership: `in`, `notIn` — the right side must be a list
+- Strings: `contains` (a list containing the element, or a substring),
+  `hasPrefix`, `hasSuffix`, `matches` (RE2)
+- Containment: `subsetOf` — every key/value of the left object is in the
+  right object (a label selector within a pod's labels), or every element of
+  the left list is in the right list
 - Semver: `semverGt`, `semverGte`, `semverLt`, `semverLte`, `semverEq`
 - Datetime: `after`, `before`, `afterOrEqual`, `beforeOrEqual`
 
-Non-numeric operands to numeric comparisons, and unknown compare operators, fail the rule closed with a diagnostic message.
+Operands of the wrong type for an operator are an evaluation error. An
+unknown operator is rejected when the policy loads.
 
 **Test Data:**
 - Fail: `testdata/advanced-operators/compare-fail.yaml` (minReplicas > maxReplicas)
@@ -724,6 +844,132 @@ curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
   -d '{"input": {"kind": "test-compare", "spec": {"minReplicas": 10, "maxReplicas": 5}}, "namespace": "advanced-operators"}'
 ```
+
+#### Joins
+
+Nested `forEach` with `compare` across the two aliases joins two lists;
+`where` picks the matching pairs:
+
+```cue
+// Each Service must select the pods of the Deployment with the same name.
+expr: forEach: {
+    path: "services", as: "s"
+    condition: forEach: {
+        path:  "deployments", as: "d"
+        where: compare: {left: {path: "d.metadata.name"}, op: "==", right: {path: "s.metadata.name"}}
+        condition: compare: {left: {path: "s.spec.selector"}, op: "subsetOf", right: {path: "d.spec.template.metadata.labels"}}
+    }
+}
+message: "service {{s.metadata.name}} does not select the pods of deployment {{d.metadata.name}}"
+```
+
+**Policy:** `example-policies/advanced-operators/aggregate.cue` (with the
+projection, counting and message examples).
+
+---
+
+### func (Builtins)
+
+Calls a builtin. Arguments are values, like `compare` operands. Without
+`expect`, the result must be truthy (not `false`, `0`, `""`, `[]`, `{}` or
+null); with `expect`, it must equal it. `bind` names the result for the
+rule's `message` template.
+
+**Policy:** `example-policies/builtins/func-calls.cue`
+
+```cue
+expr: "func": {
+    name: "cidrContains"
+    args: [{literal: "10.244.0.0/16"}, {path: "spec.podIP"}]
+    expect: true
+}
+
+expr: compare: {
+    left: {func: {name: "unitsParse", args: [{path: "spec.resources.requests.cpu"}]}}
+    op:    ">="
+    right: {func: {name: "unitsParse", args: [{literal: "100m"}]}}
+}
+```
+
+**Builtins:** `len`, `sum`, `min`, `max`, `avg`, `lower`, `upper`, `trim`,
+`trimPrefix`, `trimSuffix`, `split`, `join`, `matches` (string, pattern),
+`format`, `base64Decode`, `base64Encode`, `now`, `duration`, `parseTime`,
+`typeOf`, `isType`, `hasKey`, `keys`, `values`, `lookup`, `cidrContains`,
+`cidrOverlap`, `ipVersion`, `unitsParse`, `flatten`, `unique`, `sort`,
+`filter`. An unknown name is rejected when the policy loads; a builtin that
+returns an error is an evaluation error.
+
+---
+
+## Rule Applicability (`when`)
+
+A rule with `when` applies only to inputs for which the `when` expression
+holds; for any other input it passes as not applicable.
+
+```cue
+{
+    id:          "REP-001"
+    description: "Production deployments need at least 2 replicas"
+    severity:    "high"
+    when: match: {path: "metadata.labels.env", equals: "prod"}
+    expr: match: {path: "spec.replicas", greaterThanOrEqual: 2}
+}
+```
+
+A missing field makes `when` fail like any check, so the rule above does not
+apply to an input with no `env` label. If `when` itself cannot be evaluated
+(an operand of the wrong type), the rule fails with an evaluation error: a
+check is never skipped because its precondition broke. The same holds for a
+`forEach` `where`.
+
+Use `when` to scope a rule by the input's content; use `target` to scope a
+whole policy by kind, names, namespaces and labels.
+
+---
+
+## Messages
+
+A rule's `message` is a template:
+
+| Placeholder | Value |
+|-------------|-------|
+| `{{.name}}` | A binding: `length`, `version`, `datetime`, `count`, or a `func` `bind` name |
+| `{{metadata.name}}` | A field of the input |
+| `{{c.name}}` | A field of the element a `forEach` alias (`c`) was bound to |
+| `{{_index}}` | The position of the innermost failing element |
+
+A message that refers to a `forEach` alias is rendered **once per failing
+element** and the renderings are joined, so
+
+```cue
+message: "container {{c.name}} exposes undeclared port {{p.containerPort}}"
+```
+
+reports `container debug exposes undeclared port 9229; container debug
+exposes undeclared port 6060`. Elements visited inside a branch that
+ultimately passed (an `any` or `not`) are not reported. A placeholder that
+does not resolve is left as written. A malformed placeholder is a load
+error.
+
+---
+
+## Load-Time Validation
+
+A policy that fails any of these checks is rejected when it loads (startup
+fails, a reload keeps the previous set, `garmr validate` and `/v1/validate`
+report it):
+
+- The document does not unify with the schema (unknown fields, wrong types).
+- An expression sets no operator, or more than one.
+- An operand cannot be compiled: a malformed path, an invalid regular
+  expression, semver or datetime literal, an unknown builtin or compare
+  operator, or a malformed message placeholder.
+- A `forEach` sets `count` together with `mode` or `allowEmpty`.
+- Two rules in the policy share an `id`.
+- An exception `match` selects everything (it would disable the policy), or
+  its `expiry` is not an RFC3339 timestamp.
+- `evaluation.timeout` is not a positive Go duration (`"250ms"`, `"30s"`).
+- Two policy documents declare the same `namespace/name`.
 
 ---
 
@@ -746,13 +992,20 @@ myPolicy: {
     spec: {
         description: "Detailed description"
         target: {
-            resources: ["deployment", "pod"]  // or ["*"] for all
+            // A string is a kind in any API group; a struct is a selector:
+            // {kind, apiGroup, names, namespaces, labels, annotations}.
+            // apiGroup matches the group of the input's apiVersion
+            // ("apps" for "apps/v1"; "" is the core group).
+            resources: ["Deployment", {kind: "Pod", apiGroup: ""}]  // or ["*"]
         }
         rules: [
             {
                 id:          "RULE-001"
                 description: "Rule description"
                 severity:    "high"  // critical, high, medium, low, info
+                when: {
+                    // optional: the rule applies only when this holds
+                }
                 expr: {
                     // condition expression
                 }
@@ -761,6 +1014,17 @@ myPolicy: {
         ]
         enforcement: {
             action: "deny"  // deny, warn, audit
+            exceptions: [{
+                name:   "legacy-batch"
+                reason: "migrating in Q3"
+                match: {names: ["batch-*"]}
+                expiry: "2026-12-31T00:00:00Z"
+            }]
+        }
+        evaluation: {
+            order:    "priority"  // priority, severity, definition, priority-then-severity
+            failFast: false
+            timeout:  "250ms"
         }
     }
 }

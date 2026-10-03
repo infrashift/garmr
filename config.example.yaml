@@ -13,6 +13,15 @@ http_addr: ":8080"
 # read_timeout: "30s"
 # write_timeout: "60s"
 # idle_timeout: "120s"
+# max_validate_size caps the CUE source /v1/validate will compile. Keep it
+# well under max_recv_size: validation cost is driven by the source's
+# structure (unification is exponential in disjunctions), not its length.
+# max_validate_size: 1048576
+
+# Graceful shutdown budget. Readiness flips to 503 immediately, then
+# in-flight requests get up to this long to finish. Keep it below the
+# orchestrator's kill timeout, or a slow drain is cut short by SIGKILL.
+shutdown_timeout: "30s"
 
 # Policy configuration
 policy_dir: "/etc/garmr/policies"
@@ -35,8 +44,14 @@ log:
 # rather than silently allowing it. Set to false to restore the legacy
 # fail-open behavior — only do this if you knowingly evaluate inputs that
 # no policy targets.
+# timeout bounds a single evaluate/validate request, including time spent
+# waiting for an evaluation slot. This is the only limit that actually stops
+# work: write_timeout expires the connection without cancelling the handler,
+# and a policy's own spec.evaluation.timeout is optional. Keep it below the
+# sidecar's request timeout so Garmr, not the proxy, decides the outcome.
 evaluation:
   require_match: true
+  timeout: "10s"
 
 # Audit logging
 # path may be a file (rotated via max_size/max_backups/max_age) or the
@@ -44,9 +59,14 @@ evaluation:
 # In a mesh deployment prefer "stdout": the audit trail is the only record
 # of the mesh-verified principal, and a file on local disk dies with the
 # allocation. Application logs go to stderr, so the streams stay separable.
+# Rotation settings apply only when path is a file; they are ignored for
+# stdout/stderr, where the platform owns retention.
 audit:
   enabled: true
   path: "/var/log/garmr/audit.log"
+  max_size: 100      # MB before rotating
+  max_backups: 10    # old files retained
+  max_age: 30        # days
 
 # Authentication & caller identity
 # - api_key: if set, callers must present this value in api_key_header or
@@ -60,6 +80,12 @@ auth:
   api_key: ""
   api_key_header: "X-API-Key"
   identity_header: "X-Forwarded-Client-Cert"
+
+# CORS
+# Empty means every origin is allowed, which is the development default.
+# Set explicit origins if a browser ever reaches Garmr directly.
+# cors:
+#   allowed_origins: []
 
 # Storage backend configuration
 # By default, --policy-dir is used (filesystem backend).

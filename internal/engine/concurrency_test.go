@@ -10,11 +10,9 @@ import (
 	"testing"
 )
 
-// writeRawConstraintPolicy writes a policy whose rule expression is a raw CUE
-// constraint (no structured operator), so evaluation goes through the
-// input.Unify(expr) default branch — the path that breaks if the input and
-// the expression come from different cue.Contexts.
-func writeRawConstraintPolicy(t *testing.T) string {
+// writeReplicaLimitPolicy writes a one-rule policy to a fresh directory for
+// the concurrency tests below.
+func writeReplicaLimitPolicy(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	src := `package policies
@@ -27,13 +25,13 @@ replicaLimit: {
 		namespace: "default"
 	}
 	spec: {
-		description: "raw CUE constraint rule"
+		description: "replica limit"
 		target: resources: [{kind: "*"}]
 		rules: [{
-			id:          "RAW-001"
+			id:          "REP-001"
 			description: "replicas must be at most 3"
 			severity:    "high"
-			expr: {spec: replicas: <=3}
+			expr: match: {path: "spec.replicas", lessThanOrEqual: 3}
 		}]
 		enforcement: action: "deny"
 	}
@@ -45,13 +43,13 @@ replicaLimit: {
 	return dir
 }
 
-// TestEvaluate_RawConstraint_DirLoad_Concurrent loads a raw-CUE-constraint
-// policy via the directory path and hammers it from many goroutines with
-// alternating pass/fail inputs. Every decision must match its input. Run
-// with -race to catch shared cue.Context usage.
-func TestEvaluate_RawConstraint_DirLoad_Concurrent(t *testing.T) {
+// TestEvaluate_DirLoad_Concurrent loads a policy via the directory path and
+// hammers it from many goroutines with alternating pass/fail inputs. Every
+// decision must match its input. Run with -race to catch shared state in the
+// evaluator.
+func TestEvaluate_DirLoad_Concurrent(t *testing.T) {
 	eng := newTestEngine(t)
-	dir := writeRawConstraintPolicy(t)
+	dir := writeReplicaLimitPolicy(t)
 
 	if _, err := eng.ReloadPoliciesFromDir(context.Background(), dir); err != nil {
 		t.Fatalf("ReloadPoliciesFromDir failed: %v", err)
@@ -103,7 +101,7 @@ func TestEvaluate_RawConstraint_DirLoad_Concurrent(t *testing.T) {
 // must be internally consistent and error-free.
 func TestReloadDuringEvaluation(t *testing.T) {
 	eng := newTestEngine(t)
-	dir := writeRawConstraintPolicy(t)
+	dir := writeReplicaLimitPolicy(t)
 
 	if _, err := eng.ReloadPoliciesFromDir(context.Background(), dir); err != nil {
 		t.Fatalf("initial reload failed: %v", err)

@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"math"
 	"net"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,7 +31,6 @@ func (e *Engine) registerExtendedBuiltins() {
 	e.builtins["trimSuffix"] = builtinTrimSuffix
 	e.builtins["split"] = builtinSplit
 	e.builtins["join"] = builtinJoin
-	e.builtins["regex"] = builtinRegex
 
 	// Encoding
 	e.builtins["base64Decode"] = builtinBase64Decode
@@ -53,7 +51,6 @@ func (e *Engine) registerExtendedBuiltins() {
 	e.builtins["values"] = builtinValues
 
 	// Network (CIDR/IP)
-	e.builtins["cidr"] = builtinCIDRContains
 	e.builtins["cidrContains"] = builtinCIDRContains
 	e.builtins["cidrOverlap"] = builtinCIDROverlap
 	e.builtins["ipVersion"] = builtinIPVersion
@@ -69,12 +66,6 @@ func (e *Engine) registerExtendedBuiltins() {
 	e.builtins["unique"] = builtinUnique
 	e.builtins["sort"] = builtinSort
 	e.builtins["filter"] = builtinFilter
-
-	// Semver
-	e.builtins["semver"] = builtinSemverCompare
-
-	// JSON path
-	e.builtins["jsonPath"] = builtinJSONPath
 }
 
 // ============================================
@@ -274,25 +265,6 @@ func builtinJoin(_ context.Context, args ...any) (any, error) {
 		strs[i] = fmt.Sprintf("%v", v)
 	}
 	return strings.Join(strs, sep), nil
-}
-
-func builtinRegex(_ context.Context, args ...any) (any, error) {
-	if len(args) < 2 {
-		return nil, fmt.Errorf("regex requires 2 arguments (pattern, string)")
-	}
-	pattern, ok := args[0].(string)
-	if !ok {
-		return nil, fmt.Errorf("regex: first argument must be a string pattern")
-	}
-	s, ok := args[1].(string)
-	if !ok {
-		return nil, fmt.Errorf("regex: second argument must be a string")
-	}
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return nil, fmt.Errorf("regex: invalid pattern: %w", err)
-	}
-	return re.MatchString(s), nil
 }
 
 // ============================================
@@ -648,7 +620,7 @@ func parseK8sQuantity(s string) (float64, error) {
 }
 
 // ============================================
-// LOOKUP / JSON PATH FUNCTIONS
+// LOOKUP FUNCTIONS
 // ============================================
 
 func builtinLookup(_ context.Context, args ...any) (any, error) {
@@ -664,33 +636,6 @@ func builtinLookup(_ context.Context, args ...any) (any, error) {
 		return nil, fmt.Errorf("lookup: second argument must be a path string")
 	}
 
-	return lookupPath(obj, path), nil
-}
-
-func builtinJSONPath(_ context.Context, args ...any) (any, error) {
-	if len(args) < 2 {
-		return nil, fmt.Errorf("jsonPath requires 2 arguments (data, path)")
-	}
-
-	// Accept either a map or a JSON string
-	var obj map[string]any
-	switch v := args[0].(type) {
-	case map[string]any:
-		obj = v
-	case string:
-		if err := json.Unmarshal([]byte(v), &obj); err != nil {
-			return nil, fmt.Errorf("jsonPath: invalid JSON: %w", err)
-		}
-	default:
-		return nil, fmt.Errorf("jsonPath: first argument must be an object or JSON string")
-	}
-
-	path, ok := args[1].(string)
-	if !ok {
-		return nil, fmt.Errorf("jsonPath: second argument must be a path string")
-	}
-
-	// Simple dot-notation path support: "metadata.labels.app"
 	return lookupPath(obj, path), nil
 }
 
@@ -758,7 +703,7 @@ func builtinUnique(_ context.Context, args ...any) (any, error) {
 	seen := make(map[string]bool)
 	var result []any
 	for _, v := range arr {
-		key := fmt.Sprintf("%v", v)
+		key := setKey(v)
 		if !seen[key] {
 			seen[key] = true
 			result = append(result, v)
@@ -781,14 +726,11 @@ func builtinSort(_ context.Context, args ...any) (any, error) {
 	copy(sorted, arr)
 
 	sort.SliceStable(sorted, func(i, j int) bool {
-		// Try numeric comparison first
-		ni, errI := toFloat64(sorted[i])
-		nj, errJ := toFloat64(sorted[j])
-		if errI == nil && errJ == nil {
-			return ni < nj
+		if cmp, ok := orderValues(sorted[i], sorted[j]); ok {
+			return cmp < 0
 		}
-		// Fall back to string comparison
-		return fmt.Sprintf("%v", sorted[i]) < fmt.Sprintf("%v", sorted[j])
+		// Mixed kinds: group by kind so the order is still deterministic.
+		return valueKind(sorted[i]) < valueKind(sorted[j])
 	})
 
 	return sorted, nil
@@ -806,7 +748,7 @@ func builtinFilter(_ context.Context, args ...any) (any, error) {
 	filterVal := args[1]
 	var result []any
 	for _, v := range arr {
-		if valuesEqual(v, filterVal) {
+		if eqValues(v, filterVal) {
 			result = append(result, v)
 		}
 	}
@@ -814,30 +756,6 @@ func builtinFilter(_ context.Context, args ...any) (any, error) {
 		result = []any{}
 	}
 	return result, nil
-}
-
-// ============================================
-// SEMVER FUNCTION
-// ============================================
-
-func builtinSemverCompare(_ context.Context, args ...any) (any, error) {
-	if len(args) < 2 {
-		return nil, fmt.Errorf("semver requires 2 arguments (version1, version2)")
-	}
-	v1, ok := args[0].(string)
-	if !ok {
-		return nil, fmt.Errorf("semver: first argument must be a version string")
-	}
-	v2, ok := args[1].(string)
-	if !ok {
-		return nil, fmt.Errorf("semver: second argument must be a version string")
-	}
-
-	cmp, err := compareSemver(v1, v2)
-	if err != nil {
-		return nil, err
-	}
-	return int64(cmp), nil
 }
 
 // ============================================
@@ -922,5 +840,3 @@ func toFloat64(v any) (float64, error) {
 func isIntegral(f float64) bool {
 	return f == math.Trunc(f)
 }
-
-// valuesEqual is defined in engine.go (shared with operator code)

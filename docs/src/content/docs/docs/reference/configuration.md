@@ -25,7 +25,8 @@ http_addr: ":8080"
 ## HTTP Limits & Timeouts
 
 ```yaml
-max_recv_size: 16777216   # bytes
+max_recv_size: 16777216      # bytes
+max_validate_size: 1048576   # bytes
 read_timeout: "30s"
 write_timeout: "60s"
 idle_timeout: "120s"
@@ -38,7 +39,11 @@ shutdown_timeout: "30s"
 | `read_timeout` | `30s` | HTTP server read timeout |
 | `write_timeout` | `60s` | HTTP server write timeout |
 | `idle_timeout` | `120s` | Idle keep-alive connection timeout |
+| `max_validate_size` | `1048576` (1 MiB) | Max CUE source accepted by `/v1/validate`. Deliberately far below `max_recv_size`: validation compiles caller-supplied source, and unification cost grows with the source's disjunctions rather than its length. The effective cap is the smaller of this and `max_recv_size`. |
 | `shutdown_timeout` | `30s` | Drain budget after SIGTERM |
+
+`write_timeout` expires the *connection*; it does not cancel the handler. The
+bound that actually stops work is `evaluation.timeout` (below).
 
 **Behind a sidecar, reconcile with the proxy's timeouts.** Envoy/Consul
 Connect applies its own request and idle timeouts, and whichever side is
@@ -46,6 +51,36 @@ shorter wins in ways that are painful to debug (the caller sees the proxy's
 error, not Garmr's). Keep `write_timeout` at or above the proxy's request
 timeout, and `idle_timeout` above the proxy's idle timeout so connection
 reuse isn't broken from the app side.
+
+## Evaluation Limits
+
+```yaml
+evaluation:
+  timeout: "10s"
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `evaluation.timeout` | `10s` | Max time for one `/v1/evaluate` or `/v1/validate`. For `/v1/validate` this **includes** time spent waiting for a validation slot. |
+
+This is the only limit that actually stops work. `write_timeout` expires the
+connection without cancelling the handler, and a policy's own
+`spec.evaluation.timeout` is optional and unset by default — so without this,
+a request that had already lost its client went on running and holding
+its decoded input.
+
+Evaluations have no pool and no queue: every request runs immediately, in
+parallel, against the loaded policy set. A request whose budget expires
+while its rules are running is denied with a synthetic timeout result
+(`__system__/policy-timeout`). A request whose context has already ended
+before evaluation starts gets `503` (retry is meaningful). `/v1/validate`
+compiles caller-supplied CUE, so it is bounded by a concurrency gate of
+`min(GOMAXPROCS, 8)`. A validate request whose budget expires while waiting
+for that gate is rejected with `503`.
+
+**Keep this below the sidecar's request timeout** so Garmr, not the proxy,
+decides the outcome — otherwise the caller gets the proxy's `504` and no
+digest or error detail from Garmr.
 
 ## Policy Configuration
 

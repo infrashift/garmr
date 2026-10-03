@@ -12,98 +12,64 @@ import (
 	"go.uber.org/zap"
 )
 
-// TestExpr_UnknownOperatorFailsClosed is the regression test for the typo
-// class. The input is encoded from a map[string]any and is therefore an OPEN
-// struct, so unifying `{mach: {...}}` used to add a field and succeed — a
-// misspelled operator made a security rule pass unconditionally.
-func TestExpr_UnknownOperatorFailsClosed(t *testing.T) {
+// TestExpr_UnknownOperatorRejectedAtLoad is the regression test for the typo
+// class. A misspelled operator used to fall through to a raw CUE constraint
+// over the (open) input, which simply gained a field and passed — a typo made
+// a security rule pass unconditionally. Expressions are now typed, so a typo
+// anywhere in the tree, including under `not`, is refused when the policy
+// loads.
+func TestExpr_UnknownOperatorRejectedAtLoad(t *testing.T) {
 	tests := []struct {
 		name string
 		expr string
 	}{
 		{"misspelled match", `{mach: {path: "spec.replicas", equals: 1}}`},
 		{"misspelled compare", `{comparee: {left: {path: "a"}, op: "==", right: {literal: 1}}}`},
-		{"misspelled forEach", `{foreach: {path: "spec.items", as: "i", condition: {exists: "i"}}}`},
+		{"misspelled forEach", `{foreach: {path: "spec.items", as: "i", condition: {match: {path: "i", exists: true}}}}`},
+		{"misspelled match operator", `{match: {path: "spec.replicas", greaterThen: 1}}`},
 		{"nested inside all", `{all: [{mach: {path: "spec.replicas", equals: 1}}]}`},
 		{"nested inside any", `{any: [{mach: {path: "spec.replicas", equals: 1}}]}`},
 		{"nested inside not", `{not: {mach: {path: "spec.replicas", equals: 1}}}`},
+		{"nested inside forEach", `{forEach: {path: "spec.items", condition: {mach: {path: "item", equals: 1}}}}`},
+		{"two operators", `{match: {path: "a", equals: 1}, compare: {left: {path: "a"}, op: "==", right: {literal: 1}}}`},
+		{"empty expression", `{}`},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rule := fmt.Sprintf(`{id: "r1", description: "d", severity: "critical", expr: %s}`, tt.expr)
-			decision, msg := evalRule(t, rule, map[string]any{
-				"spec": map[string]any{"replicas": 99.0},
-			})
-
-			// `not` inverts, so a failing inner expression makes the rule
-			// pass. What matters is that the unknown operator is not silently
-			// treated as a satisfied constraint.
-			if tt.name == "nested inside not" {
-				return
+			src := makePolicy("p", "default", "d", rule, "deny", "")
+			eng := newTestEngine(t)
+			if err := eng.LoadPolicy(context.Background(), "p", "default", src); err == nil {
+				t.Fatal("policy loaded; a malformed expression must be rejected")
 			}
-			if decision != DecisionDeny {
-				t.Errorf("decision = %v, want %v; message=%q", decision, DecisionDeny, msg)
-			}
-			if !strings.Contains(msg, "unknown expr operator") {
-				t.Errorf("message = %q, want it to name the unknown operator", msg)
+			if errs, _ := eng.Validate(src); len(errs) == 0 {
+				t.Error("Validate accepted a policy the loader rejects")
 			}
 		})
 	}
 }
 
-// TestExpr_RawConstraintStillWorks guards the feature the unknown-operator
-// check must not break: a bare CUE constraint over an existing input field.
-// This is a supported, documented form (see also
-// TestEvaluate_RawConstraint_DirLoad_Concurrent).
-func TestExpr_RawConstraintStillWorks(t *testing.T) {
+// TestExpr_RawConstraintRejected pins the removal of raw CUE constraints
+// (`expr: {spec: replicas: <=3}`): evaluation no longer involves CUE, so an
+// expression must use an operator.
+func TestExpr_RawConstraintRejected(t *testing.T) {
 	rule := `{id: "r1", description: "d", severity: "high", expr: {spec: replicas: <=3}}`
-
-	if decision, msg := evalRule(t, rule, map[string]any{
-		"spec": map[string]any{"replicas": 2.0},
-	}); decision != DecisionAllow {
-		t.Errorf("satisfied constraint: decision = %v, want %v; message=%q", decision, DecisionAllow, msg)
-	}
-
-	if decision, _ := evalRule(t, rule, map[string]any{
-		"spec": map[string]any{"replicas": 9.0},
-	}); decision != DecisionDeny {
-		t.Errorf("violated constraint: decision = %v, want %v", decision, DecisionDeny)
-	}
-}
-
-// TestExpr_NonConcreteConstraintFailsClosed covers the sibling hole: a
-// constraint naming a field the input lacks stayed non-concrete after unify
-// and passed vacuously.
-func TestExpr_NonConcreteConstraintFailsClosed(t *testing.T) {
-	rule := `{id: "r1", description: "d", severity: "high", expr: {spec: {required: string}}}`
-	decision, msg := evalRule(t, rule, map[string]any{
-		"spec": map[string]any{"other": "value"},
-	})
-
-	if decision != DecisionDeny {
-		t.Errorf("decision = %v, want %v; a constraint on a missing field must not pass vacuously (message=%q)", decision, DecisionDeny, msg)
+	src := makePolicy("p", "default", "d", rule, "deny", "")
+	if err := newTestEngine(t).LoadPolicy(context.Background(), "p", "default", src); err == nil {
+		t.Error("raw constraint loaded; it must be rejected")
 	}
 }
 
 // TestResolveValue_EnvIsRejected pins the removal of the `{env: "NAME"}` value
 // source. Violation messages interpolate resolved values back to the caller,
 // so reading the server environment from a policy was a secret-exfiltration
-// path reachable by any policy author.
+// path reachable by any policy author. It is refused at load.
 func TestResolveValue_EnvIsRejected(t *testing.T) {
-	t.Setenv("GARMR_TEST_SECRET", "super-secret-value")
-
 	rule := `{id: "r1", description: "d", severity: "critical", expr: {compare: {left: {path: "a"}, op: "==", right: {env: "GARMR_TEST_SECRET"}}}}`
-	decision, msg := evalRule(t, rule, map[string]any{"a": "super-secret-value"})
-
-	if decision != DecisionDeny {
-		t.Errorf("decision = %v, want %v", decision, DecisionDeny)
-	}
-	if !strings.Contains(msg, "'env' is not supported") {
-		t.Errorf("message = %q, want it to report env as unsupported", msg)
-	}
-	if strings.Contains(msg, "super-secret-value") {
-		t.Errorf("message leaked the environment variable's value: %q", msg)
+	src := makePolicy("p", "default", "d", rule, "deny", "")
+	if err := newTestEngine(t).LoadPolicy(context.Background(), "p", "default", src); err == nil {
+		t.Error("env value source loaded; it must be rejected")
 	}
 }
 

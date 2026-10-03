@@ -86,6 +86,8 @@ curl -X POST http://localhost:8080/v1/policies/reload
 | [CLI Reference](docs/src/content/docs/docs/guides/cli.md) | Complete CLI command reference |
 | [REST API Reference](docs/src/content/docs/docs/guides/rest-api.md) | HTTP API endpoints and examples |
 | [CI/CD Integration](docs/src/content/docs/docs/guides/cicd.md) | Pipeline integration patterns |
+| [Nomad + Consul Connect](deploy/nomad/README.md) | Running Garmr in a Consul service mesh on Nomad |
+| [Deploying (Kubernetes/Helm)](docs/src/content/docs/docs/operations/deploying.md) | Helm chart and Kubernetes deployment |
 | [Developer Experience](docs/src/content/docs/docs/guides/developer-experience.md) | Writing and testing policies |
 | [Roadmap](docs/src/content/docs/docs/project/roadmap.md) | Future features and integrations |
 
@@ -133,19 +135,34 @@ containerSecurity: {
 
 ### Condition Operators
 
+Each expression sets exactly one of `all`, `any`, `not`, `match`, `compare`,
+`forEach`, or `func`; combine checks with `all`/`any`. A `match` checks the
+field at a path:
+
 | Category | Operators |
 |----------|-----------|
-| Existence | `exists`, `absent` |
+| Existence | `exists: true`, `exists: false` |
 | Equality | `equals` |
 | Comparison | `greaterThan`, `greaterThanOrEqual`, `lessThan`, `lessThanOrEqual` |
 | String | `contains`, `hasPrefix`, `hasSuffix`, `pattern` (regex) |
 | Membership | `in`, `notIn` |
-| Set validation | `unique`, `uniqueBy`, `sorted`, `containsAll`, `subsetOf` |
-| Logical | `all`, `any`, `not` |
-| Advanced | `forEach`, `length`, `semver`, `datetime`, `compare` (cross-field), builtin `func` calls |
+| Set validation | `unique`, `uniqueBy`, `sorted`, `containsAll`, `containsAny`, `subsetOf` |
+| Advanced | `length`, `semver`, `datetime` |
 
-Multiple operators in one `match` block are ANDed — `datetime: {after: X,
-before: Y}` is a range check.
+Beyond `match`: `forEach` checks list elements, `compare` compares two
+values (cross-field), and `func` calls a builtin. Multiple operators in one
+`match` block are ANDed — `datetime: {after: X, before: Y}` is a range
+check. Expressions are schema-typed, so a misspelled operator is rejected
+when the policy loads, not at evaluation.
+
+A rule can apply conditionally (`when: match: {path:
+"metadata.labels.env", equals: "prod"}`) and `forEach` can filter
+(`where:`). Paths project lists with `[*]` (`sum` of
+`spec.containers[*].cpu`), `forEach` can count matches (`count:
+{lessThanOrEqual: 1}`), `compare`
+`subsetOf` checks a label selector against labels, and a rule's `message`
+can name the failing element (`container {{c.name}} exposes port
+{{p.containerPort}}`).
 
 ### Target Filtering
 
@@ -212,6 +229,8 @@ garmr/
 │   └── real-world/         # Real-world scenario inputs
 ├── schemas/                # CUE policy schema (policy.cue)
 ├── deploy/                 # Deployment manifests
+│   ├── nomad/              # Nomad + Consul Connect job specs
+│   └── helm/               # Helm chart for Kubernetes
 └── docs/                   # Documentation site (Astro Starlight)
 ```
 

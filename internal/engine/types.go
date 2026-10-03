@@ -2,10 +2,9 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
-
-	"cuelang.org/go/cue"
 )
 
 // Common errors
@@ -13,6 +12,12 @@ var (
 	ErrPolicyNotFound = errors.New("policy not found")
 	ErrInvalidPolicy  = errors.New("invalid policy")
 	ErrInvalidInput   = errors.New("invalid input")
+
+	// ErrEvaluationUnavailable means the evaluation never started: the
+	// caller's context ended while queueing for a replica. It is
+	// backpressure, not a failed decision — callers should surface it as
+	// "retry later" (503), never as a policy outcome.
+	ErrEvaluationUnavailable = errors.New("evaluation unavailable")
 )
 
 // Decision represents the overall evaluation decision.
@@ -81,6 +86,7 @@ type CompiledPolicy struct {
 	Name        string
 	Namespace   string
 	Hash        string
+	Source      string // directory the policy was loaded from, if any
 	Rules       []CompiledRule
 	Target      TargetSpec
 	Enforcement EnforcementSpec
@@ -88,19 +94,26 @@ type CompiledPolicy struct {
 	LoadedAt    time.Time
 }
 
+func (p *CompiledPolicy) key() string { return policyKey(p.Namespace, p.Name) }
+
 // CompiledRule is a pre-compiled rule within a policy.
 type CompiledRule struct {
 	ID          string
 	Description string
 	Severity    Severity
 	Priority    *int // nil means not specified (use definition order)
-	Expression  cue.Value
 	Message     string
 	Remediation string
 	Category    string
 	Tags        []string
 	// Internal: original position in the rules list for stable sorting
 	DefinitionOrder int
+
+	// expr is the compiled expression and msg the parsed Message template;
+	// bindings and failing forEach elements are only collected when msg
+	// uses them.
+	expr node
+	msg  msgTemplate
 }
 
 // EvaluationConfig controls rule evaluation behavior.
@@ -130,29 +143,59 @@ type TargetSpec struct {
 	Resources []ResourceSelector
 }
 
-// ResourceSelector identifies resources.
+// ResourceSelector identifies resources. Patterns are case-insensitive and
+// "*" matches any run of characters.
 type ResourceSelector struct {
-	APIGroup    string
-	Kind        string
-	Names       []string
-	Labels      map[string]string
-	Annotations map[string]string
-	Namespaces  []string
+	APIGroup    string            `json:"apiGroup"`
+	Kind        string            `json:"kind"`
+	Names       []string          `json:"names"`
+	Labels      map[string]string `json:"labels"`
+	Annotations map[string]string `json:"annotations"`
+	Namespaces  []string          `json:"namespaces"`
+}
+
+// UnmarshalJSON accepts the plain-string shorthand for a kind in any group.
+func (rs *ResourceSelector) UnmarshalJSON(b []byte) error {
+	var kind string
+	if json.Unmarshal(b, &kind) == nil {
+		*rs = ResourceSelector{Kind: kind, APIGroup: "*"}
+		return nil
+	}
+	type plain ResourceSelector
+	return json.Unmarshal(b, (*plain)(rs))
+}
+
+// narrows reports whether the selector excludes anything. Every field
+// defaults to a wildcard, so a selector that narrows nothing matches every
+// input.
+func (rs ResourceSelector) narrows() bool {
+	anySpecific := func(patterns []string) bool {
+		for _, p := range patterns {
+			if p != "*" {
+				return true
+			}
+		}
+		return false
+	}
+	return (rs.Kind != "" && rs.Kind != "*") || rs.APIGroup != "*" ||
+		anySpecific(rs.Names) || anySpecific(rs.Namespaces) ||
+		len(rs.Labels) > 0 || len(rs.Annotations) > 0
 }
 
 // EnforcementSpec defines enforcement behavior.
 type EnforcementSpec struct {
-	Action     string
-	DryRun     bool
-	Exceptions []ExceptionSpec
+	Action     string          `json:"action"`
+	DryRun     bool            `json:"dryRun"`
+	Exceptions []ExceptionSpec `json:"exceptions"`
 }
 
-// ExceptionSpec defines an exception to enforcement.
+// ExceptionSpec exempts inputs its selector matches from a policy, until
+// Expiry if set.
 type ExceptionSpec struct {
-	Name   string
-	Reason string
-	Match  ResourceSelector
-	Expiry *time.Time
+	Name   string           `json:"name"`
+	Reason string           `json:"reason"`
+	Match  ResourceSelector `json:"match"`
+	Expiry *time.Time       `json:"expiry"`
 }
 
 // EvaluateRequest contains the input for policy evaluation.
@@ -165,14 +208,8 @@ type EvaluateRequest struct {
 
 // EvaluateOptions controls evaluation behavior.
 type EvaluateOptions struct {
-	IncludePassed  bool
-	DryRunOverride *bool
-
-	// Category/tag filtering (applied in addition to policy-level config)
-	IncludeCategories []string
-	ExcludeCategories []string
-	IncludeTags       []string
-	ExcludeTags       []string
+	// IncludePassed returns passing rule results as well as failures.
+	IncludePassed bool
 }
 
 // EvaluateResponse contains evaluation results.
@@ -210,31 +247,10 @@ type EvaluationMode struct {
 
 // ResultSummary provides aggregate counts.
 type ResultSummary struct {
-	TotalRules  int
-	Passed      int
-	Failed      int
-	Skipped     int
-	BySeverity  map[Severity]SeverityCounts
-	ByCategory  map[string]CategoryCounts
-	ByNamespace map[string]NamespaceCounts
-}
-
-// SeverityCounts tracks pass/fail by severity.
-type SeverityCounts struct {
-	Passed int
-	Failed int
-}
-
-// CategoryCounts tracks pass/fail by category.
-type CategoryCounts struct {
-	Passed int
-	Failed int
-}
-
-// NamespaceCounts tracks pass/fail by namespace.
-type NamespaceCounts struct {
-	Passed int
-	Failed int
+	TotalRules int
+	Passed     int
+	Failed     int
+	Skipped    int
 }
 
 // RuleResult is the result of evaluating a single rule.
@@ -250,11 +266,9 @@ type RuleResult struct {
 	Bindings        map[string]any
 
 	// Evaluation metadata
-	Priority         *int
-	Category         string
-	Tags             []string
-	EvaluationOrder  int   // Order in which this rule was evaluated
-	EvaluationTimeNs int64 // Time taken to evaluate this rule
+	Priority *int
+	Category string
+	Tags     []string
 
 	// If this rule caused fail-fast termination
 	CausedTermination bool

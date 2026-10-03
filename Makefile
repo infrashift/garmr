@@ -6,9 +6,8 @@ BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)"
 
-.PHONY: all build build-server build-cli test lint clean docker help \
-	test-storage test-minio-start test-minio-stop test-s3-integration \
-	doc-dev
+.PHONY: all build build-server build-cli test test-load lint fmt-check clean docker help bench-e2e \
+	test-storage doc-dev
 
 all: build
 
@@ -35,53 +34,47 @@ cue-fmt: ## Format CUE files
 
 cue-vet: ## Validate CUE files
 	cue vet ./schemas/...
-	cue vet ./examples/...
 
 cue-export: ## Export CUE schemas to JSON
 	cue export ./schemas/policy.cue --out json > schemas/policy.schema.json
 
 ## Test targets
 
-test: ## Run tests (excludes plugins)
-	go test -v -race -cover $$(go list ./... | grep -v '/plugins/')
+# -short skips the load tests; they are slow under -race and belong in
+# `make test-load`, not on the `release` path.
+test: ## Run unit tests (skips load tests; see test-load)
+	go test -short -v -race -cover ./...
 
-test-all: ## Run all tests including plugins
-	go test -v -race -cover ./...
+test-load: ## Run the load tests (slow: sustained RPS under -race)
+	go test -v -race -run 'TestLoadTest' ./internal/server/...
 
 test-cover: ## Run tests with coverage report
-	go test -v -race -coverprofile=coverage.out $$(go list ./... | grep -v '/plugins/')
+	go test -short -v -race -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report: coverage.html"
 
 check-coverage: ## Enforce coverage floor on CLI↔server integration surface
 	./scripts/check-coverage.sh
 
-test-integration: build ## Run integration tests
-	./scripts/integration-test.sh
-
 test-storage: ## Run storage backend unit tests
 	go test -v -race ./internal/storage/...
-
-test-minio-start: ## Start MinIO for integration testing (podman)
-	podman play kube test/integration/minio-pod.yaml
-	@echo "Waiting for MinIO..."
-	@for i in $$(seq 1 30); do curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1 && echo "MinIO is ready" && break; sleep 1; done
-
-test-minio-stop: ## Stop MinIO pod
-	podman play kube --down test/integration/minio-pod.yaml
-
-test-s3-integration: test-minio-start build ## Run S3 integration tests
-	go test -v -tags integration -timeout 120s ./test/integration/...
-	$(MAKE) test-minio-stop
 
 bench: ## Run benchmarks
 	go test -bench=. -benchmem ./internal/engine/...
 
+bench-e2e: ## Benchmark garmr-server vs OPA end to end over HTTP (~40 min; ARGS=-quick for a smoke run)
+	./scripts/bench-e2e/run.sh $(ARGS)
+
 ## Lint and format
 
-lint: ## Run linters
+lint: fmt-check ## Run linters
 	golangci-lint run ./...
-	cue vet ./...
+	cue vet ./schemas/...
+
+fmt-check: ## Verify Go and CUE formatting without rewriting files
+	@out="$$($$(go env GOROOT)/bin/gofmt -l ./cmd ./internal)"; \
+		if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+	cue fmt --check ./schemas/... ./example-policies/...
 
 fmt: ## Format code
 	go fmt ./...
@@ -89,9 +82,7 @@ fmt: ## Format code
 
 ## Development
 
-run: build ## Run server with config.yaml
-	@mkdir -p /tmp/garmr-audit
-	./bin/garmr-server --config garmr-server.config.yaml
+run: dev ## Alias of dev: run the server locally against the example policies
 
 dev: build ## Run server in development mode (no config file)
 	@mkdir -p /tmp/garmr-audit
@@ -107,8 +98,8 @@ doc-dev: ## Run the Astro documentation site locally (bun)
 
 ## Docker
 
-docker-build: ## Build Docker image (host platform)
-	docker build -t garmr:$(VERSION) .
+docker-build: ## Build container image (host platform)
+	docker build -f Containerfile -t garmr:$(VERSION) .
 
 docker-push: docker-build ## Push Docker image
 	docker push garmr:$(VERSION)
@@ -121,6 +112,7 @@ DOCKER_IMAGE     ?= $(DOCKER_REGISTRY)/garmr
 
 docker-buildx: ## Build multi-arch image without pushing (local tar only)
 	docker buildx build \
+		--file Containerfile \
 		--platform $(DOCKER_PLATFORMS) \
 		--tag $(DOCKER_IMAGE):$(VERSION) \
 		--build-arg VERSION=$(VERSION) \
@@ -129,6 +121,7 @@ docker-buildx: ## Build multi-arch image without pushing (local tar only)
 
 docker-release: ## Build and push multi-arch image to $(DOCKER_IMAGE)
 	docker buildx build \
+		--file Containerfile \
 		--platform $(DOCKER_PLATFORMS) \
 		--tag $(DOCKER_IMAGE):$(VERSION) \
 		--tag $(DOCKER_IMAGE):latest \

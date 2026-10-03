@@ -11,9 +11,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -26,26 +28,50 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	"github.com/infrashift/garmr/internal/engine"
-	"github.com/infrashift/garmr/internal/experimental/ratelimit"
-	"github.com/infrashift/garmr/internal/storage"
 	"github.com/infrashift/garmr/internal/health"
 	"github.com/infrashift/garmr/internal/input"
 	"github.com/infrashift/garmr/internal/observability"
+	"github.com/infrashift/garmr/internal/ratelimit"
+	"github.com/infrashift/garmr/internal/storage"
 )
 
 //go:embed openapi.json
 var openAPISpec []byte
 
 // Config holds server configuration.
+// Garmr terminates plain HTTP only: transport security (mTLS) is the service
+// mesh's job. The TLS listener and its config knobs were removed deliberately;
+// anyone deploying outside a mesh should front the server with a TLS proxy.
 type Config struct {
-	HTTPAddr        string
-	PolicyDir       string
-	TLSCert         string
-	TLSKey          string
-	EnableTLS       bool
+	HTTPAddr  string
+	PolicyDir string
+	// MaxRecvSize caps request bodies in bytes (default 16 MiB). Evaluate
+	// buffers the whole body before parsing, so this bounds per-request
+	// memory — size it together with the container's memory limit.
 	MaxRecvSize     int
 	ShutdownTimeout time.Duration // graceful shutdown timeout (default 30s)
-	Version         string        // reported in /health and the health handler; injected via ldflags in main
+	// HTTP server timeouts (defaults: read 30s, write 60s, idle 120s).
+	// Reconcile these with the sidecar in front: Envoy/Consul Connect
+	// applies its own request and idle timeouts, and the shorter of the
+	// two wins in ways that are painful to debug — keep the app's write
+	// timeout at or above the proxy's request timeout.
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	IdleTimeout  time.Duration
+	// EvaluationTimeout bounds a single /v1/evaluate or /v1/validate,
+	// including time spent waiting for a validation slot (default 10s).
+	//
+	// This is the only bound that actually stops work: WriteTimeout expires
+	// the connection but does not cancel the handler, and the per-policy
+	// timeout is optional and unset by default. Keep it below the sidecar's
+	// request timeout so the server, not the proxy, decides the outcome.
+	EvaluationTimeout time.Duration
+	// MaxValidateSize caps the CUE source accepted by /v1/validate (default
+	// 1 MiB). Deliberately far below MaxRecvSize: validation compiles
+	// caller-supplied CUE, and unification cost grows with the source's
+	// disjunctions rather than its length.
+	MaxValidateSize int
+	Version         string // reported in /health and the health handler; injected via ldflags in main
 	// Audit logging
 	AuditEnabled    bool
 	AuditPath       string
@@ -64,10 +90,29 @@ type Config struct {
 	RateLimitEnabled   bool
 	RateLimitPerSecond float64
 	RateLimitBurst     int
+	// RateLimitPerClient toggles per-client buckets. Tri-state: nil keeps
+	// the limiter default (true); the pointer form exists because a zero
+	// bool is indistinguishable from "unset" in field-by-field configs.
+	RateLimitPerClient *bool
+	// RateLimitClientIdentifier keys the per-client buckets: "ip" (default),
+	// "header", or "identity" (the SPIFFE URI from the mesh's XFCC header —
+	// the right choice behind a Consul/Envoy sidecar, where every caller's
+	// RemoteAddr is the local proxy).
+	RateLimitClientIdentifier string
+	// RateLimitHeaderName is the header read by the "header" identifier.
+	RateLimitHeaderName string
+	// RateLimitClientRPS / RateLimitClientBurst bound each client's bucket.
+	RateLimitClientRPS   float64
+	RateLimitClientBurst int
+	// RateLimitMaxClients bounds the per-client bucket map.
+	RateLimitMaxClients int
+	// RateLimitTrustedProxies lists CIDRs whose X-Forwarded-For header is
+	// believed for per-client identification. Empty means never trust it.
+	RateLimitTrustedProxies []string
 	// Storage backend
-	StorageType    string                 // "filesystem" (default), "s3", "minio"
+	StorageType    string                 // "filesystem" (default)
 	StorageRoot    string                 // Root path/prefix for storage backend
-	StorageOptions map[string]interface{} // Backend-specific options (S3 endpoint, bucket, etc.)
+	StorageOptions map[string]interface{} // Backend-specific options
 	// Evaluation posture
 	// RequireMatch is a tri-state: nil means "use the engine default" (true /
 	// fail-closed). A non-nil pointer lets operators explicitly opt out via
@@ -90,9 +135,16 @@ type Server struct {
 	obs            *observability.Provider
 	storageBackend storage.Backend
 
-	mu     sync.RWMutex
-	ready  bool
-	checks map[string]bool
+	// validateSem bounds concurrent /v1/validate compilations. Evaluation is
+	// cheap compiled Go and needs no bound; validation compiles
+	// caller-supplied CUE, so without this every concurrent request spun up
+	// its own CUE evaluator.
+	validateSem chan struct{}
+
+	mu       sync.RWMutex
+	ready    bool
+	checks   map[string]bool
+	stopOnce sync.Once
 }
 
 // NewServer creates a new server instance.
@@ -104,12 +156,13 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 	obs := observability.NewProvider()
 
 	s := &Server{
-		config:    cfg,
-		engine:    eng,
-		logger:    logger,
-		startTime: time.Now(),
-		checks:    make(map[string]bool),
-		obs:       obs,
+		config:      cfg,
+		engine:      eng,
+		logger:      logger,
+		startTime:   time.Now(),
+		checks:      make(map[string]bool),
+		obs:         obs,
+		validateSem: make(chan struct{}, validateConcurrency()),
 	}
 
 	// Wire observability into the engine
@@ -137,7 +190,62 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 		if cfg.RateLimitBurst > 0 {
 			rlConfig.Burst = cfg.RateLimitBurst
 		}
+		if cfg.RateLimitPerClient != nil {
+			rlConfig.PerClient = *cfg.RateLimitPerClient
+		}
+		if cfg.RateLimitClientIdentifier != "" {
+			rlConfig.ClientIdentifier = cfg.RateLimitClientIdentifier
+		}
+		if cfg.RateLimitHeaderName != "" {
+			rlConfig.HeaderName = cfg.RateLimitHeaderName
+		}
+		if cfg.RateLimitClientRPS > 0 {
+			rlConfig.ClientRequestsPerSecond = cfg.RateLimitClientRPS
+		}
+		if cfg.RateLimitClientBurst > 0 {
+			rlConfig.ClientBurst = cfg.RateLimitClientBurst
+		}
+		if cfg.RateLimitMaxClients > 0 {
+			rlConfig.MaxClients = cfg.RateLimitMaxClients
+		}
+		// A typo in the identifier used to fall through to IP keying
+		// silently, which behind a sidecar means one shared bucket for every
+		// caller — the limiter looks configured and enforces nothing useful.
+		switch rlConfig.ClientIdentifier {
+		case "ip", "header", "identity":
+		default:
+			return nil, fmt.Errorf(
+				"invalid rate limit client identifier %q: want one of ip, header, identity",
+				rlConfig.ClientIdentifier)
+		}
+		// The "identity" identifier reads the same mesh header the audit
+		// principal comes from.
+		rlConfig.IdentityHeader = cfg.IdentityHeader
+		rlConfig.TrustedProxies = cfg.RateLimitTrustedProxies
+		// Probes must never be rate limited: a 429 on /readyz reads as an
+		// unhealthy instance and gets it pulled from the mesh.
+		rlConfig.ExemptPaths = append(append([]string{}, probePaths...), cfg.AuthExemptPaths...)
+
+		if rlConfig.ClientIdentifier == "identity" {
+			// Identity keying degrades silently: with no XFCC header the
+			// limiter falls back to the client IP, which behind a sidecar is
+			// the local proxy — one shared bucket for every caller, looking
+			// exactly like a working per-client limit.
+			logger.Info("rate limiting keyed on mesh identity",
+				zap.String("header", rlConfig.IdentityHeader),
+				zap.String("requires",
+					"a sidecar that sets the identity header; on Consul this needs "+
+						"service-defaults protocol=http, or the header is never injected "+
+						"and every caller shares one bucket"),
+			)
+		}
+
 		s.rateLimiter = ratelimit.New(rlConfig)
+		// Without this the limiter is unobservable: the collector was
+		// registered but garmr_rate_limit_hits_total was never incremented.
+		s.rateLimiter.SetOnLimited(func() {
+			s.obs.Metrics().RecordRateLimitHit("")
+		})
 	}
 
 	// Initialize health handler
@@ -147,10 +255,37 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 	}
 	s.healthHandler = health.NewHandler(version)
 
-	// Register a policy loader health checker
+	// Readiness must fail the moment Stop() begins draining — the mesh
+	// otherwise keeps routing new requests at a server that is about to
+	// close its listener. Deployment probes point at /readyz, which runs
+	// only the cheap checkers, and none of them consulted s.ready before.
+	s.healthHandler.Register("server", func(ctx context.Context) *health.Check {
+		s.mu.RLock()
+		ready := s.ready
+		s.mu.RUnlock()
+		if !ready {
+			return &health.Check{
+				Status:  health.StatusDegraded,
+				Message: "not accepting traffic (starting or draining)",
+			}
+		}
+		return &health.Check{
+			Status:  health.StatusHealthy,
+			Message: "accepting traffic",
+		}
+	})
+
+	// Register a policy loader health checker.
+	//
+	// PolicyCount reads an atomic snapshot and never blocks. This checker
+	// once went through a path that waited on busy evaluations; it blocked
+	// past the probe deadline (health.runCheckers waits on the checkers
+	// without observing its own context), the mesh health check timed out,
+	// and the instance was evicted under exactly the load it was handling
+	// correctly.
 	s.healthHandler.Register("policies", func(ctx context.Context) *health.Check {
-		policies := eng.ListPolicies("")
-		if len(policies) == 0 {
+		count := eng.PolicyCount()
+		if count == 0 {
 			return &health.Check{
 				Status:  health.StatusDegraded,
 				Message: "no policies loaded",
@@ -158,12 +293,14 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 		}
 		return &health.Check{
 			Status:  health.StatusHealthy,
-			Message: fmt.Sprintf("%d policies loaded", len(policies)),
+			Message: fmt.Sprintf("%d policies loaded", count),
 		}
 	})
 
-	// Register storage health checker
-	s.healthHandler.Register("storage", func(ctx context.Context) *health.Check {
+	// Storage is a DEEP checker: it makes a real round trip to the backend.
+	// Registered as a readiness check it ran on every kubelet probe, and the
+	// Helm chart points readinessProbe at /readyz.
+	s.healthHandler.RegisterDeep("storage", func(ctx context.Context) *health.Check {
 		if s.storageBackend == nil {
 			return &health.Check{
 				Status:  health.StatusHealthy,
@@ -194,11 +331,33 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 	return s, nil
 }
 
-// initAuditLogger initializes the audit log with rotation via lumberjack.
+// initAuditLogger initializes the audit log: a rotated file via lumberjack,
+// or a standard stream for platform-shipped logging.
 func (s *Server) initAuditLogger() error {
 	auditPath := s.config.AuditPath
 	if auditPath == "" {
 		auditPath = "/var/log/garmr/audit.log"
+	}
+
+	// "stdout" / "stderr" stream the audit records instead of writing a
+	// local file, so the platform's log pipeline (Nomad/K8s log capture,
+	// vector, promtail, fluent-bit) ships them off-node — the audit trail
+	// is the only record of the mesh-verified principal, and a file on
+	// local disk dies with the allocation. Application logs go to stderr
+	// (zap's production default), so audit-to-stdout keeps the two streams
+	// separable. Rotation settings do not apply; the platform owns
+	// retention.
+	if auditPath == "stdout" || auditPath == "stderr" {
+		w := os.Stdout
+		if auditPath == "stderr" {
+			w = os.Stderr
+		}
+		// auditFile stays nil: Stop() must not close the process streams.
+		s.auditLogger = slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{
+			Level: slog.LevelInfo,
+		}))
+		s.logger.Info("audit logging enabled", zap.String("sink", auditPath))
+		return nil
 	}
 
 	// Create directory if needed
@@ -289,25 +448,36 @@ func (s *Server) initStorageBackend() error {
 // Start starts the HTTP server.
 func (s *Server) Start(ctx context.Context) error {
 	// Load policies from the storage backend wired up in NewServer.
+	//
+	// This fails startup rather than warning. NewServer already documents
+	// that a misconfigured backend must not start; warning here contradicted
+	// that and left the process serving with zero policies, which under
+	// require_match denies everything (and without it allows everything).
 	if s.storageBackend != nil {
 		if err := s.engine.LoadPoliciesFromBackend(ctx, s.storageBackend); err != nil {
-			s.logger.Warn("failed to load policies from storage backend", zap.Error(err))
+			return fmt.Errorf("loading policies from storage backend: %w", err)
 		}
 	}
 
 	errCh := make(chan error, 1)
 
-	// Start HTTP server
+	// Build the server synchronously so s.httpServer is set before anything
+	// can observe it, then serve on a goroutine.
+	srv := s.newHTTPServer()
 	go func() {
-		if err := s.startHTTP(); err != nil && err != http.ErrServerClosed {
+		if err := s.serve(srv); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("HTTP server error: %w", err)
 		}
 	}()
 
-	// Mark as ready
+	// Mark as ready. The policies check is not recorded here: it is derived
+	// live in handleReady from the engine snapshot. Latching it at startup
+	// meant /ready kept reporting the boot-time answer forever — still 200
+	// after a reload emptied the set or every policy was deleted — while
+	// /readyz recomputed correctly, so the two probes contradicted each other
+	// again in the opposite direction.
 	s.mu.Lock()
 	s.ready = true
-	s.checks["policies"] = true
 	s.checks["http"] = true
 	s.mu.Unlock()
 
@@ -317,44 +487,72 @@ func (s *Server) Start(ctx context.Context) error {
 
 	select {
 	case err := <-errCh:
-		return err
+		// Stop() too, or the audit file, storage backend and rate-limiter
+		// goroutine leak whenever the listener fails.
+		return errors.Join(err, s.Stop())
 	case <-ctx.Done():
 		return s.Stop()
 	}
 }
 
 // Stop gracefully shuts down the server.
+//
+// Ordering is load-bearing: in-flight requests are drained BEFORE the
+// dependencies they need are closed. Closing the storage backend, audit sink
+// and rate limiter first (as this used to) meant a reload in flight hit a
+// closed backend, and decisions completing during the drain window lost their
+// audit records.
+//
+// Safe to call more than once — Start calls it on both the ctx.Done() and the
+// serve-error paths.
 func (s *Server) Stop() error {
-	s.logger.Info("shutting down server")
+	var err error
 
-	// Close storage backend
-	if s.storageBackend != nil {
-		if err := s.storageBackend.Close(); err != nil {
-			s.logger.Warn("error closing storage backend", zap.Error(err))
+	s.stopOnce.Do(func() {
+		s.logger.Info("shutting down server")
+
+		// Fail probes first so a load balancer stops sending new work while
+		// the drain runs.
+		s.mu.Lock()
+		s.ready = false
+		s.checks["http"] = false
+		srv := s.httpServer
+		s.mu.Unlock()
+
+		var errs []error
+
+		// 1. Drain in-flight requests.
+		if srv != nil {
+			timeout := s.config.ShutdownTimeout
+			if timeout <= 0 {
+				timeout = 30 * time.Second
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			if shutErr := srv.Shutdown(ctx); shutErr != nil {
+				errs = append(errs, fmt.Errorf("draining HTTP server: %w", shutErr))
+			}
 		}
-	}
 
-	// Close audit log file
-	if s.auditFile != nil {
-		s.auditFile.Close()
-	}
-
-	// Close rate limiter
-	if s.rateLimiter != nil {
-		s.rateLimiter.Close()
-	}
-
-	if s.httpServer != nil {
-		timeout := s.config.ShutdownTimeout
-		if timeout <= 0 {
-			timeout = 30 * time.Second
+		// 2. Only then release what those requests depended on.
+		if s.rateLimiter != nil {
+			s.rateLimiter.Close()
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		return s.httpServer.Shutdown(ctx)
-	}
+		if s.auditFile != nil {
+			if closeErr := s.auditFile.Close(); closeErr != nil {
+				errs = append(errs, fmt.Errorf("closing audit log: %w", closeErr))
+			}
+		}
+		if s.storageBackend != nil {
+			if closeErr := s.storageBackend.Close(); closeErr != nil {
+				errs = append(errs, fmt.Errorf("closing storage backend: %w", closeErr))
+			}
+		}
 
-	return nil
+		err = errors.Join(errs...)
+	})
+
+	return err
 }
 
 // Handler returns the fully-wired HTTP handler (routes + middleware).
@@ -379,7 +577,6 @@ func (s *Server) MarkReady() {
 	if s.checks == nil {
 		s.checks = make(map[string]bool)
 	}
-	s.checks["policies"] = true
 	s.checks["http"] = true
 }
 
@@ -405,15 +602,25 @@ func (s *Server) buildHandler() http.Handler {
 
 	// OpenAPI / Swagger endpoints
 	mux.HandleFunc("/openapi.json", s.handleOpenAPI)
-	mux.HandleFunc("/swagger-ui", s.handleSwaggerUI)
-	mux.HandleFunc("/swagger-ui/", s.handleSwaggerUI)
 
+	// Middleware chain, innermost first. Reading outward the request passes
+	// through: otel -> recovery -> CORS -> rate limit -> auth -> identity -> mux.
+	//
+	// Order matters twice here:
+	//   - CORS must be OUTSIDE auth. Preflight OPTIONS requests carry no
+	//     X-API-Key, so with auth outermost every preflight was answered 401
+	//     with no CORS headers whenever an API key was configured — browsers
+	//     could not call the API at all.
+	//   - Rate limiting must also be outside auth, or unauthenticated floods
+	//     are rejected by auth before the limiter ever sees them, which is
+	//     exactly the traffic worth limiting.
+	// Recovery stays outside both so panics in them still return a 500.
 	var handler http.Handler = s.identityMiddleware(mux)
-	handler = corsMiddleware(handler, s.config.CORSAllowedOrigins)
+	handler = s.authMiddleware(handler)
 	if s.rateLimiter != nil {
 		handler = s.rateLimiter.Middleware(handler)
 	}
-	handler = s.authMiddleware(handler)
+	handler = corsMiddleware(handler, s.config.CORSAllowedOrigins)
 	handler = s.recoveryMiddleware(handler)
 	// otelhttp extracts `traceparent` from the incoming request and starts
 	// a server span covering the whole middleware chain.
@@ -425,24 +632,41 @@ func (s *Server) buildHandler() http.Handler {
 	return handler
 }
 
-func (s *Server) startHTTP() error {
+// newHTTPServer builds the *http.Server and stores it on s.
+//
+// Split from serve() so the assignment happens synchronously in Start rather
+// than inside the serving goroutine: Stop() reads s.httpServer, so assigning
+// it from the goroutine was a race.
+func (s *Server) newHTTPServer() *http.Server {
 	s.logger.Info("registering HTTP handlers")
 
-	s.httpServer = &http.Server{
+	srv := &http.Server{
 		Addr:         s.config.HTTPAddr,
 		Handler:      s.buildHandler(),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadTimeout:  durationOr(s.config.ReadTimeout, 30*time.Second),
+		WriteTimeout: durationOr(s.config.WriteTimeout, 60*time.Second),
+		IdleTimeout:  durationOr(s.config.IdleTimeout, 120*time.Second),
 	}
 
-	if s.config.EnableTLS {
-		s.logger.Info("starting HTTPS server", zap.String("addr", s.config.HTTPAddr))
-		return s.httpServer.ListenAndServeTLS(s.config.TLSCert, s.config.TLSKey)
-	}
+	s.mu.Lock()
+	s.httpServer = srv
+	s.mu.Unlock()
 
+	return srv
+}
+
+// durationOr returns d, or def when d is unset.
+func durationOr(d, def time.Duration) time.Duration {
+	if d > 0 {
+		return d
+	}
+	return def
+}
+
+// serve blocks serving on srv. Only ever called from the Start goroutine.
+func (s *Server) serve(srv *http.Server) error {
 	s.logger.Info("starting HTTP server", zap.String("addr", s.config.HTTPAddr))
-	return s.httpServer.ListenAndServe()
+	return srv.ListenAndServe()
 }
 
 // writeError writes a generic error message to the client and logs the full error server-side.
@@ -452,9 +676,87 @@ func (s *Server) writeError(w http.ResponseWriter, status int, userMsg string, e
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{
+	_ = json.NewEncoder(w).Encode(map[string]string{
 		"error": userMsg,
 	})
+}
+
+// isBodyTooLarge reports whether err came from http.MaxBytesReader.
+func isBodyTooLarge(err error) bool {
+	var maxBytesErr *http.MaxBytesError
+	return errors.As(err, &maxBytesErr)
+}
+
+// bodyErrorStatus maps a request-body read failure to its status code: an
+// over-limit body is 413, anything else is a plain bad request.
+func bodyErrorStatus(err error) int {
+	if isBodyTooLarge(err) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
+}
+
+func bodyErrorMessage(err error) string {
+	if isBodyTooLarge(err) {
+		return "Request body too large"
+	}
+	return "Failed to read request body"
+}
+
+// evaluateErrorStatus maps an engine error to an HTTP status.
+//
+// Everything used to be a 500, which put two very different failures behind
+// one code: input the caller could fix, and the server shedding load. A
+// client sending malformed input could drive the error-rate SLO and the error
+// log without ever learning what was wrong.
+func evaluateErrorStatus(err error) (int, string) {
+	switch {
+	case errors.Is(err, engine.ErrEvaluationUnavailable):
+		// Never started — retry is meaningful, so say so.
+		return http.StatusServiceUnavailable, "Server busy, retry later"
+	case errors.Is(err, engine.ErrInvalidInput):
+		return http.StatusBadRequest, "Invalid input"
+	default:
+		return http.StatusInternalServerError, "Evaluation failed"
+	}
+}
+
+// DefaultEvaluationTimeout bounds a single evaluation when none is configured.
+const DefaultEvaluationTimeout = 10 * time.Second
+
+// DefaultMaxValidateSize caps /v1/validate source when none is configured.
+const DefaultMaxValidateSize = 1 << 20
+
+// maxValidateSize returns the byte cap for /v1/validate bodies: the tighter
+// of the validate-specific cap and the global body cap, so lowering
+// MaxRecvSize still applies everywhere an operator would expect it to.
+func (s *Server) maxValidateSize() int64 {
+	limit := int64(s.config.MaxValidateSize)
+	if limit <= 0 {
+		limit = DefaultMaxValidateSize
+	}
+	if global := int64(s.config.MaxRecvSize); global > 0 && global < limit {
+		return global
+	}
+	return limit
+}
+
+// validateConcurrency bounds concurrent CUE compilations on /v1/validate to
+// min(GOMAXPROCS, 8), so validation cannot outcompete evaluation for CPU.
+func validateConcurrency() int {
+	n := runtime.GOMAXPROCS(0)
+	if n > 8 {
+		n = 8
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// evaluationTimeout returns the configured per-request evaluation budget.
+func (s *Server) evaluationTimeout() time.Duration {
+	return durationOr(s.config.EvaluationTimeout, DefaultEvaluationTimeout)
 }
 
 // HTTP Handlers
@@ -478,14 +780,36 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if !healthy {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	ready := s.ready
-	checks := s.checks
+	// Clone: copying the map reference and encoding it after releasing the
+	// lock races with Start/MarkReady/Stop writing the same map, which is an
+	// unrecoverable "concurrent map read and map write" fatal error that
+	// recoveryMiddleware cannot catch.
+	checks := maps.Clone(s.checks)
 	s.mu.RUnlock()
+
+	if checks == nil {
+		checks = make(map[string]bool)
+	}
+	// Derived live, not latched at startup, so this tracks reloads and
+	// deletes the way /readyz does. PolicyCount reads an atomic snapshot, so
+	// a probe cannot block behind an in-flight evaluation or a reload.
+	checks["policies"] = s.engine.PolicyCount() > 0
+
+	// A failing check means not ready. Reporting 200 while a check is false
+	// made this endpoint disagree with /readyz, which runs the same checks
+	// properly.
+	for _, ok := range checks {
+		if !ok {
+			ready = false
+			break
+		}
+	}
 
 	resp := map[string]interface{}{
 		"ready":  ready,
@@ -496,12 +820,12 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	if !ready {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed", nil)
 		return
 	}
 
@@ -519,32 +843,53 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "Failed to read request body", err)
+		s.writeError(w, bodyErrorStatus(err), bodyErrorMessage(err), err)
 		return
 	}
 
-	// Detect input format from Content-Type header
-	parser := input.NewParser()
-	contentType := r.Header.Get("Content-Type")
-	format := parser.DetectFormatFromContentType(contentType)
-
-	// Parse the request body based on format
-	var req struct {
-		Input         map[string]interface{} `json:"input" yaml:"input"`
-		Namespace     string                 `json:"namespace" yaml:"namespace"`
-		Policies      []string               `json:"policies" yaml:"policies"`
-		Trace         bool                   `json:"trace" yaml:"trace"`
-		IncludePassed bool                   `json:"include_passed" yaml:"include_passed"`
-	}
-
-	// Parse based on detected format
-	parsed, err := parser.Parse(body, format)
+	engineReq, err := parseEvaluateRequest(body, r.Header.Get("Content-Type"))
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid request body", err)
 		return
 	}
+	if engineReq.Input == nil {
+		s.writeError(w, http.StatusBadRequest, "input is required", nil)
+		return
+	}
 
-	// Map parsed data to request struct
+	// Bound the evaluation. Without this the only limit was the per-policy
+	// timeout, which is optional and unset by default, and WriteTimeout —
+	// which expires the connection but never cancels the handler, so the work
+	// (and the memory it holds) continued after the client was gone.
+	ctx, cancel := context.WithTimeout(r.Context(), s.evaluationTimeout())
+	defer cancel()
+
+	result, err := s.engine.Evaluate(ctx, engineReq)
+	if err != nil {
+		status, msg := evaluateErrorStatus(err)
+		s.writeError(w, status, msg, err)
+		return
+	}
+
+	s.auditDecision(r, requestID, engineReq, result, startTime)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Request-Id", requestID)
+	_ = json.NewEncoder(w).Encode(evaluateResponseBody(result, requestID))
+}
+
+// parseEvaluateRequest decodes an evaluate request body (JSON or YAML per
+// the Content-Type) into an engine request. Kept pure so it can be tested
+// without a ResponseWriter. A missing input is NOT an error here — the
+// handler reports it with its own status/message.
+func parseEvaluateRequest(body []byte, contentType string) (*engine.EvaluateRequest, error) {
+	parser := input.NewParser()
+	parsed, err := parser.Parse(body, parser.DetectFormatFromContentType(contentType))
+	if err != nil {
+		return nil, err
+	}
+
+	req := &engine.EvaluateRequest{}
 	if inputData, ok := parsed["input"].(map[string]interface{}); ok {
 		req.Input = inputData
 	}
@@ -558,123 +903,183 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if trace, ok := parsed["trace"].(bool); ok {
-		req.Trace = trace
-	}
 	if includePassed, ok := parsed["include_passed"].(bool); ok {
-		req.IncludePassed = includePassed
+		req.Options.IncludePassed = includePassed
 	}
+	return req, nil
+}
 
-	if req.Input == nil {
-		http.Error(w, "input is required", http.StatusBadRequest)
+// auditDecision writes the decision audit record for one evaluation.
+func (s *Server) auditDecision(r *http.Request, requestID string, req *engine.EvaluateRequest, result *engine.EvaluateResponse, startTime time.Time) {
+	if s.auditLogger == nil {
 		return
 	}
 
-	engineReq := &engine.EvaluateRequest{
-		Input:     req.Input,
-		Namespace: req.Namespace,
-		Policies:  req.Policies,
-		Options: engine.EvaluateOptions{
-			Trace:         req.Trace,
-			IncludePassed: req.IncludePassed,
-		},
-	}
-
-	result, err := s.engine.Evaluate(r.Context(), engineReq)
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "Evaluation failed", err)
-		return
-	}
-
-	// Count violations
 	violations := 0
-	for _, r := range result.Results {
-		if !r.Passed {
+	for _, res := range result.Results {
+		if !res.Passed {
 			violations++
 		}
 	}
 
-	// Write audit log
-	if s.auditLogger != nil {
-		s.auditLogger.Info("decision",
-			"request_id", requestID,
-			"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
-			"decision", decisionToString(result.Decision),
-			"namespace", req.Namespace,
-			"policies_evaluated", result.Metrics.PoliciesEvaluated,
-			"rules_evaluated", result.Metrics.RulesEvaluated,
-			"violations", violations,
-			"duration_ms", time.Since(startTime).Milliseconds(),
-			"source_ip", r.RemoteAddr,
-			"principal", PrincipalFromContext(r.Context()),
-			"trace_id", observability.TraceIDFromContext(r.Context()),
-			"user_agent", r.UserAgent(),
-			"input_kind", req.Input["kind"],
-			"input_name", getNestedString(req.Input, "metadata", "name"),
-		)
-	}
-
-	// Convert to HTTP response
-	resp := map[string]interface{}{
-		"decision":   decisionToString(result.Decision),
-		"request_id": requestID,
-		"results":    make([]map[string]interface{}, len(result.Results)),
-	}
-
-	for i, r := range result.Results {
-		resp["results"].([]map[string]interface{})[i] = map[string]interface{}{
-			"policy_name":      r.PolicyName,
-			"policy_namespace": r.PolicyNamespace,
-			"rule_id":          r.RuleID,
-			"description":      r.RuleDescription,
-			"severity":         severityToString(r.Severity),
-			"passed":           r.Passed,
-			"message":          r.Message,
-			"remediation":      r.Remediation,
-		}
-	}
-
+	// Metrics is set by every Evaluate path today, but the response builder
+	// guards it too — and a panic here would happen after the decision was
+	// computed and before it was written, turning a served request into a 500.
+	policiesEvaluated, rulesEvaluated := 0, 0
 	if result.Metrics != nil {
-		resp["metrics"] = map[string]interface{}{
-			"evaluation_time_ns": result.Metrics.EvaluationTimeNs,
-			"policies_evaluated": result.Metrics.PoliciesEvaluated,
-			"rules_evaluated":    result.Metrics.RulesEvaluated,
-		}
+		policiesEvaluated = result.Metrics.PoliciesEvaluated
+		rulesEvaluated = result.Metrics.RulesEvaluated
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Request-Id", requestID)
-	json.NewEncoder(w).Encode(resp)
+	s.auditLogger.Info("decision",
+		"request_id", auditField(requestID),
+		"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
+		"decision", string(result.Decision),
+		"namespace", auditField(req.Namespace),
+		"policies_evaluated", policiesEvaluated,
+		"rules_evaluated", rulesEvaluated,
+		"violations", violations,
+		"duration_ms", time.Since(startTime).Milliseconds(),
+		"source_ip", r.RemoteAddr,
+		"principal", auditField(PrincipalFromContext(r.Context())),
+		"trace_id", observability.TraceIDFromContext(r.Context()),
+		"user_agent", auditField(r.UserAgent()),
+		"input_kind", auditAny(req.Input["kind"]),
+		"input_name", auditField(engine.NestedString(req.Input, "metadata", "name")),
+	)
 }
 
-// getNestedString safely extracts a nested string value.
-func getNestedString(m map[string]interface{}, keys ...string) string {
-	current := m
-	for i, key := range keys {
-		if i == len(keys)-1 {
-			if val, ok := current[key]; ok {
-				if s, ok := val.(string); ok {
-					return s
-				}
-			}
-			return ""
-		}
-		if next, ok := current[key]; ok {
-			if nextMap, ok := next.(map[string]interface{}); ok {
-				current = nextMap
-			} else {
-				return ""
-			}
-		} else {
-			return ""
+// maxAuditFieldBytes bounds each caller-controlled audit field.
+//
+// Audit records are newline-delimited JSON, and with audit.path set to stdout
+// each record is a single write to a pipe. Writes above PIPE_BUF (4 KiB on
+// Linux) are not atomic, so one caller sending a large User-Agent or
+// X-Request-Id could interleave its record with another's and corrupt exactly
+// the log that is meant to be the authoritative decision trail. 256 bytes
+// keeps a whole record comfortably under that bound.
+const maxAuditFieldBytes = 256
+
+// auditField truncates a caller-controlled string for the audit log, marking
+// any value it shortened so a truncated field is never mistaken for the
+// caller's actual input.
+func auditField(s string) string {
+	if len(s) <= maxAuditFieldBytes {
+		return s
+	}
+	return s[:maxAuditFieldBytes] + "…[truncated]"
+}
+
+// auditAny truncates a value pulled from caller-supplied input, which is only
+// bounded when it happens to be a string.
+func auditAny(v any) any {
+	if s, ok := v.(string); ok {
+		return auditField(s)
+	}
+	return v
+}
+
+// evaluateBody is the /v1/evaluate response. It carries the fields the
+// engine has always computed and `garmr eval --help` promises: summary,
+// evaluation_mode, terminated_early and termination_rule.
+type evaluateBody struct {
+	Decision        engine.Decision    `json:"decision"`
+	RequestID       string             `json:"request_id"`
+	Results         []ruleResultBody   `json:"results"`
+	Summary         summaryBody        `json:"summary"`
+	EvaluationMode  evaluationModeBody `json:"evaluation_mode"`
+	TerminatedEarly bool               `json:"terminated_early"`
+	TerminationRule *terminationBody   `json:"termination_rule,omitempty"`
+	Metrics         *metricsBody       `json:"metrics,omitempty"`
+}
+
+type ruleResultBody struct {
+	PolicyName      string          `json:"policy_name"`
+	PolicyNamespace string          `json:"policy_namespace"`
+	RuleID          string          `json:"rule_id"`
+	Description     string          `json:"description"`
+	Severity        engine.Severity `json:"severity"`
+	Passed          bool            `json:"passed"`
+	Message         string          `json:"message"`
+	Remediation     string          `json:"remediation"`
+}
+
+type summaryBody struct {
+	TotalRules int `json:"total_rules"`
+	Passed     int `json:"passed"`
+	Failed     int `json:"failed"`
+	Skipped    int `json:"skipped"`
+}
+
+// Field order mirrors engine.EvaluationMode so it converts directly.
+type evaluationModeBody struct {
+	FailFast          bool `json:"fail_fast"`
+	ShortCircuited    bool `json:"short_circuited"`
+	TotalRulesInScope int  `json:"total_rules_in_scope"`
+	RulesEvaluated    int  `json:"rules_evaluated"`
+	RulesSkipped      int  `json:"rules_skipped"`
+	DryRun            bool `json:"dry_run"`
+}
+
+type terminationBody struct {
+	PolicyName      string          `json:"policy_name"`
+	PolicyNamespace string          `json:"policy_namespace"`
+	RuleID          string          `json:"rule_id"`
+	Description     string          `json:"description"`
+	Severity        engine.Severity `json:"severity"`
+	Message         string          `json:"message"`
+}
+
+type metricsBody struct {
+	EvaluationTimeNs  int64 `json:"evaluation_time_ns"`
+	PoliciesEvaluated int   `json:"policies_evaluated"`
+	RulesEvaluated    int   `json:"rules_evaluated"`
+}
+
+// evaluateResponseBody converts an engine response into the JSON body.
+func evaluateResponseBody(result *engine.EvaluateResponse, requestID string) evaluateBody {
+	body := evaluateBody{
+		Decision:        result.Decision,
+		RequestID:       requestID,
+		Results:         make([]ruleResultBody, len(result.Results)),
+		Summary:         summaryBody(result.Summary),
+		EvaluationMode:  evaluationModeBody(result.EvaluationMode),
+		TerminatedEarly: result.TerminatedEarly,
+	}
+	for i, r := range result.Results {
+		body.Results[i] = ruleResultBody{
+			PolicyName:      r.PolicyName,
+			PolicyNamespace: r.PolicyNamespace,
+			RuleID:          r.RuleID,
+			Description:     r.RuleDescription,
+			Severity:        r.Severity,
+			Passed:          r.Passed,
+			Message:         r.Message,
+			Remediation:     r.Remediation,
 		}
 	}
-	return ""
+	if tr := result.TerminationRule; tr != nil {
+		body.TerminationRule = &terminationBody{
+			PolicyName:      tr.PolicyName,
+			PolicyNamespace: tr.PolicyNamespace,
+			RuleID:          tr.RuleID,
+			Description:     tr.RuleDescription,
+			Severity:        tr.Severity,
+			Message:         tr.Message,
+		}
+	}
+	if m := result.Metrics; m != nil {
+		body.Metrics = &metricsBody{
+			EvaluationTimeNs:  m.EvaluationTimeNs,
+			PoliciesEvaluated: m.PoliciesEvaluated,
+			RulesEvaluated:    m.RulesEvaluated,
+		}
+	}
+	return body
 }
 
 func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed", nil)
 		return
 	}
 
@@ -683,12 +1088,11 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 		requestID = uuid.New().String()
 	}
 
-	// Apply request body size limit
-	maxSize := int64(s.config.MaxRecvSize)
-	if maxSize <= 0 {
-		maxSize = 1 << 20
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
+	// Validation compiles caller-supplied CUE in a throwaway context, so its
+	// cost is driven by the source's structure, not its length: unification
+	// is exponential in the number of disjunctions. Cap the source well below
+	// MaxRecvSize rather than letting a 16 MiB body reach the compiler.
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxValidateSize())
 
 	var req struct {
 		Policy   string `json:"policy"`
@@ -696,7 +1100,24 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if isBodyTooLarge(err) {
+			s.writeError(w, http.StatusRequestEntityTooLarge, "Request body too large", err)
+			return
+		}
 		s.writeError(w, http.StatusBadRequest, "Invalid JSON in request body", err)
+		return
+	}
+
+	// Validation compiles caller-supplied CUE, so every request would
+	// otherwise get its own concurrent CUE evaluator. Bound the concurrency
+	// and shed the excess.
+	ctx, cancel := context.WithTimeout(r.Context(), s.evaluationTimeout())
+	defer cancel()
+	select {
+	case s.validateSem <- struct{}{}:
+		defer func() { <-s.validateSem }()
+	case <-ctx.Done():
+		s.writeError(w, http.StatusServiceUnavailable, "Server busy, retry later", ctx.Err())
 		return
 	}
 
@@ -707,13 +1128,13 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	// Audit log
 	if s.auditLogger != nil {
 		s.auditLogger.Info("validate",
-			"request_id", requestID,
+			"request_id", auditField(requestID),
 			"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
 			"valid", valid,
 			"error_count", len(errors),
 			"warning_count", len(warnings),
 			"source_ip", r.RemoteAddr,
-			"principal", PrincipalFromContext(r.Context()),
+			"principal", auditField(PrincipalFromContext(r.Context())),
 			"trace_id", observability.TraceIDFromContext(r.Context()),
 		)
 	}
@@ -725,7 +1146,7 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
@@ -741,15 +1162,24 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 				"name":       p.Name,
 				"namespace":  p.Namespace,
 				"rule_count": len(p.Rules),
+				"hash":       p.Hash,
 			}
 		}
 
 		resp := map[string]interface{}{
 			"policies": policyList,
+			// Deterministic digest of the whole loaded set; compare with
+			// `garmr policy digest <dir>` on the git checkout to verify the
+			// server converged on the content CI shipped.
+			"digest": s.engine.PolicySetDigest(),
+			// Which instance answered. Behind a mesh upstream the caller
+			// cannot address instances individually, so without this a digest
+			// read says nothing about the instances it did not happen to hit.
+			"instance_id": InstanceID(),
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 
 	case http.MethodDelete:
 		name := r.URL.Query().Get("name")
@@ -765,14 +1195,14 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 		// Audit log
 		if s.auditLogger != nil {
 			s.auditLogger.Info("policy_delete",
-				"request_id", requestID,
+				"request_id", auditField(requestID),
 				"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
-				"policy_name", name,
-				"policy_namespace", namespace,
+				"policy_name", auditField(name),
+				"policy_namespace", auditField(namespace),
 				"deleted", deleted,
 				"source_ip", r.RemoteAddr,
-				"principal", PrincipalFromContext(r.Context()),
-			"trace_id", observability.TraceIDFromContext(r.Context()),
+				"principal", auditField(PrincipalFromContext(r.Context())),
+				"trace_id", observability.TraceIDFromContext(r.Context()),
 			)
 		}
 
@@ -780,16 +1210,16 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 			"deleted": deleted,
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 
 	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed", nil)
 	}
 }
 
 func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed", nil)
 		return
 	}
 
@@ -799,7 +1229,7 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.storageBackend == nil {
-		http.Error(w, "No policy source configured", http.StatusBadRequest)
+		s.writeError(w, http.StatusBadRequest, "No policy source configured", nil)
 		return
 	}
 
@@ -813,14 +1243,14 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 		// Audit log failure
 		if s.auditLogger != nil {
 			s.auditLogger.Info("policy_reload",
-				"request_id", requestID,
+				"request_id", auditField(requestID),
 				"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
 				"success", false,
 				"error", err.Error(),
 				"reload_time_ms", time.Since(startTime).Milliseconds(),
 				"source_ip", r.RemoteAddr,
-				"principal", PrincipalFromContext(r.Context()),
-			"trace_id", observability.TraceIDFromContext(r.Context()),
+				"principal", auditField(PrincipalFromContext(r.Context())),
+				"trace_id", observability.TraceIDFromContext(r.Context()),
 			)
 		}
 
@@ -836,13 +1266,13 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 	// Audit log success
 	if s.auditLogger != nil {
 		s.auditLogger.Info("policy_reload",
-			"request_id", requestID,
+			"request_id", auditField(requestID),
 			"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
 			"success", true,
 			"policies_loaded", count,
 			"reload_time_ms", time.Since(startTime).Milliseconds(),
 			"source_ip", r.RemoteAddr,
-			"principal", PrincipalFromContext(r.Context()),
+			"principal", auditField(PrincipalFromContext(r.Context())),
 			"trace_id", observability.TraceIDFromContext(r.Context()),
 		)
 	}
@@ -850,11 +1280,16 @@ func (s *Server) handleReloadPolicies(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]interface{}{
 		"success":         true,
 		"policies_loaded": count,
+		"digest":          s.engine.PolicySetDigest(),
 		"reload_time_ms":  time.Since(startTime).Milliseconds(),
 		"storage_type":    s.storageType(),
+		// Identifies which instance this reload actually reached, so a caller
+		// going through a load-balancing mesh upstream can tell whether the
+		// whole fleet converged or it just hit the same instance twice.
+		"instance_id": InstanceID(),
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -877,78 +1312,14 @@ func (s *Server) storageType() string {
 	return "none"
 }
 
-// Helper functions
-
-func decisionToString(d engine.Decision) string {
-	switch d {
-	case engine.DecisionAllow:
-		return "allow"
-	case engine.DecisionDeny:
-		return "deny"
-	case engine.DecisionWarn:
-		return "warn"
-	default:
-		return "unknown"
-	}
-}
-
-func severityToString(s engine.Severity) string {
-	switch s {
-	case engine.SeverityCritical:
-		return "critical"
-	case engine.SeverityHigh:
-		return "high"
-	case engine.SeverityMedium:
-		return "medium"
-	case engine.SeverityLow:
-		return "low"
-	case engine.SeverityInfo:
-		return "info"
-	default:
-		return "unknown"
-	}
-}
-
-// handleOpenAPI serves the OpenAPI specification
+// handleOpenAPI serves the OpenAPI specification. There is deliberately no
+// bundled Swagger UI page: the old one loaded swagger-ui-dist from
+// unpkg.com, which an egress-restricted mesh silently breaks — point any
+// local OpenAPI viewer at this spec instead.
 func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(openAPISpec)
+	_, _ = w.Write(openAPISpec)
 }
-
-// handleSwaggerUI serves a simple Swagger UI page
-func (s *Server) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(swaggerUIHTML))
-}
-
-// Swagger UI HTML (uses CDN)
-var swaggerUIHTML = `<!DOCTYPE html>
-<html>
-<head>
-  <title>Garmr - API Documentation</title>
-  <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
-  <style>
-    html { box-sizing: border-box; overflow-y: scroll; }
-    *, *:before, *:after { box-sizing: inherit; }
-    body { margin: 0; background: #fafafa; }
-    .topbar { display: none; }
-  </style>
-</head>
-<body>
-  <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-  <script>
-    window.onload = function() {
-      SwaggerUIBundle({
-        url: "/openapi.json",
-        dom_id: '#swagger-ui',
-        presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
-        layout: "BaseLayout"
-      });
-    };
-  </script>
-</body>
-</html>`
 
 // recoveryMiddleware recovers from panics in downstream handlers,
 // logs them with the request ID and stack trace, and returns a 500.
@@ -1038,6 +1409,12 @@ func corsMiddleware(h http.Handler, allowedOrigins []string) http.Handler {
 	})
 }
 
+// probePaths are the liveness/readiness endpoints an orchestrator polls.
+// They are exempt from both authentication and rate limiting: a 401 or 429
+// here is indistinguishable from an unhealthy instance, so either one gets a
+// working server pulled out of the mesh.
+var probePaths = []string{"/health", "/ready", "/healthz", "/readyz", "/livez"}
+
 // authMiddleware provides API key authentication.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1056,9 +1433,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Always exempt health/ready endpoints
-		if r.URL.Path == "/health" || r.URL.Path == "/ready" || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/livez" {
-			next.ServeHTTP(w, r)
-			return
+		for _, path := range probePaths {
+			if r.URL.Path == path {
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
 
 		// Check API key
@@ -1078,7 +1457,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		if subtle.ConstantTimeCompare([]byte(providedKey), []byte(s.config.APIKey)) == 0 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]string{
+			_ = json.NewEncoder(w).Encode(map[string]string{
 				"error": "invalid or missing API key",
 			})
 			return

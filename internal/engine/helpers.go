@@ -1,10 +1,9 @@
 package engine
 
 import (
-	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
+	"time"
 )
 
 // stringInSlice checks if a string is in a slice.
@@ -29,98 +28,74 @@ func anyTagMatches(ruleTags, filterTags []string) bool {
 	return false
 }
 
-// valuesEqual performs type-aware comparison of two values, handling numeric type coercion.
-func valuesEqual(a, b any) bool {
-	// Try numeric comparison first
-	aFloat, aIsNum := toFloatOk(a)
-	bFloat, bIsNum := toFloatOk(b)
-	if aIsNum && bIsNum {
-		return aFloat == bFloat
-	}
-
-	// Fall back to string comparison
-	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
-}
-
-// toFloatOk attempts to convert a value to float64, returning whether the conversion succeeded.
-func toFloatOk(v any) (float64, bool) {
+// builtinResultTruthy reports whether a builtin's return value counts as a
+// pass when the rule declares no `expect:`. It returns a reason when the
+// result is falsey.
+//
+// The previous implementation only handled bool and nil, so every other type
+// fell through to "pass" — `func: {name: "len", args: [...]}` returning 0
+// passed, making the assertion a silent no-op.
+func builtinResultTruthy(v any) (bool, string) {
 	switch val := v.(type) {
-	case float64:
-		return val, true
-	case float32:
-		return float64(val), true
-	case int:
-		return float64(val), true
-	case int64:
-		return float64(val), true
-	case int32:
-		return float64(val), true
-	case int16:
-		return float64(val), true
-	case int8:
-		return float64(val), true
-	case uint:
-		return float64(val), true
-	case uint64:
-		return float64(val), true
-	case uint32:
-		return float64(val), true
-	case uint16:
-		return float64(val), true
-	case uint8:
-		return float64(val), true
+	case nil:
+		return false, "returned nil"
+	case bool:
+		if !val {
+			return false, "returned false"
+		}
+		return true, ""
 	case string:
-		f, err := strconv.ParseFloat(val, 64)
-		if err != nil {
-			return 0, false
+		if val == "" {
+			return false, "returned an empty string"
 		}
-		return f, true
-	default:
-		return 0, false
+		return true, ""
+	case time.Time:
+		if val.IsZero() {
+			return false, "returned the zero time"
+		}
+		return true, ""
+	case []any:
+		if len(val) == 0 {
+			return false, "returned an empty list"
+		}
+		return true, ""
+	case map[string]any:
+		if len(val) == 0 {
+			return false, "returned an empty struct"
+		}
+		return true, ""
 	}
+
+	// Numeric kinds: zero is falsey. "0" is a non-empty string and stays
+	// truthy, handled by the case above.
+	if f, ok := asNumber(v); ok {
+		if f == 0 {
+			return false, "returned 0"
+		}
+		return true, ""
+	}
+
+	return true, ""
 }
 
-// getCompiledRegex returns a compiled regex from the cache, compiling and caching it if needed.
-func (e *Engine) getCompiledRegex(pattern string) (*regexp.Regexp, error) {
-	if cached, ok := e.regexCache.Load(pattern); ok {
-		return cached.(*regexp.Regexp), nil
-	}
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return nil, err
-	}
-	e.regexCache.Store(pattern, re)
-	return re, nil
-}
-
-// matchesPatternCached checks if a value matches a pattern (supports * wildcard)
-// using the engine's regex cache.
+// matchesPatternCached reports whether value matches a selector pattern,
+// case-insensitively. "*" in a pattern matches any run of characters.
 func (e *Engine) matchesPatternCached(pattern, value string) bool {
-	// Case-insensitive comparison
-	pattern = strings.ToLower(pattern)
-	value = strings.ToLower(value)
-
-	// Exact match
-	if pattern == value {
-		return true
+	if !strings.Contains(pattern, "*") {
+		return strings.EqualFold(pattern, value)
 	}
-
-	// Wildcard matching
-	if strings.Contains(pattern, "*") {
-		// Convert glob pattern to regex
-		regexPattern := "^" + strings.ReplaceAll(regexp.QuoteMeta(pattern), "\\*", ".*") + "$"
-		re, err := e.getCompiledRegex(regexPattern)
-		if err != nil {
-			return false
-		}
-		return re.MatchString(value)
+	regexPattern := "^(?i:" + strings.ReplaceAll(regexp.QuoteMeta(pattern), `\*`, ".*") + ")$"
+	re, err := sharedRegexCache.get(regexPattern)
+	if err != nil {
+		return false
 	}
-
-	return false
+	return re.MatchString(value)
 }
 
-// getStringField safely extracts a string field from nested maps.
-func getStringField(m map[string]any, keys ...string) string {
+// NestedString safely extracts a string field from nested maps. Exported so
+// the server's audit logging resolves input fields with the same traversal
+// the engine's target matching uses.
+func NestedString(m map[string]any, keys ...string) string {
 	current := m
 	for i, key := range keys {
 		if i == len(keys)-1 {
@@ -144,37 +119,4 @@ func getStringField(m map[string]any, keys ...string) string {
 		}
 	}
 	return ""
-}
-
-// getMapField safely extracts a map field from nested maps.
-func getMapField(m map[string]any, keys ...string) map[string]string {
-	current := m
-	for i, key := range keys {
-		if i == len(keys)-1 {
-			// Last key - get the map
-			if val, ok := current[key]; ok {
-				if mapVal, ok := val.(map[string]any); ok {
-					result := make(map[string]string)
-					for k, v := range mapVal {
-						if s, ok := v.(string); ok {
-							result[k] = s
-						}
-					}
-					return result
-				}
-			}
-			return nil
-		}
-		// Navigate deeper
-		if next, ok := current[key]; ok {
-			if nextMap, ok := next.(map[string]any); ok {
-				current = nextMap
-			} else {
-				return nil
-			}
-		} else {
-			return nil
-		}
-	}
-	return nil
 }

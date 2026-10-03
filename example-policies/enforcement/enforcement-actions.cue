@@ -160,21 +160,21 @@ exceptionPolicy: {
 					name:   "legacy-monitoring"
 					reason: "Legacy monitoring stack uses upstream images during migration"
 					match: {
-						kind:       "Pod"
+						kind: "Pod"
 						namespaces: ["monitoring"]
 						labels: {
 							"legacy": "true"
 						}
 					}
-					expiry:     "2026-06-30T00:00:00Z"
+					expiry: "2026-06-30T00:00:00Z"
 					approvedBy: ["platform-lead@example.com", "security-team@example.com"]
-					ticket:     "OPS-4521"
+					ticket: "OPS-4521"
 				},
 				{
 					name:   "ci-tooling"
 					reason: "CI runners use upstream tool images"
 					match: {
-						kind:       "Pod"
+						kind: "Pod"
 						namespaces: ["ci"]
 					}
 					expiry: "2026-12-31T00:00:00Z"

@@ -14,14 +14,19 @@ Complete HTTP API reference for Garmr.
 http://localhost:8080
 ```
 
-## OpenAPI / Swagger
+## OpenAPI Specification
 
-Interactive API documentation is available at:
+The OpenAPI 3.0 specification is embedded in the server binary (source: `internal/server/openapi.json`) and served at `/openapi.json`.
 
-- **Swagger UI**: [http://localhost:8080/swagger-ui](http://localhost:8080/swagger-ui)
-- **OpenAPI Spec**: [http://localhost:8080/openapi.json](http://localhost:8080/openapi.json)
+There is deliberately no bundled Swagger UI page: the server serves machine callers inside an egress-restricted mesh, and the old page loaded its JavaScript from a CDN, which silently broke there. To browse the API interactively, point any local OpenAPI viewer at the spec:
 
-The OpenAPI 3.0 specification is embedded in the server binary (source: `internal/server/openapi.json`) and served at `/openapi.json` — there is no separate spec file to fetch from the repository.
+```bash
+# Run Swagger UI locally against a running server
+docker run --rm -p 8081:8080 -e SWAGGER_JSON_URL=http://localhost:8080/openapi.json swaggerapi/swagger-ui
+
+# Or render the committed spec straight from the repo
+npx @redocly/cli preview-docs internal/server/openapi.json
+```
 
 ## Authentication
 
@@ -69,12 +74,19 @@ curl http://localhost:8080/livez
 
 #### GET /readyz
 
-Readiness probe — runs the health checks (with a short timeout) to determine whether the server can serve traffic.
+Readiness probe — runs the in-process readiness checks (with a short timeout)
+to determine whether the server can serve traffic.
+
+Readiness checks are deliberately cheap. Checks that make a network round trip
+— notably the storage backend — run only on `/health/deep`, because the
+kubelet polls this endpoint every few seconds and probing should not generate
+external traffic.
 
 **Response:**
 
 - `200 OK` - Server is ready
-- `503 Service Unavailable` - Server is not ready
+- `503 Service Unavailable` - Server is not ready (including when zero
+  policies are loaded)
 
 ```bash
 curl http://localhost:8080/readyz
@@ -84,10 +96,24 @@ curl http://localhost:8080/readyz
 
 #### GET /health/deep
 
-Comprehensive health check, including dependency checks such as the storage backend. Intended for debugging and monitoring, not for probes.
+Comprehensive health check. Runs every readiness check *plus* the dependency
+checks, including a real round trip to the storage backend — in a
+shared-volume deployment this is the endpoint that tells you whether the
+policy volume is still mounted and readable. Intended for operators and
+monitoring, not for probes.
+
+**Response:**
+
+- `200 OK` - Every check healthy (per-check detail in the body)
+- `503 Service Unavailable` - One or more checks degraded or unhealthy
+
+Unlike the probe endpoints (`/healthz`, `/readyz`, `/livez`), this endpoint
+is **not** auth-exempt: when `auth.api_key` is set, callers must present it.
+Probes can't carry credentials; this endpoint performs storage I/O on every
+call, so it is deliberately gated.
 
 ```bash
-curl http://localhost:8080/health/deep
+curl -f http://localhost:8080/health/deep
 ```
 
 ---
@@ -106,7 +132,7 @@ Legacy endpoints kept for backwards compatibility.
 }
 ```
 
-**GET /ready** returns `{"ready": ..., "checks": ...}` with `200 OK` when ready, `503 Service Unavailable` otherwise.
+**GET /ready** returns `{"ready": ..., "checks": ...}` with `200 OK` when ready, `503 Service Unavailable` otherwise. A failing entry in `checks` makes the endpoint report 503, so it agrees with `/readyz`.
 
 ```bash
 curl http://localhost:8080/health
@@ -156,7 +182,6 @@ Evaluate input against loaded policies.
   },
   "namespace": "security",
   "policies": ["security/container-security"],
-  "trace": false,
   "include_passed": false
 }
 ```
@@ -166,7 +191,6 @@ Evaluate input against loaded policies.
 | `input` | object | Resource to evaluate (required) | |
 | `namespace` | string | Policy namespace filter | (all) |
 | `policies` | []string | Specific policies to evaluate | (all matching) |
-| `trace` | bool | Include evaluation trace | `false` |
 | `include_passed` | bool | Include passed rules | `false` |
 
 **Response:**
@@ -183,9 +207,25 @@ Evaluate input against loaded policies.
       "description": "Containers must not run as root",
       "severity": "high",
       "passed": false,
-      "message": "Container is running as root"
+      "message": "Container is running as root",
+      "remediation": "Set securityContext.runAsNonRoot: true"
     }
   ],
+  "summary": {
+    "total_rules": 8,
+    "passed": 7,
+    "failed": 1,
+    "skipped": 0
+  },
+  "evaluation_mode": {
+    "dry_run": false,
+    "fail_fast": false,
+    "short_circuited": false,
+    "total_rules_in_scope": 8,
+    "rules_evaluated": 8,
+    "rules_skipped": 0
+  },
+  "terminated_early": false,
   "metrics": {
     "evaluation_time_ns": 5234567,
     "policies_evaluated": 2,
@@ -199,7 +239,31 @@ Evaluate input against loaded policies.
 | `decision` | string | `allow`, `deny`, or `warn` |
 | `request_id` | string | Request ID (from header or generated) |
 | `results` | []object | Rule evaluation results |
+| `summary` | object | Rule outcome counts: `total_rules`, `passed`, `failed`, `skipped` |
+| `evaluation_mode` | object | How the evaluation ran, and how much of the rule set it reached |
+| `terminated_early` | bool | True when fail-fast stopped the evaluation |
+| `termination_rule` | object | The rule that triggered fail-fast; present only when `terminated_early` is true |
 | `metrics` | object | Evaluation metrics |
+
+Each entry in `results` carries `policy_name`, `policy_namespace`, `rule_id`,
+`description`, `severity`, `passed`, `message`, and `remediation` — the
+operator-facing hint for fixing the violation, which `garmr eval` renders
+beneath each failure.
+
+A partial evaluation is not the same as a clean one: check
+`evaluation_mode.rules_skipped` and `terminated_early` before treating an
+`allow` as full coverage.
+
+**System results.** Two failures come from the engine rather than a policy,
+and use the reserved `__system__` namespace so they cannot be confused with a
+policy verdict:
+
+| `policy_name` | Meaning |
+|---------------|---------|
+| `policy-match` | No policy targeted the input, and `require_match` is on |
+| `policy-timeout` | A policy exceeded `spec.evaluation.timeout`, or could not be evaluated |
+
+Both deny. Rules that never ran are not evidence of compliance.
 
 **Response Headers:**
 
@@ -275,11 +339,24 @@ List loaded policies.
     {
       "name": "container-security",
       "namespace": "security",
-      "rule_count": 5
+      "rule_count": 5,
+      "hash": "9f2b...c41e"
     }
-  ]
+  ],
+  "digest": "1da2206c649e53e18f3a44858694d96c2927e7dd0f064f27934d16066773eb76",
+  "instance_id": "a1b2c3d4-alloc"
 }
 ```
+
+`digest` is a deterministic sha256 over the whole loaded policy set. Compare
+it with `garmr policy digest <dir>` run on the git checkout to confirm the
+server converged on exactly the content that was shipped; `hash` is the
+per-policy equivalent.
+
+`instance_id` names the instance that answered. Behind a service-mesh
+upstream every call load-balances across instances, so a single response
+describes one instance rather than the fleet — collect these across repeated
+calls (or use `garmr policy reload --converge`) to verify all of them agree.
 
 **Examples:**
 
@@ -322,10 +399,17 @@ Reload policies from disk (hot reload).
 {
   "success": true,
   "policies_loaded": 14,
+  "digest": "1da2206c649e53e18f3a44858694d96c2927e7dd0f064f27934d16066773eb76",
   "reload_time_ms": 16,
-  "storage_type": "filesystem"
+  "storage_type": "filesystem",
+  "instance_id": "a1b2c3d4-alloc"
 }
 ```
+
+Reload mutates the one instance that receives the request. `digest` and
+`instance_id` are what make a fleet-wide reload verifiable — see
+`garmr policy reload --converge` for reloading through a mesh upstream that
+load-balances.
 
 **Example:**
 
@@ -374,7 +458,12 @@ Validate a policy without loading it.
 ```
 
 Error objects carry `message` and `code`, plus `line`, `column`, and
-`filename` when position information is available.
+`filename` when position information is available. `code` is `PARSE_ERROR`
+(not valid CUE), `SCHEMA_ERROR` (does not match the policy schema), or
+`COMPILE_ERROR` (matches the schema but the loader would still reject it:
+an invalid regex or semver literal, duplicate rule ids, an exception that
+matches everything). Validation applies exactly the checks the server runs
+when it loads policies.
 
 **Example:**
 
@@ -390,13 +479,12 @@ curl -X POST http://localhost:8080/v1/validate \
 
 ## Error Responses
 
-All errors return a JSON response:
+Every error — regardless of endpoint or status code — returns the same JSON
+shape:
 
 ```json
 {
-  "error": "error message",
-  "code": "ERROR_CODE",
-  "details": {}
+  "error": "error message"
 }
 ```
 
@@ -405,9 +493,12 @@ All errors return a JSON response:
 | Code | Meaning |
 |------|---------|
 | 200 | Success |
-| 400 | Bad Request (invalid input) |
-| 404 | Not Found |
-| 500 | Internal Server Error |
+| 400 | Bad Request (malformed body, missing `input`, no policy source configured) |
+| 401 | Unauthorized (API key configured but missing or wrong) |
+| 405 | Method Not Allowed |
+| 413 | Request Entity Too Large (body exceeds the server's receive limit) |
+| 429 | Too Many Requests (rate limited; `Retry-After` and `X-RateLimit-*` headers are set) |
+| 500 | Internal Server Error (including a reload that failed — the previous policy set keeps serving) |
 
 ---
 

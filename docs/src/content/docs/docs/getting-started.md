@@ -77,9 +77,9 @@ curl -s -X POST http://localhost:8080/v1/evaluate \
 
 ### Using the CLI
 
-The `garmr` CLI is a thin client over the same REST API — `garmr eval`, `garmr validate`, and the `garmr policy` management subcommands all require a running server. By default the CLI targets `http://localhost:8080`; override with `--server` or the `GARMR_SERVER` environment variable.
+The `garmr` CLI is a thin client over the same REST API. `garmr eval` and the `garmr policy list`/`get`/`delete`/`reload` subcommands require a running server. By default the CLI targets `http://localhost:8080`; override with `--server` or the `GARMR_SERVER` environment variable.
 
-Only a few commands run entirely locally without a server: `garmr test`, `garmr docs generate`, and `garmr policy lock`/`validate-lock`/`diff`.
+These commands run entirely locally, with no server needed: `garmr validate` (add `--remote` to validate against a server instead), `garmr policy digest`, `garmr test`, `garmr docs generate`, and `garmr policy lock`/`validate-lock`/`diff`. That is what lets a CI job validate a checkout and compute its policy-set digest before anything is deployed.
 
 ## Example Test Data
 
@@ -301,10 +301,10 @@ Generate markdown documentation from policies (runs locally, no server needed):
 
 ```bash
 # Generate docs for all policies (recursive by default)
-./bin/garmr docs generate ./example-policies --output ./docs/policies
+./bin/garmr docs generate ./example-policies --out-dir ./docs/policies
 
 # Explicit format (only generic-markdown is currently supported)
-./bin/garmr docs generate ./example-policies --format generic-markdown --output ./docs/policies
+./bin/garmr docs generate ./example-policies --format generic-markdown --out-dir ./docs/policies
 ```
 
 ## Configuration File Reference
@@ -318,11 +318,8 @@ http_addr: ":8080"
 # Policy loading
 policy_dir: "/policies"
 
-# TLS (optional)
-tls:
-  enabled: false
-  cert: "/path/to/cert.pem"
-  key: "/path/to/key.pem"
+# Transport security: Garmr serves plain HTTP only. TLS/mTLS is the
+# service mesh's (or a fronting proxy's) job.
 
 # Logging
 log:
@@ -331,7 +328,7 @@ log:
 
 # Storage backend (optional)
 storage:
-  type: "filesystem"  # filesystem, s3
+  type: "filesystem"  # the only implemented backend
 ```
 
 ## Troubleshooting
@@ -349,7 +346,7 @@ lsof -i :8080
 ### Policies not loading
 
 ```bash
-# Check policy syntax (requires a running server; accepts files or directories)
+# Check policy syntax (runs locally; accepts files or directories)
 ./bin/garmr validate ./example-policies
 
 # Enable debug logging

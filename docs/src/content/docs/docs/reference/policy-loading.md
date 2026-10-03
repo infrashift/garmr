@@ -1,6 +1,6 @@
 ---
 title: "Policy Loading"
-description: "Policy loading architecture and hot-reload strategies"
+description: "How Garmr discovers, loads, and reloads policies"
 sidebar:
   order: 1
   label: "Policy Loading"
@@ -12,307 +12,145 @@ Garmr is designed to be deployed in containerized environments where policies ar
 
 ## Directory Structure
 
+The loader walks the tree recursively; each directory containing `.cue`
+files is loaded as a CUE package, and the walk continues into that
+directory's subdirectories. The layout below is a convention, not a
+mechanism — directory names carry no meaning to the loader.
+
+Nesting is unlimited, and a directory may hold both policies of its own and
+subdirectories holding more:
+
+```
+/policies/
+└── security/
+    ├── base.cue                    # loaded
+    └── k8s/
+        ├── pod.cue                 # also loaded
+        └── rbac/
+            └── role.cue            # also loaded
+```
+
+`testdata/` directories are skipped, as are dotfiles, `node_modules`,
+`vendor`, and `cue.mod`. CUE excludes `*_test.cue` files itself. This
+matches the storage backend's default exclude patterns, so what the loader
+enforces and what `/health/deep` reports agree.
+
 ```
 /policies/                          # Root directory (configurable)
-├── production/                     # Namespace: production
+├── production/
 │   ├── release-gate.cue           # Policy: release-gate
-│   ├── release-gate.cue.lock      # Lock file (optional)
-│   └── security/
-│       └── sbom-policy.cue        # Policy: sbom-policy
-├── staging/                        # Namespace: staging
+│   └── release-gate.cue.lock      # Lock file (repo-side review gate)
+├── staging/
 │   └── release-gate.cue
-├── shared/                         # Namespace: shared
-│   └── definitions.cue            # Shared definitions
-└── release-pipeline/               # Policy Set
-    ├── policyset.cue              # Manifest
-    ├── definitions.cue
+└── release/
+    ├── definitions.cue            # Shared definitions (same CUE package)
     ├── dev-release.cue
     ├── test-release.cue
     └── prod-release.cue
 ```
 
-## Configuration (CUE)
-
-Garmr uses CUE for its own configuration, ensuring type safety:
-
-```cue
-// /etc/garmr/config.cue
-{
-    apiVersion: "config.garmr.io/v1"
-
-    server: {
-        http: address: ":8080"
-    }
-
-    policies: {
-        rootDir: "/policies"
-
-        namespaceStrategy: {
-            mode: "hybrid"      // Use directory, allow override
-            directoryDepth: 0   // First subdir is namespace
-        }
-
-        reload: {
-            enabled: true
-            strategy: {
-                mode: "watch"   // or "poll", "ondemand", "jit"
-            }
-        }
-    }
-
-    engine: {
-        parallelRules: true
-        cache: {
-            enabled: true
-            size: 10000
-            ttl: "60s"
-        }
-    }
-}
-```
-
 ## Namespace Resolution
 
-| Mode | Behavior |
-|------|----------|
-| `directory` | Namespace from directory structure at configured depth |
-| `explicit` | Namespace must be in policy `metadata.namespace` |
-| `hybrid` | Use metadata if present, else derive from directory |
-
-### Examples
-
-```
-Path: /policies/production/release-gate.cue
-Mode: directory, depth=0
-Result: namespace=production, name=release-gate
-
-Path: /policies/team-a/security/sbom.cue
-Mode: directory, depth=0
-Result: namespace=team-a, name=sbom
-
-Path: /policies/team-a/security/sbom.cue
-Mode: directory, depth=1
-Result: namespace=security, name=sbom
-```
-
-## Hot Reload Strategies
-
-### 1. Watch Mode (Default)
-
-Uses file system notifications (inotify/fsnotify).
+A policy's namespace comes from exactly one place: `metadata.namespace` in
+the policy document, defaulting to `"default"` when absent. The directory
+structure never influences the namespace — organizing directories by
+namespace (as above) is a readability convention that the loader does not
+enforce or read.
 
 ```cue
-reload: strategy: mode: "watch"
-```
-
-**Pros:**
-- Immediate detection (~ms latency)
-- Low CPU usage
-
-**Cons:**
-- May not work across all mount types in containers
-- inotify limits may be hit with many files
-
-**Best for:** Development, VMs with local storage
-
-### 2. Poll Mode
-
-Periodically scans directory for changes.
-
-```cue
-reload: strategy: {
-    mode: "poll"
-    pollInterval: "5s"
+my_policy: {
+	apiVersion: "policy.garmr.io/v1"
+	kind: "Policy"
+	metadata: {
+		name:      "release-gate"
+		namespace: "release"   // the only source of the namespace
+	}
+	// ...
 }
 ```
 
-**Pros:**
-- Works with any mount type
-- Simple, predictable
+Policies are keyed by `namespace/name`. Two documents with the same
+`metadata.name` in different directories collide unless their namespaces
+differ, and a collision fails the load: the same `namespace/name` declared in
+two files is rejected rather than letting one silently win.
 
-**Cons:**
-- Higher latency (up to pollInterval)
-- More I/O operations
+## Reloading Policies
 
-**Best for:** Containers with mounted volumes, NFS
+Reload is **explicit**. Garmr does not watch the filesystem and does not poll.
 
-### 3. On-Demand Mode (Lock Files)
-
-Checks lock file checksum before evaluation.
-
-```cue
-reload: strategy: {
-    mode: "ondemand"
-    lockFiles: {
-        enabled: true
-        extension: ".lock"
-    }
-}
+```bash
+curl -X POST http://localhost:8080/v1/policies/reload
 ```
 
-**Lock file format:**
-```json
-{
-    "checksum": "sha256:abc123...",
-    "version": "2.5.0",
-    "updatedAt": "2024-12-06T10:00:00Z",
-    "updatedBy": "ci-pipeline"
-}
-```
+The reload compiles a complete new policy set in a fresh CUE context and swaps
+it in atomically: in-flight evaluations finish against the old set, and if the
+new set fails to compile or validate the old one stays live. A reload never leaves the
+server serving a partially-loaded policy set.
 
-**Flow:**
-1. Request arrives for policy `release-gate`
-2. Garmr reads `release-gate.cue.lock`
-3. Compares lock checksum with cached policy checksum
-4. If match -- use cached policy
-5. If mismatch -- reload policy, update cache
+### In Kubernetes
 
-**Pros:**
-- Explicit version control
-- Git-friendly (lock files can be committed)
-- Works with any CI/CD pipeline
+You usually do not need to call the endpoint. The Helm chart stamps a
+`checksum/config` annotation onto the Deployment, so editing the ConfigMap
+rolls the pods, and each new pod loads the new policies at startup.
 
-**Cons:**
-- Requires lock file management
-- Slight overhead per evaluation
+For policies synced from object storage, an init container re-syncs on every
+pod start — so a rollout is also the reload mechanism. See
+[Policy Storage](/garmr/docs/advanced/storage-backends/).
 
-**Best for:** GitOps workflows, strict version control
+### Startup behaviour
 
-### 4. JIT Mode (Just-In-Time)
+A policy set that cannot be loaded **fails startup**. Besides CUE syntax and
+schema errors (an unknown field or a misspelled operator), the loader rejects
+an expression that does not set exactly one operator, a duplicate rule id
+within a policy, an exception whose `match` narrows nothing, an exception
+`expiry` that is not RFC3339, a `spec.evaluation.timeout` that is not a Go
+duration, and the same `namespace/name` declared twice. `garmr validate` and
+`/v1/validate` apply exactly these checks. A server with zero
+policies loaded reports `503` on `/readyz` and `/ready`. Running with no
+policies is not a safe default: under `require_match` (the default) it denies
+everything, and without it, allows everything.
 
-Loads policy from disk immediately before evaluation.
+## Multi-file policies
 
-```cue
-reload: strategy: {
-    mode: "jit"
-    jitCache: {
-        enabled: true
-        ttl: "5s"      // 0s = always read from disk
-    }
-}
-```
-
-**Flow:**
-1. Request arrives for policy `release-gate`
-2. Check JIT cache (if enabled and TTL > 0)
-3. If cache miss or expired -- read from disk
-4. Evaluate policy
-5. Update JIT cache
-
-**Pros:**
-- Always gets latest policy
-- Simple mental model
-- Good for frequently changing policies
-
-**Cons:**
-- Higher I/O per evaluation
-- Potential latency variance
-
-**Best for:** Development, testing, policies that change frequently
-
-## Recommendation by Deployment Type
-
-| Deployment | Recommended Mode | Rationale |
-|------------|-----------------|-----------|
-| **Development** | `watch` | Immediate feedback |
-| **Kubernetes (ConfigMap)** | `poll` (5s) | ConfigMaps don't trigger inotify reliably |
-| **Kubernetes (PVC)** | `watch` | Works with persistent volumes |
-| **Docker/Podman** | `poll` (5s) | Bind mounts may not trigger inotify |
-| **GitOps/ArgoCD** | `ondemand` | Version control with lock files |
-| **High-frequency updates** | `jit` (ttl=5s) | Balance freshness vs I/O |
-
-## Policy Sets
-
-For complex policies spanning multiple files:
+A policy file may declare several policies as top-level fields, and a
+namespace directory may hold many files. CUE's own package mechanism handles
+sharing between them: put files in the same package and reference shared
+definitions directly.
 
 ```
-/policies/release-pipeline/
-├── policyset.cue          # Manifest
-├── definitions.cue        # Shared definitions (#RulePriority, etc.)
-├── input-schema.cue       # #ReleaseInput schema
-├── dev-release.cue        # Dev environment policy
-├── test-release.cue       # Test environment policy
-├── acc-release.cue        # Acceptance environment policy
-└── prod-release.cue       # Production environment policy
+/policies/release/
+├── definitions.cue     # shared _approvalGroups, _severityMap, ...
+├── dev-release.cue
+├── test-release.cue
+└── prod-release.cue
 ```
 
-### Manifest (policyset.cue)
+All four files are loaded as one CUE package, so `dev-release.cue` can use a
+definition declared in `definitions.cue` without any Garmr-specific manifest.
 
-```cue
-{
-    apiVersion: "policy.garmr.io/v1"
-    kind: "PolicySet"
-    metadata: {
-        name: "release-pipeline"
-        namespace: "release"
-        version: "2.0.0"
-    }
-    spec: {
-        include: [
-            "definitions.cue",
-            "input-schema.cue",
-            "dev-release.cue",
-            "test-release.cue",
-            "acc-release.cue",
-            "prod-release.cue",
-        ]
-
-        // Shared definitions unified with each policy
-        definitions: {
-            _approvalGroups: {
-                prod: ["release-managers"]
-            }
-        }
-
-        evaluationOrder: "dependency"
-
-        policies: [{
-            file: "prod-release.cue"
-            requires: ["acc-release.cue"]
-        }]
-    }
-}
-```
-
-### Benefits
-
-1. **Modularity** - Split large policies into focused files
-2. **Reuse** - Share definitions across policies
-3. **Versioning** - Version the entire set as a unit
-4. **Dependencies** - Express evaluation order
-
-### When NOT to Use Policy Sets
-
-- Simple, single-file policies
-- Policies that don't share definitions
-- When you want maximum loading flexibility
+:::note[No `policyset.cue` manifest]
+Earlier drafts of this page described a `kind: "PolicySet"` manifest with
+`include` ordering, `evaluationOrder: "dependency"`, and per-policy `requires`
+dependencies. None of it was implemented, and `requires` was separately
+decided against (see `TODO.md`). The schema describing it has been removed.
+Use CUE packages, as above.
+:::
 
 ## Container Deployment Example
 
-### Dockerfile
-
-```dockerfile
-FROM gcr.io/distroless/static:nonroot
-
-COPY garmr /usr/local/bin/garmr
-COPY config.cue /etc/garmr/config.cue
-
-# Policies are mounted at runtime
-VOLUME /policies
-
-EXPOSE 8080
-
-ENTRYPOINT ["/usr/local/bin/garmr", "serve", "--config", "/etc/garmr/config.cue"]
-```
+The repository's `Containerfile` builds the production image (`make
+docker-build`): it packages `garmr-server` (the server binary — there is no
+`garmr serve` subcommand; `garmr` is the CLI) with a YAML config at
+`/etc/garmr/config.yaml`.
 
 ### Podman/Docker Run
 
 ```bash
-# Create read-only policy volume
+# Policies and config mounted read-only
 podman run -d \
     --name garmr \
-    -v ./policies:/policies:ro \
-    -v ./config.cue:/etc/garmr/config.cue:ro \
+    -v ./policies:/etc/garmr/policies:ro \
+    -v ./config.yaml:/etc/garmr/config.yaml:ro \
     -p 8080:8080 \
     garmr:latest
 ```
@@ -360,24 +198,31 @@ spec:
 
 ## Performance Considerations
 
-### File I/O Impact
+Policies are compiled once at load time and held in memory, so evaluation does
+no file I/O. Reload cost scales with the size of the policy set, not with
+request volume.
 
-| Mode | I/O per Request | Latency Impact |
-|------|-----------------|----------------|
-| watch | 0 (cached) | None |
-| poll | 0 (cached) | None |
-| ondemand | 1 read (lock file) | ~0.1ms |
-| jit (ttl=0) | 1 read (policy) | ~0.5-2ms |
-| jit (ttl=5s) | 0.2 avg (20% miss) | ~0.1-0.4ms avg |
+CUE is used only at load: each policy is unified with the schema, hashed,
+decoded, and its rules compiled into Go evaluation trees. Evaluation never
+touches CUE. The loaded set is a single immutable snapshot that evaluations
+read without locking, so they run fully in parallel with no pool and no
+per-CPU copies. Policies are indexed by target kind, so an input is checked
+only against policies that could match it. See
+[Concurrency](/garmr/docs/advanced/concurrency/).
 
 ### Recommendations
 
-1. **Production**: Use `watch` or `poll` mode - policies are cached
-2. **High throughput**: Enable result caching in engine
-3. **Large policies**: Use policy sets for modular loading
-4. **GitOps**: Use `ondemand` with lock files for controlled rollouts
+1. **Large policy sets** — organise with CUE packages (shared definitions
+   in a sibling file of the same package).
+2. **Reload frequency** — reload on deploy, not on a timer; each reload
+   recompiles every policy.
+3. **GitOps** — use lock files as a repo-side review gate, and the policy-set
+   digest to verify what a running server actually loaded.
 
 ## Lock File Workflow (GitOps)
+
+Lock files are read by CI only — the server never reads them. Their job is
+to fail the pipeline when a policy changed without being re-reviewed.
 
 ```bash
 # 1. Update policy
@@ -391,17 +236,13 @@ git add policies/release/prod-release.cue
 git add policies/release/prod-release.cue.lock
 git commit -m "Update production release policy"
 
-# 4. Deploy (CI/CD copies to mounted volume)
-# Garmr detects lock file change and reloads policy
+# 4. CI gate: fail if any policy changed without a lock update
+garmr policy validate-lock policies/
+
+# 5. Deploy (CI/CD lands files on the server's policy volume, then either
+#    restarts the instance or calls POST /v1/policies/reload)
+
+# 6. Verify convergence: the server's digest must match the checkout's
+garmr policy digest policies/
+curl -s $GARMR/v1/policies | jq -r .digest
 ```
-
-## Conclusion
-
-The recommended approach for most deployments:
-
-1. **Development**: `watch` mode for immediate feedback
-2. **Production containers**: `poll` mode (5-10s interval)
-3. **GitOps workflows**: `ondemand` mode with lock files
-4. **Complex policies**: Use policy sets for organization
-
-All modes support the same policy format - switching is just a configuration change.

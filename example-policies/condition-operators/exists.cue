@@ -1,5 +1,5 @@
 // examples/condition-operators/exists.cue
-// Tests the exists and absent operators
+// Tests match.exists: true (present and non-null) and false (absent or null)
 package operators
 
 existsPolicy: {
@@ -10,7 +10,7 @@ existsPolicy: {
 		namespace: "condition-operators"
 	}
 	spec: {
-		description: "Validates field existence using exists and absent operators"
+		description: "Validates field existence using match.exists"
 		target: resources: ["test-exists"]
 		rules: [
 			{
@@ -46,7 +46,7 @@ absentPolicy: {
 		namespace: "condition-operators"
 	}
 	spec: {
-		description: "Validates field absence using absent operator"
+		description: "Validates field absence using match.exists: false"
 		target: resources: ["test-absent"]
 		rules: [
 			{
@@ -55,7 +55,7 @@ absentPolicy: {
 				severity:    "medium"
 				expr: match: {
 					path:   "deprecatedField"
-					absent: true
+					exists: false
 				}
 				message: "deprecatedField should be removed"
 			},
@@ -65,7 +65,7 @@ absentPolicy: {
 				severity:    "low"
 				expr: match: {
 					path:   "config.legacy"
-					absent: true
+					exists: false
 				}
 				message: "config.legacy should be migrated"
 			},

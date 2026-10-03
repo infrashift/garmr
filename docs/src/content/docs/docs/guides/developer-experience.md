@@ -99,7 +99,7 @@ containerSecurity: {
                         as: "container"
                         condition: {
                             any: [
-                                {match: {path: "container.securityContext.privileged", absent: true}},
+                                {match: {path: "container.securityContext.privileged", exists: false}},
                                 {match: {path: "container.securityContext.privileged", equals: false}}
                             ]
                         }
@@ -147,7 +147,7 @@ containerSecurity: {
 
 ### Validate Policy Syntax
 
-`garmr validate` sends policies to the running server for validation, so start the local server first. Files and directories are accepted (directories are expanded recursively).
+`garmr validate` runs locally, with the same loader the server runs at startup, so no server is needed. A green result means the server will load the set. Files and directories are accepted (directories are loaded recursively). Schema errors, such as an unknown operator or a typo like `mach:`, are reported here, not at evaluation time. Add `--remote` to validate against a running server's `/v1/validate` instead.
 
 ```bash
 # Validate a policy file
@@ -156,8 +156,8 @@ garmr validate my-policy.cue
 # Validate multiple files
 garmr validate policies/*.cue
 
-# Show warnings
-garmr validate my-policy.cue --warn
+# Validate a whole policy tree
+garmr validate policies/
 ```
 
 ### Test Against Sample Data
@@ -611,12 +611,19 @@ fi
 
 ## Debugging Policies
 
-### Enable Tracing
+### Inspect what actually ran
 
 ```bash
-# Get detailed evaluation trace
-garmr eval --input resource.json --trace -o json | jq '.trace'
+# Which rules ran, which were skipped, and whether fail-fast stopped early
+garmr eval --input resource.json -o json | jq '.summary, .evaluation_mode'
+
+# Include passing rules, not just violations
+garmr eval --input resource.json --verbose
 ```
+
+A per-rule execution trace is not available. `--trace` existed as a flag but
+never emitted anything and has been removed; see `TODO.md` for what a real
+implementation would need.
 
 ### Check Policy Loading
 
@@ -650,8 +657,8 @@ garmr eval --input resource.json -o json | jq '[.results[].policy_name] | unique
 # Check for CUE syntax errors
 cue vet my-policy.cue
 
-# Check Garmr validation
-garmr validate my-policy.cue --warn
+# Check Garmr validation (schema, operators, load-time checks)
+garmr validate my-policy.cue
 ```
 
 **Policy not matching:**

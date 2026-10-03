@@ -19,6 +19,15 @@
       "description": "Local development server"
     }
   ],
+  "security": [
+    {},
+    {
+      "ApiKeyAuth": []
+    },
+    {
+      "BearerAuth": []
+    }
+  ],
   "tags": [
     {
       "name": "health",
@@ -36,7 +45,9 @@
   "paths": {
     "/health": {
       "get": {
-        "tags": ["health"],
+        "tags": [
+          "health"
+        ],
         "summary": "Health check",
         "description": "Returns the health status of the server",
         "operationId": "getHealth",
@@ -66,7 +77,9 @@
     },
     "/ready": {
       "get": {
-        "tags": ["health"],
+        "tags": [
+          "health"
+        ],
         "summary": "Readiness check",
         "description": "Returns the readiness status of the server (Kubernetes-style probe)",
         "operationId": "getReady",
@@ -94,9 +107,88 @@
         }
       }
     },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Liveness probe",
+        "description": "Always returns 200 once the process is serving. /livez is an alias.",
+        "operationId": "getHealthz",
+        "security": [
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "Process is live"
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Readiness probe",
+        "description": "Returns 200 when the server can serve traffic. Returns 503 while zero policies are loaded and as soon as shutdown begins draining.",
+        "operationId": "getReadyz",
+        "security": [
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "Server is ready"
+          },
+          "503": {
+            "description": "Server is not ready (no policies loaded, or shutting down)"
+          }
+        }
+      }
+    },
+    "/health/deep": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Deep health check",
+        "description": "Runs cheap and deep checkers, including a real round trip to the policy storage. An operator diagnostic, not a probe \u2014 and unlike the probe endpoints it requires the API key when one is configured, because every call performs storage I/O.",
+        "operationId": "getDeepHealth",
+        "responses": {
+          "200": {
+            "description": "Every check healthy (per-check detail in the body)"
+          },
+          "503": {
+            "description": "One or more checks degraded or unhealthy (per-check detail in the body)"
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Prometheus metrics",
+        "operationId": "getMetrics",
+        "security": [
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "Prometheus exposition format",
+            "content": {
+              "text/plain": {}
+            }
+          }
+        }
+      }
+    },
     "/v1/evaluate": {
       "post": {
-        "tags": ["evaluation"],
+        "tags": [
+          "evaluation"
+        ],
         "summary": "Evaluate input against policies",
         "description": "Evaluates the provided input against loaded policies and returns the decision with any violations",
         "operationId": "evaluate",
@@ -235,13 +327,65 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "API key missing or invalid (only when auth.api_key is configured)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Method not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Server shedding load: the request never started, retry is meaningful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
     },
     "/v1/validate": {
       "post": {
-        "tags": ["policies"],
+        "tags": [
+          "policies"
+        ],
         "summary": "Validate policy syntax",
         "description": "Validates a CUE policy without loading it",
         "operationId": "validatePolicy",
@@ -275,13 +419,65 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "API key missing or invalid (only when auth.api_key is configured)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Method not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Server shedding load: the request never started, retry is meaningful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
     },
     "/v1/policies": {
       "get": {
-        "tags": ["policies"],
+        "tags": [
+          "policies"
+        ],
         "summary": "List loaded policies",
         "description": "Returns a list of all policies currently loaded in the server",
         "operationId": "listPolicies",
@@ -307,11 +503,43 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "API key missing or invalid (only when auth.api_key is configured)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Method not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       },
       "delete": {
-        "tags": ["policies"],
+        "tags": [
+          "policies"
+        ],
         "summary": "Delete a policy",
         "description": "Deletes a loaded policy by name and namespace",
         "operationId": "deletePolicy",
@@ -328,8 +556,8 @@
           {
             "name": "namespace",
             "in": "query",
-            "description": "Policy namespace",
-            "required": true,
+            "description": "Policy namespace; defaults to \"default\" when omitted",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -345,15 +573,47 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "API key missing or invalid (only when auth.api_key is configured)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Method not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
     },
     "/v1/policies/reload": {
       "post": {
-        "tags": ["policies"],
+        "tags": [
+          "policies"
+        ],
         "summary": "Reload policies",
-        "description": "Atomically reloads all policies from disk (hot reload)",
+        "description": "Atomically re-reads the policy directory and swaps the loaded set. Fails closed: a policy that does not compile or validate, or a directory yielding zero policies, returns 500 and the previously loaded set keeps serving.",
         "operationId": "reloadPolicies",
         "responses": {
           "200": {
@@ -366,8 +626,8 @@
               }
             }
           },
-          "500": {
-            "description": "Reload failed",
+          "400": {
+            "description": "No policy source configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -375,6 +635,106 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Reload failed; the previous policy set is still live",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key missing or invalid (only when auth.api_key is configured)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Method not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Server shedding load: the request never started, retry is meaningful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "OpenAPI specification",
+        "description": "Returns this document. The supported way to introspect the API surface.",
+        "operationId": "getOpenAPISpec",
+        "tags": [
+          "Meta"
+        ],
+        "responses": {
+          "200": {
+            "description": "OpenAPI document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/livez": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Liveness probe (alias of /healthz)",
+        "description": "Always returns 200 once the process is serving. /livez is an alias.",
+        "operationId": "getLivez",
+        "security": [
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "Process is live"
           }
         }
       }
@@ -400,7 +760,11 @@
             "example": "5m30s"
           }
         },
-        "required": ["healthy", "version", "uptime"]
+        "required": [
+          "healthy",
+          "version",
+          "uptime"
+        ]
       },
       "ReadyResponse": {
         "type": "object",
@@ -417,7 +781,9 @@
             "description": "Status of individual readiness checks"
           }
         },
-        "required": ["ready"]
+        "required": [
+          "ready"
+        ]
       },
       "EvaluateRequest": {
         "type": "object",
@@ -438,12 +804,9 @@
               "type": "string"
             },
             "description": "Specific policies to evaluate (namespace/name format)",
-            "example": ["security/container-security"]
-          },
-          "trace": {
-            "type": "boolean",
-            "description": "Include evaluation trace",
-            "default": false
+            "example": [
+              "security/container-security"
+            ]
           },
           "include_passed": {
             "type": "boolean",
@@ -451,14 +814,20 @@
             "default": false
           }
         },
-        "required": ["input"]
+        "required": [
+          "input"
+        ]
       },
       "EvaluateResponse": {
         "type": "object",
         "properties": {
           "decision": {
             "type": "string",
-            "enum": ["allow", "deny", "warn"],
+            "enum": [
+              "allow",
+              "deny",
+              "warn"
+            ],
             "description": "Overall policy decision"
           },
           "request_id": {
@@ -474,9 +843,63 @@
           },
           "metrics": {
             "$ref": "#/components/schemas/EvaluationMetrics"
+          },
+          "summary": {
+            "type": "object",
+            "description": "Rule outcome counts for this evaluation.",
+            "properties": {
+              "total_rules": {
+                "type": "integer"
+              },
+              "passed": {
+                "type": "integer"
+              },
+              "failed": {
+                "type": "integer"
+              },
+              "skipped": {
+                "type": "integer"
+              }
+            }
+          },
+          "evaluation_mode": {
+            "type": "object",
+            "description": "How the evaluation ran, and how much of the rule set it reached.",
+            "properties": {
+              "dry_run": {
+                "type": "boolean"
+              },
+              "fail_fast": {
+                "type": "boolean"
+              },
+              "short_circuited": {
+                "type": "boolean"
+              },
+              "total_rules_in_scope": {
+                "type": "integer"
+              },
+              "rules_evaluated": {
+                "type": "integer"
+              },
+              "rules_skipped": {
+                "type": "integer"
+              }
+            }
+          },
+          "terminated_early": {
+            "type": "boolean",
+            "description": "True when fail-fast stopped the evaluation early."
+          },
+          "termination_rule": {
+            "type": "object",
+            "description": "The rule whose failure triggered fail-fast termination, when terminated_early is true."
           }
         },
-        "required": ["decision", "request_id", "results", "metrics"]
+        "required": [
+          "decision",
+          "request_id",
+          "results"
+        ]
       },
       "RuleResult": {
         "type": "object",
@@ -499,7 +922,13 @@
           },
           "severity": {
             "type": "string",
-            "enum": ["critical", "high", "medium", "low", "info"],
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ],
             "description": "Rule severity"
           },
           "passed": {
@@ -509,9 +938,19 @@
           "message": {
             "type": "string",
             "description": "Failure message (if rule failed)"
+          },
+          "remediation": {
+            "type": "string",
+            "description": "Operator-facing hint for fixing the violation"
           }
         },
-        "required": ["policy_name", "policy_namespace", "rule_id", "severity", "passed"]
+        "required": [
+          "policy_name",
+          "policy_namespace",
+          "rule_id",
+          "severity",
+          "passed"
+        ]
       },
       "EvaluationMetrics": {
         "type": "object",
@@ -539,7 +978,9 @@
             "description": "CUE policy content to validate"
           }
         },
-        "required": ["policy"]
+        "required": [
+          "policy"
+        ]
       },
       "ValidateResponse": {
         "type": "object",
@@ -563,22 +1004,32 @@
             "description": "Validation warnings (if any)"
           }
         },
-        "required": ["valid"]
+        "required": [
+          "valid"
+        ]
       },
       "ValidationError": {
         "type": "object",
         "properties": {
-          "line": {
-            "type": "integer",
-            "description": "Line number of the error"
-          },
-          "column": {
-            "type": "integer",
-            "description": "Column number of the error"
-          },
           "message": {
             "type": "string",
             "description": "Error message"
+          },
+          "code": {
+            "type": "string",
+            "description": "Error category: PARSE_ERROR (not valid CUE), SCHEMA_ERROR (does not match the policy schema), COMPILE_ERROR (passes the schema but the loader rejects it, e.g. an invalid regex, duplicate rule ids, or an exception that matches everything)"
+          },
+          "line": {
+            "type": "integer",
+            "description": "1-based line of the offending token, when known"
+          },
+          "column": {
+            "type": "integer",
+            "description": "1-based column of the offending token, when known"
+          },
+          "filename": {
+            "type": "string",
+            "description": "Source filename, when the caller supplied one"
           }
         }
       },
@@ -590,6 +1041,14 @@
             "items": {
               "$ref": "#/components/schemas/PolicySummary"
             }
+          },
+          "digest": {
+            "type": "string",
+            "description": "Deterministic sha256 digest of the loaded policy set; compare with `garmr policy digest <dir>` on a git checkout to verify convergence"
+          },
+          "instance_id": {
+            "type": "string",
+            "description": "Identifier of the instance that answered. Behind a load-balancing mesh upstream a caller cannot address instances individually, so convergence is verified by collecting these across repeated calls."
           }
         }
       },
@@ -604,29 +1063,13 @@
             "type": "string",
             "description": "Policy namespace"
           },
-          "description": {
-            "type": "string",
-            "description": "Policy description"
-          },
           "rule_count": {
             "type": "integer",
             "description": "Number of rules in the policy"
           },
-          "enforcement": {
+          "hash": {
             "type": "string",
-            "enum": ["deny", "warn", "audit"],
-            "description": "Enforcement action"
-          },
-          "target": {
-            "type": "object",
-            "properties": {
-              "resources": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              }
-            }
+            "description": "sha256 of the policy's canonical CUE rendering"
           }
         }
       },
@@ -641,13 +1084,21 @@
             "type": "integer",
             "description": "Number of policies loaded"
           },
+          "digest": {
+            "type": "string",
+            "description": "Policy-set digest after the reload"
+          },
           "reload_time_ms": {
             "type": "integer",
             "description": "Reload time in milliseconds"
           },
           "storage_type": {
             "type": "string",
-            "description": "Active storage backend type (e.g., filesystem, s3)"
+            "description": "Active storage backend type (filesystem)"
+          },
+          "instance_id": {
+            "type": "string",
+            "description": "Identifier of the instance that answered. Behind a load-balancing mesh upstream a caller cannot address instances individually, so convergence is verified by collecting these across repeated calls."
           }
         }
       },
@@ -659,7 +1110,9 @@
             "description": "Whether the policy was found and deleted"
           }
         },
-        "required": ["deleted"]
+        "required": [
+          "deleted"
+        ]
       },
       "ErrorResponse": {
         "type": "object",
@@ -667,18 +1120,24 @@
           "error": {
             "type": "string",
             "description": "Error message"
-          },
-          "code": {
-            "type": "string",
-            "description": "Error code"
-          },
-          "details": {
-            "type": "object",
-            "additionalProperties": true,
-            "description": "Additional error details"
           }
         },
-        "required": ["error"]
+        "required": [
+          "error"
+        ]
+      }
+    },
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "Static API key, required only when the server is started with auth.api_key set. In the recommended in-mesh deployment (Consul Connect mTLS + intentions) no key is configured and requests are unauthenticated at the application layer."
+      },
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The same API key may be presented as a Bearer token."
       }
     }
   }

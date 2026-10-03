@@ -189,14 +189,12 @@ func TestMatchSorted(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid order value fails closed", func(t *testing.T) {
-		bad := setOpPolicy(t, "sorted-bad", `path: "spec.priorities", sorted: "sideways"`)
-		resp := evalSetOp(t, bad, map[string]any{
-			"kind": "Queue",
-			"spec": map[string]any{"priorities": []any{1, 2}},
-		})
-		if resp.Decision != DecisionDeny {
-			t.Errorf("expected deny for invalid sort order, got %s", resp.Decision)
+	t.Run("invalid order value is rejected at load", func(t *testing.T) {
+		src := makePolicy("sorted-bad", "default", "bad order",
+			`{id: "r1", description: "d", severity: "high", expr: {match: {path: "spec.priorities", sorted: "sideways"}}}`,
+			"deny", "")
+		if err := newTestEngine(t).LoadPolicy(context.Background(), "sorted-bad", "default", src); err == nil {
+			t.Error("expected an invalid sort order to be rejected at load")
 		}
 	})
 }

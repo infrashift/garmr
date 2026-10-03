@@ -65,44 +65,6 @@ func TestBuiltinUpper(t *testing.T) {
 	}
 }
 
-func TestBuiltinContains(t *testing.T) {
-	result, err := builtinContains(ctx, "hello world", "world")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != true {
-		t.Error("expected true")
-	}
-
-	result, err = builtinContains(ctx, "hello", "xyz")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != false {
-		t.Error("expected false")
-	}
-}
-
-func TestBuiltinStartsWith(t *testing.T) {
-	result, err := builtinStartsWith(ctx, "hello world", "hello")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != true {
-		t.Error("expected true")
-	}
-}
-
-func TestBuiltinEndsWith(t *testing.T) {
-	result, err := builtinEndsWith(ctx, "hello world", "world")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != true {
-		t.Error("expected true")
-	}
-}
-
 func TestBuiltinMatches(t *testing.T) {
 	result, err := builtinMatches(ctx, "hello-123", `^hello-\d+$`)
 	if err != nil {
@@ -280,31 +242,6 @@ func TestBuiltinJoin(t *testing.T) {
 	}
 	if result != "a,b,c" {
 		t.Errorf("join = %v, want a,b,c", result)
-	}
-}
-
-func TestBuiltinRegex(t *testing.T) {
-	result, err := builtinRegex(ctx, `^\d+$`, "12345")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != true {
-		t.Error("expected true")
-	}
-
-	result, err = builtinRegex(ctx, `^\d+$`, "abc")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != false {
-		t.Error("expected false")
-	}
-}
-
-func TestBuiltinRegex_InvalidPattern(t *testing.T) {
-	_, err := builtinRegex(ctx, `[invalid`, "test")
-	if err == nil {
-		t.Error("expected error for invalid regex")
 	}
 }
 
@@ -664,10 +601,10 @@ func TestBuiltinFilter_NoMatch(t *testing.T) {
 
 // --- Semver ---
 
-func TestBuiltinSemverCompare(t *testing.T) {
+func TestCompareSemver(t *testing.T) {
 	tests := []struct {
 		v1, v2 string
-		want   int64
+		want   int
 	}{
 		{"1.0.0", "1.0.0", 0},
 		{"2.0.0", "1.0.0", 1},
@@ -675,54 +612,31 @@ func TestBuiltinSemverCompare(t *testing.T) {
 		{"1.2.0", "1.1.0", 1},
 		{"1.0.1", "1.0.0", 1},
 		{"v1.0.0", "1.0.0", 0},
-		// Prerelease precedence (semver spec): a prerelease sorts before
-		// the release. The old duplicate parser stripped prereleases and
-		// treated these as equal.
+		// Prerelease precedence (SemVer 2.0.0 §11): a prerelease sorts
+		// before the release; identifiers compare dot by dot, numeric ones
+		// numerically and below alphanumeric ones.
 		{"1.0.0-rc.1", "1.0.0", -1},
 		{"1.0.0", "1.0.0-rc.1", 1},
 		{"1.0.0-alpha", "1.0.0-beta", -1},
+		{"1.0.0-rc.2", "1.0.0-rc.10", -1},
+		{"1.0.0-alpha", "1.0.0-alpha.1", -1},
+		{"1.0.0-1", "1.0.0-alpha", -1},
+		{"1.0.0+build.1", "1.0.0+build.2", 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.v1+"_vs_"+tt.v2, func(t *testing.T) {
-			result, err := builtinSemverCompare(ctx, tt.v1, tt.v2)
+			got, err := compareSemver(tt.v1, tt.v2)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if result != tt.want {
-				t.Errorf("semver(%s, %s) = %v, want %v", tt.v1, tt.v2, result, tt.want)
+			if got != tt.want {
+				t.Errorf("compareSemver(%s, %s) = %v, want %v", tt.v1, tt.v2, got, tt.want)
 			}
 		})
 	}
 
-	if _, err := builtinSemverCompare(ctx, "garbage", "1.0.0"); err == nil {
+	if _, err := compareSemver("garbage", "1.0.0"); err == nil {
 		t.Error("expected error for invalid semver operand")
-	}
-}
-
-// --- JSON Path ---
-
-func TestBuiltinJSONPath(t *testing.T) {
-	obj := map[string]any{
-		"metadata": map[string]any{
-			"name": "test",
-		},
-	}
-	result, err := builtinJSONPath(ctx, obj, "metadata.name")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != "test" {
-		t.Errorf("jsonPath = %v, want test", result)
-	}
-}
-
-func TestBuiltinJSONPath_FromString(t *testing.T) {
-	result, err := builtinJSONPath(ctx, `{"name": "test"}`, "name")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != "test" {
-		t.Errorf("jsonPath from string = %v, want test", result)
 	}
 }
 
@@ -743,7 +657,6 @@ func TestBuiltinErrorCases(t *testing.T) {
 		{"trimSuffix no args", builtinTrimSuffix, nil},
 		{"split no args", builtinSplit, nil},
 		{"join no args", builtinJoin, nil},
-		{"regex no args", builtinRegex, nil},
 		{"base64Decode no args", builtinBase64Decode, nil},
 		{"base64Encode no args", builtinBase64Encode, nil},
 		{"duration no args", builtinDuration, nil},
@@ -763,8 +676,6 @@ func TestBuiltinErrorCases(t *testing.T) {
 		{"unique no args", builtinUnique, nil},
 		{"sort no args", builtinSort, nil},
 		{"filter no args", builtinFilter, nil},
-		{"semver no args", builtinSemverCompare, nil},
-		{"jsonPath no args", builtinJSONPath, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

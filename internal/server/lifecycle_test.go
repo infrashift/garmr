@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,6 +14,33 @@ import (
 
 	"github.com/infrashift/garmr/internal/engine"
 )
+
+// writeLifecyclePolicy writes one valid policy in the on-disk (package +
+// named document) format into dir.
+func writeLifecyclePolicy(t *testing.T, dir string) {
+	t.Helper()
+	const src = `package policy
+
+lifecycle_policy: {
+	apiVersion: "policy.garmr.io/v1"
+	kind: "Policy"
+	metadata: name: "lifecycle-policy"
+	spec: {
+		target: resources: [{kind: "*"}]
+		rules: [{
+			id:          "LC-001"
+			description: "always satisfiable"
+			severity:    "low"
+			expr: {match: {path: "env", exists: false}}
+		}]
+		enforcement: action: "deny"
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "policy.cue"), []byte(src), 0644); err != nil {
+		t.Fatalf("writing lifecycle policy: %v", err)
+	}
+}
 
 // freePort returns an ephemeral TCP port likely free on the loopback interface.
 func freePort(t *testing.T) int {
@@ -29,6 +58,9 @@ func freePort(t *testing.T) int {
 // context cancellation. This covers Start, startHTTP, and Stop in one go.
 func TestServer_StartStopLifecycle(t *testing.T) {
 	tmpDir := t.TempDir()
+	// Startup fails closed on a policy dir with zero policies, so the
+	// lifecycle test needs a real one on disk.
+	writeLifecyclePolicy(t, tmpDir)
 	addr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
 
 	eng, err := engine.NewEngine(zap.NewNop())

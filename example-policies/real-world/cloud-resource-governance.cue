@@ -68,8 +68,8 @@ resourceGovernancePolicy: {
 					{match: {path: "spec.autoscaling.minReplicas", greaterThanOrEqual: 1}},
 					{match: {path: "spec.autoscaling.maxReplicas", lessThanOrEqual: 50}},
 					{compare: {
-						left:  {path: "spec.autoscaling.maxReplicas"}
-						op:    ">"
+						left: {path: "spec.autoscaling.maxReplicas"}
+						op: ">"
 						right: {path: "spec.autoscaling.minReplicas"}
 					}},
 				]

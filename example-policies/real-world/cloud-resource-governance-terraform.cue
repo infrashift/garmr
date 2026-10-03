@@ -7,7 +7,7 @@
 // (instance type, autoscaling bounds, volume size) skip resources of
 // other types via a per-item type guard.
 //
-// Every rule is additionally guarded with `any: [{absent: "resource_changes"}, forEach]`
+// Every rule is additionally guarded with `any: [{match: {path: "resource_changes", exists: false}}, forEach]`
 // so the policy passes vacuously when evaluated against non-Terraform input.
 package realworld
 
@@ -32,7 +32,7 @@ cloudResourceGovernanceTerraformPolicy: {
 				description: "Every resource must be tagged with an Owner"
 				severity:    "high"
 				expr: any: [
-					{absent: "resource_changes"},
+					{match: {path: "resource_changes", exists: false}},
 					{forEach: {
 						path: "resource_changes"
 						as:   "r"
@@ -53,7 +53,7 @@ cloudResourceGovernanceTerraformPolicy: {
 				description: "Every resource must be tagged with a CostCenter"
 				severity:    "medium"
 				expr: any: [
-					{absent: "resource_changes"},
+					{match: {path: "resource_changes", exists: false}},
 					{forEach: {
 						path: "resource_changes"
 						as:   "r"
@@ -73,7 +73,7 @@ cloudResourceGovernanceTerraformPolicy: {
 				description: "aws_instance instance_type must be from approved list"
 				severity:    "high"
 				expr: any: [
-					{absent: "resource_changes"},
+					{match: {path: "resource_changes", exists: false}},
 					{forEach: {
 						path: "resource_changes"
 						as:   "r"
@@ -101,7 +101,7 @@ cloudResourceGovernanceTerraformPolicy: {
 				description: "aws_autoscaling_group must have reasonable bounds"
 				severity:    "medium"
 				expr: any: [
-					{absent: "resource_changes"},
+					{match: {path: "resource_changes", exists: false}},
 					{forEach: {
 						path: "resource_changes"
 						as:   "r"
@@ -112,8 +112,8 @@ cloudResourceGovernanceTerraformPolicy: {
 								{match: {path: "r.change.after.min_size", greaterThanOrEqual: 1}},
 								{match: {path: "r.change.after.max_size", lessThanOrEqual: 50}},
 								{compare: {
-									left:  {path: "r.change.after.max_size"}
-									op:    ">"
+									left: {path: "r.change.after.max_size"}
+									op: ">"
 									right: {path: "r.change.after.min_size"}
 								}},
 							]},
@@ -130,7 +130,7 @@ cloudResourceGovernanceTerraformPolicy: {
 				description: "aws_ebs_volume size must not exceed 500 GB"
 				severity:    "medium"
 				expr: any: [
-					{absent: "resource_changes"},
+					{match: {path: "resource_changes", exists: false}},
 					{forEach: {
 						path: "resource_changes"
 						as:   "r"
@@ -151,7 +151,7 @@ cloudResourceGovernanceTerraformPolicy: {
 				description: "Every resource must be tagged with a valid Environment"
 				severity:    "high"
 				expr: any: [
-					{absent: "resource_changes"},
+					{match: {path: "resource_changes", exists: false}},
 					{forEach: {
 						path: "resource_changes"
 						as:   "r"

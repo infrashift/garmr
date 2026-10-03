@@ -1,6 +1,6 @@
 // example-policies/advanced-operators/length.cue
 // Demonstrates the length expression for array and string length constraints
-// Supports: equals, greaterThan, lessThan, min, max
+// Supports: equals, greaterThan, greaterThanOrEqual, lessThan, lessThanOrEqual
 package advanced
 
 lengthPolicy: {
@@ -19,8 +19,8 @@ lengthPolicy: {
 				description: "Must have at least 1 container"
 				severity:    "high"
 				expr: match: {
-					path:   "spec.containers"
-					length: min: 1
+					path: "spec.containers"
+					length: greaterThanOrEqual: 1
 				}
 				message: "at least one container is required"
 			},
@@ -29,8 +29,8 @@ lengthPolicy: {
 				description: "Must not exceed 5 containers"
 				severity:    "medium"
 				expr: match: {
-					path:   "spec.containers"
-					length: max: 5
+					path: "spec.containers"
+					length: lessThanOrEqual: 5
 				}
 				message: "at most 5 containers are allowed per pod"
 			},
@@ -39,7 +39,7 @@ lengthPolicy: {
 				description: "Must have exactly 3 availability zones"
 				severity:    "low"
 				expr: match: {
-					path:   "spec.availabilityZones"
+					path: "spec.availabilityZones"
 					length: equals: 3
 				}
 				message: "exactly 3 availability zones are required"
@@ -49,7 +49,7 @@ lengthPolicy: {
 				description: "Service name must be at least 3 characters"
 				severity:    "medium"
 				expr: match: {
-					path:   "metadata.name"
+					path: "metadata.name"
 					length: greaterThan: 2
 				}
 				message: "service name must be at least 3 characters long"
@@ -59,7 +59,7 @@ lengthPolicy: {
 				description: "Tags list must not be empty"
 				severity:    "low"
 				expr: match: {
-					path:   "metadata.tags"
+					path: "metadata.tags"
 					length: greaterThan: 0
 				}
 				message:     "metadata.tags must contain at least one tag"

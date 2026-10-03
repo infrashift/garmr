@@ -2,20 +2,38 @@ package engine
 
 import "testing"
 
-func TestValuesEqual(t *testing.T) {
+func TestEqValues(t *testing.T) {
 	tests := []struct {
 		a, b any
 		want bool
 	}{
 		{1.0, 1.0, true},
 		{1.0, 1, true},
+		{int64(2), 2.0, true},
 		{"hello", "hello", true},
 		{1.0, 2.0, false},
 		{"a", "b", false},
+		{nil, nil, true},
+		{[]any{1, "a"}, []any{1.0, "a"}, true},
+		{map[string]any{"k": 1}, map[string]any{"k": 1.0}, true},
+		{map[string]any{"k": 1}, map[string]any{"k": 2}, false},
+		// Strict typing: these all compared equal under the old %v
+		// fallback, and "1" == 1 under its string-to-float parse.
+		{"1", 1, false},
+		{true, "true", false},
+		{nil, "<nil>", false},
+		{[]any{1, 2}, "[1 2]", false},
+		{"", nil, false},
 	}
 	for _, tt := range tests {
-		if got := valuesEqual(tt.a, tt.b); got != tt.want {
-			t.Errorf("valuesEqual(%v, %v) = %v, want %v", tt.a, tt.b, got, tt.want)
+		if got := eqValues(tt.a, tt.b); got != tt.want {
+			t.Errorf("eqValues(%#v, %#v) = %v, want %v", tt.a, tt.b, got, tt.want)
+		}
+		if tt.want && setKey(tt.a) != setKey(tt.b) {
+			t.Errorf("setKey(%#v) != setKey(%#v) for equal values", tt.a, tt.b)
+		}
+		if !tt.want && setKey(tt.a) == setKey(tt.b) {
+			t.Errorf("setKey(%#v) == setKey(%#v) for unequal values", tt.a, tt.b)
 		}
 	}
 }
@@ -45,30 +63,13 @@ func TestGetStringField(t *testing.T) {
 			"name": "test",
 		},
 	}
-	if got := getStringField(m, "metadata", "name"); got != "test" {
+	if got := NestedString(m, "metadata", "name"); got != "test" {
 		t.Errorf("expected 'test', got %q", got)
 	}
-	if got := getStringField(m, "metadata", "missing"); got != "" {
+	if got := NestedString(m, "metadata", "missing"); got != "" {
 		t.Errorf("expected empty, got %q", got)
 	}
-	if got := getStringField(m, "nonexistent", "name"); got != "" {
+	if got := NestedString(m, "nonexistent", "name"); got != "" {
 		t.Errorf("expected empty for missing path, got %q", got)
-	}
-}
-
-func TestGetMapField(t *testing.T) {
-	m := map[string]any{
-		"metadata": map[string]any{
-			"labels": map[string]any{
-				"app": "nginx",
-			},
-		},
-	}
-	labels := getMapField(m, "metadata", "labels")
-	if labels == nil {
-		t.Fatal("expected non-nil labels")
-	}
-	if labels["app"] != "nginx" {
-		t.Errorf("expected app=nginx, got %s", labels["app"])
 	}
 }

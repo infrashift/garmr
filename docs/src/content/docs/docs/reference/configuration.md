@@ -22,6 +22,66 @@ http_addr: ":8080"
 |---------|---------|-------------|
 | `http_addr` | `:8080` | Address for the HTTP/REST server |
 
+## HTTP Limits & Timeouts
+
+```yaml
+max_recv_size: 16777216      # bytes
+max_validate_size: 1048576   # bytes
+read_timeout: "30s"
+write_timeout: "60s"
+idle_timeout: "120s"
+shutdown_timeout: "30s"
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `max_recv_size` | `16777216` (16 MiB) | Max request body size. Evaluate buffers the whole body before parsing, so this bounds per-request memory — size it together with the container's memory limit (e.g. a 256 MiB limit tolerates only ~16 concurrent max-size requests at the default). Over-limit requests get `413`. |
+| `read_timeout` | `30s` | HTTP server read timeout |
+| `write_timeout` | `60s` | HTTP server write timeout |
+| `idle_timeout` | `120s` | Idle keep-alive connection timeout |
+| `max_validate_size` | `1048576` (1 MiB) | Max CUE source accepted by `/v1/validate`. Deliberately far below `max_recv_size`: validation compiles caller-supplied source, and unification cost grows with the source's disjunctions rather than its length. The effective cap is the smaller of this and `max_recv_size`. |
+| `shutdown_timeout` | `30s` | Drain budget after SIGTERM |
+
+`write_timeout` expires the *connection*; it does not cancel the handler. The
+bound that actually stops work is `evaluation.timeout` (below).
+
+**Behind a sidecar, reconcile with the proxy's timeouts.** Envoy/Consul
+Connect applies its own request and idle timeouts, and whichever side is
+shorter wins in ways that are painful to debug (the caller sees the proxy's
+error, not Garmr's). Keep `write_timeout` at or above the proxy's request
+timeout, and `idle_timeout` above the proxy's idle timeout so connection
+reuse isn't broken from the app side.
+
+## Evaluation Limits
+
+```yaml
+evaluation:
+  timeout: "10s"
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `evaluation.timeout` | `10s` | Max time for one `/v1/evaluate` or `/v1/validate`. For `/v1/validate` this **includes** time spent waiting for a validation slot. |
+
+This is the only limit that actually stops work. `write_timeout` expires the
+connection without cancelling the handler, and a policy's own
+`spec.evaluation.timeout` is optional and unset by default — so without this,
+a request that had already lost its client went on running and holding
+its decoded input.
+
+Evaluations have no pool and no queue: every request runs immediately, in
+parallel, against the loaded policy set. A request whose budget expires
+while its rules are running is denied with a synthetic timeout result
+(`__system__/policy-timeout`). A request whose context has already ended
+before evaluation starts gets `503` (retry is meaningful). `/v1/validate`
+compiles caller-supplied CUE, so it is bounded by a concurrency gate of
+`min(GOMAXPROCS, 8)`. A validate request whose budget expires while waiting
+for that gate is rejected with `503`.
+
+**Keep this below the sidecar's request timeout** so Garmr, not the proxy,
+decides the outcome — otherwise the caller gets the proxy's `504` and no
+digest or error detail from Garmr.
+
 ## Policy Configuration
 
 Specify the directory where Garmr loads policy files (CUE format).
@@ -34,22 +94,9 @@ policy_dir: "/etc/garmr/policies"
 |---------|---------|-------------|
 | `policy_dir` | _(none)_ | Root directory for CUE policy files |
 
-## TLS Configuration
+## Transport Security
 
-Enable TLS to encrypt traffic between clients and the Garmr server. Mutual TLS (client certificate authentication) is not currently implemented.
-
-```yaml
-tls:
-  enabled: false
-  cert: "/etc/garmr/tls/server.crt"
-  key: "/etc/garmr/tls/server.key"
-```
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `tls.enabled` | `false` | Enable TLS encryption |
-| `tls.cert` | _(none)_ | Path to TLS certificate file |
-| `tls.key` | _(none)_ | Path to TLS private key file |
+Garmr serves plain HTTP only — there are no TLS settings. Transport security, including mTLS, is the service mesh's job: Consul Connect (or another sidecar proxy) terminates mTLS and forwards the verified caller identity in the header configured by `auth.identity_header`. Deploying outside a mesh? Front the server with a TLS-terminating proxy.
 
 ## Authentication
 
@@ -117,15 +164,20 @@ audit:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `audit.enabled` | `true` | Enable audit logging |
-| `audit.path` | `/var/log/garmr/audit.log` | File path for the audit log |
+| `audit.path` | `/var/log/garmr/audit.log` | File path for the audit log, or the literal `stdout`/`stderr` to stream records for platform-shipped logging |
+| `audit.max_size` / `max_backups` / `max_age` | `100` MB / `10` / `30` days | Rotation (file mode only) |
+
+**In a mesh deployment, prefer `audit.path: stdout`.** The audit trail is
+the only record of the mesh-verified `principal`, and a file on local disk
+dies with the allocation. Streaming to stdout hands shipping to the
+platform's log pipeline (Nomad alloc logs, kubelet, vector/promtail/
+fluent-bit) with no sidecar tailer and no rotation to manage; application
+logs go to stderr, so the streams stay separable.
 
 ## Storage Backend
 
-By default, Garmr uses the filesystem backend powered by the `policy_dir` setting. For shared or cloud-native deployments, you can configure S3 or MinIO as the storage backend.
-
-A misconfigured storage backend is fatal at startup: the server refuses to start rather than silently running without policies.
-
-### Filesystem (Default)
+Garmr reads policies from disk. The filesystem backend is selected
+automatically by `policy_dir`, or configured explicitly:
 
 ```yaml
 storage:
@@ -133,35 +185,58 @@ storage:
   root: "/etc/garmr/policies"
 ```
 
-### S3 / MinIO
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `storage.type` | `filesystem` | Backend type (the only implemented backend) |
+| `storage.root` | _(from policy_dir)_ | Root directory |
+
+A misconfigured storage backend is fatal at startup: the server refuses to
+start rather than silently running without policies.
+
+To serve policies from object storage, sync them onto the pod first — an init
+container running `mc mirror` / `aws s3 sync`, or a CSI volume — and point
+`root` at the mount.
+
+For more details on storage backends, see the [Storage Backends](/garmr/docs/advanced/storage-backends/) documentation.
+
+## Rate Limiting
+
+Optional token-bucket rate limiting with a global bucket plus per-client
+buckets:
 
 ```yaml
-storage:
-  type: "s3"           # or "minio"
-  root: "policies/"    # S3 key prefix
-  s3:
-    endpoint: "minio.example.com:9000"  # omit for AWS S3
-    bucket: "garmr-policies"
-    region: "us-east-1"
-    access_key: ""
-    secret_key: ""
-    use_ssl: true
-    poll_interval: "10s"
+rate_limit:
+  enabled: false
+  rps: 100
+  burst: 200
+  per_client: true
+  client_identifier: "ip"     # ip | header | identity
+  client_rps: 1000
+  client_burst: 100
+  max_clients: 10000
+  trusted_proxies: []
 ```
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `storage.type` | `filesystem` | Backend type: `filesystem`, `s3`, or `minio` |
-| `storage.root` | _(from policy_dir)_ | Root path or S3 key prefix |
-| `storage.s3.endpoint` | _(none)_ | S3-compatible endpoint (omit for AWS) |
-| `storage.s3.bucket` | _(none)_ | S3 bucket name |
-| `storage.s3.region` | _(none)_ | AWS region |
-| `storage.s3.access_key` | _(none)_ | Access key (use IAM roles in production) |
-| `storage.s3.secret_key` | _(none)_ | Secret key (use IAM roles in production) |
-| `storage.s3.use_ssl` | `true` | Use SSL for S3 connections |
-| `storage.s3.poll_interval` | `10s` | How often to poll for policy changes |
+| `rate_limit.enabled` | `false` | Enable rate limiting |
+| `rate_limit.rps` / `rate_limit.burst` | `100` / `200` | Global bucket |
+| `rate_limit.per_client` | `true` | Track a separate bucket per client |
+| `rate_limit.client_identifier` | `ip` | How buckets are keyed: `ip`, `header`, or `identity` |
+| `rate_limit.header_name` | `X-Client-ID` | Header read by the `header` identifier |
+| `rate_limit.client_rps` / `rate_limit.client_burst` | `1000` / `100` | Each client's bucket |
+| `rate_limit.max_clients` | `10000` | Bound on tracked buckets (least-recently-seen eviction) |
+| `rate_limit.trusted_proxies` | _(none)_ | CIDRs whose `X-Forwarded-For` is believed in `ip` mode |
 
-For more details on storage backends, see the [Storage Backends](/garmr/docs/advanced/storage-backends/) documentation.
+**In a service mesh, use `client_identifier: identity`.** Behind a Consul
+Connect (or any Envoy) sidecar, every caller's `RemoteAddr` is the local
+proxy, so `ip` mode collapses all traffic into a single shared bucket. The
+`identity` mode keys buckets on the mesh-verified SPIFFE URI from the XFCC
+header (`auth.identity_header`) — the same value the audit log records as
+`principal`. Only enable it when a sidecar owns that header; from untrusted
+callers it is spoofable, which would let them mint fresh buckets at will.
+When the header is absent, `identity` mode falls back to the client IP,
+which fails safe (a shared bucket) rather than open.
 
 ## Development Mode
 
@@ -186,16 +261,36 @@ http_addr: ":8080"
 # Policy configuration
 policy_dir: "/etc/garmr/policies"
 
-# TLS configuration (optional)
-tls:
-  enabled: false
-  cert: "/etc/garmr/tls/server.crt"
-  key: "/etc/garmr/tls/server.key"
+# Graceful shutdown drain budget
+shutdown_timeout: "30s"
 
-# Authentication (optional)
+# HTTP limits (defaults shown; reconcile timeouts with the sidecar proxy)
+# max_recv_size: 16777216
+# read_timeout: "30s"
+# write_timeout: "60s"
+# idle_timeout: "120s"
+
+# Authentication & caller identity (optional)
 # auth:
 #   api_key: "change-me"
 #   api_key_header: "X-API-Key"
+#   identity_header: "X-Forwarded-Client-Cert"
+
+# CORS (optional; empty list = Access-Control-Allow-Origin: *)
+# cors:
+#   allowed_origins: []
+
+# Rate limiting (optional; use client_identifier "identity" in a mesh)
+# rate_limit:
+#   enabled: false
+#   rps: 100
+#   burst: 200
+#   per_client: true
+#   client_identifier: "ip"   # ip | header | identity
+#   client_rps: 1000
+#   client_burst: 100
+#   max_clients: 10000
+#   trusted_proxies: []
 
 # Logging configuration
 log:
@@ -210,6 +305,9 @@ evaluation:
 audit:
   enabled: true
   path: "/var/log/garmr/audit.log"
+  # max_size: 100      # MB before rotation
+  # max_backups: 10
+  # max_age: 30        # days
 
 # Storage backend configuration
 # storage:

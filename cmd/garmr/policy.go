@@ -10,56 +10,105 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"go.uber.org/zap"
 
 	"github.com/infrashift/garmr/internal/client"
+	"github.com/infrashift/garmr/internal/engine"
 )
 
 // validateCmd validates policy files
 var validateCmd = &cobra.Command{
-	Use:   "validate [files...]",
-	Short: "Validate policy files",
-	Long: `Validate CUE policy files for syntax and schema compliance.
+	Use:   "validate [paths...]",
+	Short: "Validate policy files or directories",
+	Long: `Validate CUE policies against the same schema and loader the server uses.
+
+By default validation runs locally: each path is loaded with the exact code
+path the server runs at startup, so a green result means the server will
+load the set. Directories are loaded as CUE packages, which is what makes
+multi-file policy packages (shared definitions + policies) validate
+correctly. No server is needed — ideal for CI.
+
+With --remote, file contents are sent to a running server's /v1/validate
+instead. Note that remote validation compiles each file in isolation, so
+multi-file packages cannot be validated remotely.
 
 Examples:
-  # Validate a single policy
+  # Validate a policy tree locally (CI gate; no server required)
+  garmr validate policies/
+
+  # Validate a single file
   garmr validate policy.cue
 
-  # Validate multiple policies
-  garmr validate policies/*.cue
-
-  # Validate and show warnings
-  garmr validate --warn policy.cue`,
+  # Validate against a running server
+  garmr validate --remote --server http://garmr:8080 policy.cue`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runValidate,
 }
 
 func init() {
-	validateCmd.Flags().Bool("warn", false, "show warnings")
-	validateCmd.Flags().Bool("strict", false, "fail on warnings")
+	validateCmd.Flags().Bool("remote", false, "validate via a running server's /v1/validate instead of locally")
 }
 
 func runValidate(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	if remote, _ := cmd.Flags().GetBool("remote"); remote {
+		return runValidateRemote(args)
+	}
+	return runValidateLocal(args)
+}
 
-	serverAddr := viper.GetString("server")
-	cfg := client.Config{
-		Address: serverAddr,
+// runValidateLocal loads each path with the engine loader the server uses,
+// answering "will the server load this?" without a running server.
+func runValidateLocal(args []string) error {
+	hasErrors := false
+	for _, arg := range args {
+		eng, err := engine.NewEngine(zap.NewNop())
+		if err != nil {
+			return fmt.Errorf("initializing engine: %w", err)
+		}
+
+		info, statErr := os.Stat(arg)
+		if statErr != nil {
+			fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", arg, statErr)
+			hasErrors = true
+			continue
+		}
+
+		if info.IsDir() {
+			err = eng.LoadPoliciesFromDir(context.Background(), arg)
+		} else {
+			_, err = eng.LoadPoliciesFromFile(context.Background(), arg)
+		}
+		if err != nil {
+			fmt.Printf("✗ %s: %v\n", arg, err)
+			hasErrors = true
+			continue
+		}
+
+		fmt.Printf("✓ %s: %d policies valid\n", arg, len(eng.ListPolicies("")))
+		fmt.Printf("  Digest: %s\n", eng.PolicySetDigest())
 	}
 
-	c, err := client.NewClient(cfg)
+	if hasErrors {
+		osExit(1)
+	}
+	return nil
+}
+
+// runValidateRemote sends each file's content to a running server's
+// /v1/validate endpoint.
+func runValidateRemote(args []string) error {
+	c, ctx, cleanup, err := newServerClient()
 	if err != nil {
-		return fmt.Errorf("connecting to server: %w", err)
+		return err
 	}
-	defer c.Close()
+	defer cleanup()
 
-	showWarn, _ := cmd.Flags().GetBool("warn")
-	strict, _ := cmd.Flags().GetBool("strict")
 	hasErrors := false
 
 	// Expand directory arguments into the .cue files they contain
@@ -104,22 +153,9 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Printf("✗ %s: invalid\n", file)
 			for _, e := range result.Errors {
-				loc := ""
-				if e.Line > 0 {
-					loc = fmt.Sprintf(":%d:%d", e.Line, e.Column)
-				}
-				fmt.Printf("  error%s: %s\n", loc, e.Message)
+				fmt.Printf("  error: %s\n", e.Message)
 			}
 			hasErrors = true
-		}
-
-		if showWarn && len(result.Warnings) > 0 {
-			for _, w := range result.Warnings {
-				fmt.Printf("  warning: %s\n", w.Message)
-			}
-			if strict {
-				hasErrors = true
-			}
 		}
 	}
 
@@ -168,8 +204,14 @@ Examples:
 
 var policyDeleteCmd = &cobra.Command{
 	Use:   "delete [name]",
-	Short: "Delete a policy",
+	Short: "Delete a policy from one instance's memory",
 	Long: `Delete a policy from the Garmr server.
+
+This removes the policy from the memory of the ONE instance that receives
+the request: other instances keep serving it, and the next reload or
+restart brings it back everywhere. To remove a policy permanently, delete
+it from the policy source (git) and deploy — the filesystem is the source
+of truth, not this endpoint.
 
 Examples:
   garmr policy delete my-policy
@@ -180,12 +222,40 @@ Examples:
 
 var policyReloadCmd = &cobra.Command{
 	Use:   "reload",
-	Short: "Reload policies from disk",
+	Short: "Reload policies from disk on one or more instances",
 	Long: `Trigger a reload of policies from the configured directory.
 
+The reload endpoint mutates a single server process. Behind a load
+balancer or service mesh, pass every instance's address via --servers so
+all of them converge — calling the service VIP reloads whichever instance
+happened to receive the request and leaves the rest serving the old set.
+
+Reload fails closed on the server: a broken or empty policy tree returns
+an error and the previous policy set keeps serving. This command exits
+nonzero if any instance fails, if --expect-digest does not match, or if
+the instances end up with diverging digests.
+
+Behind a service-mesh upstream the instances cannot be addressed
+individually — every call load-balances — so --servers has nothing to
+enumerate. Use --converge --instances N there: the reload is repeated
+against the one upstream address until N distinct instances have each
+acknowledged the expected digest, which is what makes the digest check
+mean anything when you cannot pick who answers.
+
 Examples:
+  # Single instance (the --server address)
   garmr policy reload
-  garmr policy reload --force`,
+
+  # Every alloc addressed directly, with convergence enforced against the
+  # digest of the git checkout that was just synced
+  garmr policy reload \
+    --servers http://10.0.0.11:8080,http://10.0.0.12:8080 \
+    --expect-digest "$(garmr policy digest policies/)"
+
+  # Through a Consul Connect upstream, where the sidecar picks the instance
+  garmr policy reload --server http://localhost:8080 \
+    --converge --instances 2 \
+    --expect-digest "$(garmr policy digest policies/)"`,
 	RunE: runPolicyReload,
 }
 
@@ -194,13 +264,13 @@ func init() {
 	policyCmd.AddCommand(policyGetCmd)
 	policyCmd.AddCommand(policyDeleteCmd)
 	policyCmd.AddCommand(policyReloadCmd)
+	policyCmd.AddCommand(policyDigestCmd)
 	policyCmd.AddCommand(policyLockCmd)
 	policyCmd.AddCommand(policyValidateLockCmd)
 	policyCmd.AddCommand(policyDiffCmd)
 
 	// List flags
 	policyListCmd.Flags().StringP("namespace", "n", "", "filter by namespace")
-	policyListCmd.Flags().StringSlice("label", nil, "filter by labels (key=value)")
 
 	// Get flags
 	policyGetCmd.Flags().StringP("namespace", "n", "default", "policy namespace")
@@ -210,7 +280,16 @@ func init() {
 	policyDeleteCmd.Flags().Bool("force", false, "skip confirmation")
 
 	// Reload flags
-	policyReloadCmd.Flags().Bool("force", false, "force reload even if unchanged")
+	policyReloadCmd.Flags().StringSlice("servers", nil,
+		"reload every listed instance (comma-separated or repeated); default is the single --server address")
+	policyReloadCmd.Flags().String("expect-digest", "",
+		"fail unless every instance reports this policy-set digest (compute with 'garmr policy digest')")
+	policyReloadCmd.Flags().Bool("converge", false,
+		"repeat the reload against one address until --instances distinct instances have acknowledged (for mesh upstreams that load-balance)")
+	policyReloadCmd.Flags().Int("instances", 0,
+		"number of distinct instances to converge (required with --converge)")
+	policyReloadCmd.Flags().Duration("converge-timeout", 2*time.Minute,
+		"give up if --converge has not reached every instance within this long")
 
 	// Lock flags
 	policyLockCmd.Flags().String("version", "", "version to embed in lock file")
@@ -218,16 +297,63 @@ func init() {
 	policyLockCmd.Flags().String("updated-by", "", "override updatedBy field")
 }
 
-// policyLockCmd generates lock files for GitOps workflows
+// policyDigestCmd computes the policy-set digest of a local checkout.
+var policyDigestCmd = &cobra.Command{
+	Use:   "digest <policy-dir|policy-file>",
+	Short: "Compute the policy-set digest of local policies",
+	Long: `Load policies locally exactly as the server does and print the
+deterministic policy-set digest.
+
+A CI/CD pipeline compares this value (computed from its git checkout)
+against the "digest" field of GET /v1/policies — or of the reload
+response — to verify that a running server converged on the exact policy
+content that was shipped.
+
+Examples:
+  # Digest of the checkout
+  garmr policy digest policies/
+
+  # Compare with what a server is actually serving
+  curl -s http://garmr:8080/v1/policies | jq -r .digest`,
+	Args: cobra.ExactArgs(1),
+	RunE: runPolicyDigest,
+}
+
+func runPolicyDigest(cmd *cobra.Command, args []string) error {
+	eng, err := engine.NewEngine(zap.NewNop())
+	if err != nil {
+		return fmt.Errorf("initializing engine: %w", err)
+	}
+
+	info, err := os.Stat(args[0])
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", args[0], err)
+	}
+	if info.IsDir() {
+		err = eng.LoadPoliciesFromDir(context.Background(), args[0])
+	} else {
+		_, err = eng.LoadPoliciesFromFile(context.Background(), args[0])
+	}
+	if err != nil {
+		return fmt.Errorf("loading %s: %w", args[0], err)
+	}
+
+	fmt.Println(eng.PolicySetDigest())
+	return nil
+}
+
+// policyLockCmd generates lock files for review-integrity checks in git.
 var policyLockCmd = &cobra.Command{
 	Use:   "lock <policy-file> [policy-file...]",
 	Short: "Generate lock files for policy files",
 	Long: `Generate lock files for one or more policy files.
 
-Lock files contain a SHA256 checksum of the policy content and enable
-the on-demand reload strategy for GitOps workflows. When Garmr starts with
-on-demand mode, it compares the lock file checksum with the cached
-policy checksum to determine if a reload is needed.
+A lock file records a SHA256 checksum of the policy content at the moment
+it was reviewed. It is a repo-side integrity gate: 'garmr policy
+validate-lock' in CI fails when a policy changed without its lock file
+being regenerated, so unreviewed edits cannot ship. The server never
+reads lock files — to verify what a running server actually loaded, use
+'garmr policy digest' and compare it with the digest the server reports.
 
 Examples:
   # Generate lock file for a single policy
@@ -252,12 +378,11 @@ Lock File Format:
     }
   }
 
-GitOps Workflow:
+Workflow:
   1. Edit policy file
   2. Run 'garmr policy lock <file>'
   3. Commit both policy and .lock file
-  4. GitOps controller syncs to cluster
-  5. Garmr detects lock file change, reloads policy`,
+  4. CI runs 'garmr policy validate-lock' to catch unreviewed edits`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runPolicyLock,
 }
@@ -276,8 +401,9 @@ Examples:
   # Validate a single policy
   garmr policy validate-lock policies/release/prod-release.cue
 
-  # Validate all policies (in CI)
-  garmr policy validate-lock --recursive policies/ || exit 1`,
+  # Validate all policies (in CI). Directories are always expanded
+  # recursively — there is no --recursive flag on this command.
+  garmr policy validate-lock policies/ || exit 1`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runPolicyValidateLock,
 }
@@ -391,8 +517,8 @@ func runPolicyDiff(cmd *cobra.Command, args []string) error {
 			Size int64  `json:"size"`
 		} `json:"source"`
 	}
-	if err := json.Unmarshal(lockContent, &lock); err != nil {
-		return fmt.Errorf("parsing lock file: %w", err)
+	if jsonErr := json.Unmarshal(lockContent, &lock); jsonErr != nil {
+		return fmt.Errorf("parsing lock file: %w", jsonErr)
 	}
 
 	// Compute current checksum
@@ -445,7 +571,7 @@ func generateLockFile(policyPath, version, updatedBy string) error {
 	checksum := "sha256:" + hash
 
 	if updatedBy == "" {
-		if u, err := user.Current(); err == nil {
+		if u, userErr := user.Current(); userErr == nil {
 			updatedBy = u.Username
 		}
 	}
@@ -497,8 +623,8 @@ func validateLockFileCmd(policyPath string) error {
 		Checksum string `json:"checksum"`
 		Version  string `json:"version"`
 	}
-	if err := json.Unmarshal(lockContent, &lock); err != nil {
-		return fmt.Errorf("parsing lock file: %w", err)
+	if jsonErr := json.Unmarshal(lockContent, &lock); jsonErr != nil {
+		return fmt.Errorf("parsing lock file: %w", jsonErr)
 	}
 
 	// Compute current checksum
@@ -583,22 +709,14 @@ func truncateHash(hash string) string {
 }
 
 func runPolicyList(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	serverAddr := viper.GetString("server")
-	cfg := client.Config{
-		Address: serverAddr,
-	}
-
-	c, err := client.NewClient(cfg)
+	c, ctx, cleanup, err := newServerClient()
 	if err != nil {
-		return fmt.Errorf("connecting to server: %w", err)
+		return err
 	}
-	defer c.Close()
+	defer cleanup()
 
 	namespace, _ := cmd.Flags().GetString("namespace")
-	policies, err := c.ListPolicies(ctx, namespace)
+	list, err := c.ListPolicies(ctx, namespace)
 	if err != nil {
 		return fmt.Errorf("listing policies: %w", err)
 	}
@@ -607,10 +725,10 @@ func runPolicyList(cmd *cobra.Command, args []string) error {
 
 	switch format {
 	case "json":
-		data, _ := json.MarshalIndent(policies, "", "  ")
+		data, _ := json.MarshalIndent(list, "", "  ")
 		fmt.Println(string(data))
 	default:
-		if len(policies) == 0 {
+		if len(list.Policies) == 0 {
 			fmt.Println("No policies loaded")
 			return nil
 		}
@@ -619,46 +737,39 @@ func runPolicyList(cmd *cobra.Command, args []string) error {
 			"NAME", "NAMESPACE", "RULES")
 		fmt.Println(strings.Repeat("-", 60))
 
-		for _, p := range policies {
+		for _, p := range list.Policies {
 			fmt.Printf("%-30s %-15s %-8d\n",
 				p.Name,
 				p.Namespace,
 				p.RuleCount,
 			)
 		}
+		fmt.Printf("\nDigest: %s\n", list.Digest)
 	}
 
 	return nil
 }
 
 func runPolicyGet(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	serverAddr := viper.GetString("server")
-	cfg := client.Config{
-		Address: serverAddr,
-	}
-
-	c, err := client.NewClient(cfg)
+	c, ctx, cleanup, err := newServerClient()
 	if err != nil {
-		return fmt.Errorf("connecting to server: %w", err)
+		return err
 	}
-	defer c.Close()
+	defer cleanup()
 
 	name := args[0]
 	namespace, _ := cmd.Flags().GetString("namespace")
 
-	policies, err := c.ListPolicies(ctx, namespace)
+	list, err := c.ListPolicies(ctx, namespace)
 	if err != nil {
 		return fmt.Errorf("fetching policies: %w", err)
 	}
 
 	// Find the matching policy
 	var found *client.PolicyInfo
-	for i, p := range policies {
+	for i, p := range list.Policies {
 		if p.Name == name {
-			found = &policies[i]
+			found = &list.Policies[i]
 			break
 		}
 	}
@@ -682,19 +793,11 @@ func runPolicyGet(cmd *cobra.Command, args []string) error {
 }
 
 func runPolicyDelete(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	serverAddr := viper.GetString("server")
-	cfg := client.Config{
-		Address: serverAddr,
-	}
-
-	c, err := client.NewClient(cfg)
+	c, ctx, cleanup, err := newServerClient()
 	if err != nil {
-		return fmt.Errorf("connecting to server: %w", err)
+		return err
 	}
-	defer c.Close()
+	defer cleanup()
 
 	name := args[0]
 	namespace, _ := cmd.Flags().GetString("namespace")
@@ -703,7 +806,8 @@ func runPolicyDelete(cmd *cobra.Command, args []string) error {
 	if !force {
 		fmt.Printf("Delete policy '%s/%s'? [y/N]: ", namespace, name)
 		var confirm string
-		fmt.Scanln(&confirm)
+		// EOF or piped stdin reads as empty, which safely means "not y".
+		_, _ = fmt.Scanln(&confirm)
 		if strings.ToLower(confirm) != "y" {
 			fmt.Println("Cancelled")
 			return nil
@@ -724,40 +828,205 @@ func runPolicyDelete(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// reloadOutcome is one instance's reload result in the fan-out.
+type reloadOutcome struct {
+	Server string               `json:"server"`
+	Result *client.ReloadResult `json:"result,omitempty"`
+	Error  string               `json:"error,omitempty"`
+}
+
 func runPolicyReload(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	serverAddr := viper.GetString("server")
-	cfg := client.Config{
-		Address: serverAddr,
+	servers, _ := cmd.Flags().GetStringSlice("servers")
+	expectDigest, _ := cmd.Flags().GetString("expect-digest")
+	converge, _ := cmd.Flags().GetBool("converge")
+	if len(servers) == 0 {
+		servers = []string{viper.GetString("server")}
 	}
 
-	c, err := client.NewClient(cfg)
-	if err != nil {
-		return fmt.Errorf("connecting to server: %w", err)
+	if converge {
+		instances, _ := cmd.Flags().GetInt("instances")
+		timeout, _ := cmd.Flags().GetDuration("converge-timeout")
+		if instances < 1 {
+			return fmt.Errorf("--converge requires --instances (the number of instances behind the address)")
+		}
+		if len(servers) > 1 {
+			return fmt.Errorf("--converge takes a single address: it repeats the reload through one " +
+				"load-balancing upstream. Use --servers on its own to address instances directly")
+		}
+		return runPolicyReloadConverge(servers[0], expectDigest, instances, timeout)
 	}
-	defer c.Close()
 
-	fmt.Println("Reloading policies...")
+	outcomes := make([]reloadOutcome, 0, len(servers))
+	failed := false
+	digests := make(map[string]bool)
 
-	result, err := c.ReloadPolicies(ctx)
-	if err != nil {
-		return fmt.Errorf("reload failed: %w", err)
+	for _, addr := range servers {
+		outcomes = append(outcomes, reloadInstance(addr, expectDigest))
+		o := &outcomes[len(outcomes)-1]
+		if o.Error != "" || o.Result == nil || !o.Result.Success {
+			failed = true
+			continue
+		}
+		digests[o.Result.Digest] = true
+	}
+	if len(digests) > 1 {
+		failed = true
 	}
 
-	format := viper.GetString("output")
-	if format == "json" {
-		data, _ := json.MarshalIndent(result, "", "  ")
-		fmt.Println(string(data))
-	} else {
-		if result.Success {
-			fmt.Printf("✓ Reloaded %d policies in %dms\n", result.PoliciesLoaded, result.ReloadTimeMs)
-			fmt.Printf("  Storage: %s\n", result.StorageType)
+	if viper.GetString("output") == "json" {
+		// Single-instance keeps the historical shape (the bare result);
+		// fan-out emits the per-instance outcome list.
+		if len(outcomes) == 1 && outcomes[0].Result != nil {
+			data, _ := json.MarshalIndent(outcomes[0].Result, "", "  ")
+			fmt.Println(string(data))
 		} else {
-			fmt.Printf("✗ Reload failed: %s\n", result.Error)
+			data, _ := json.MarshalIndent(outcomes, "", "  ")
+			fmt.Println(string(data))
+		}
+	} else {
+		for _, o := range outcomes {
+			switch {
+			case o.Result != nil && o.Result.Success && o.Error == "":
+				fmt.Printf("✓ %s: Reloaded %d policies in %dms\n", o.Server, o.Result.PoliciesLoaded, o.Result.ReloadTimeMs)
+				fmt.Printf("  Storage: %s\n", o.Result.StorageType)
+				fmt.Printf("  Digest:  %s\n", o.Result.Digest)
+			case o.Result != nil && o.Error != "":
+				fmt.Printf("✗ %s: %s\n", o.Server, o.Error)
+			case o.Result != nil:
+				fmt.Printf("✗ %s: Reload failed: %s\n", o.Server, o.Result.Error)
+			default:
+				fmt.Printf("✗ %s: %s\n", o.Server, o.Error)
+			}
+		}
+		if len(digests) > 1 {
+			fmt.Printf("✗ instances diverged: %d distinct digests\n", len(digests))
 		}
 	}
 
+	if failed {
+		osExit(1)
+	}
 	return nil
+}
+
+// convergeReport is the JSON shape of a --converge run.
+type convergeReport struct {
+	Server    string   `json:"server"`
+	Converged bool     `json:"converged"`
+	Want      int      `json:"instances_wanted"`
+	Seen      []string `json:"instances_seen"`
+	Digest    string   `json:"digest,omitempty"`
+	Attempts  int      `json:"attempts"`
+	Error     string   `json:"error,omitempty"`
+}
+
+// runPolicyReloadConverge reloads through a single load-balancing address
+// until every instance behind it has acknowledged.
+//
+// Behind a mesh upstream the caller cannot choose which instance answers, so
+// one reload call proves nothing about the fleet: the plain fan-out would see
+// a single success and a single digest and report convergence while the
+// instances it never reached kept serving the old policy set. Repeating the
+// call and collecting the instance IDs turns that into a real check —
+// success means every instance was observed acknowledging the expected
+// digest, not that some instance did.
+func runPolicyReloadConverge(addr, expectDigest string, want int, timeout time.Duration) error {
+	report := convergeReport{Server: addr, Want: want}
+	seen := make(map[string]string, want) // instance ID -> digest
+	deadline := time.Now().Add(timeout)
+
+	for len(seen) < want && time.Now().Before(deadline) {
+		report.Attempts++
+		outcome := reloadInstance(addr, expectDigest)
+
+		switch {
+		case outcome.Error != "":
+			report.Error = outcome.Error
+		case outcome.Result == nil || !outcome.Result.Success:
+			report.Error = "reload reported failure"
+		case outcome.Result.InstanceID == "":
+			// Without an instance ID there is no way to tell a second
+			// instance from the same one answering twice, so converging is
+			// not something this command can honestly claim.
+			report.Error = "server did not report instance_id; " +
+				"--converge needs a server new enough to identify itself (use --servers instead)"
+		default:
+			seen[outcome.Result.InstanceID] = outcome.Result.Digest
+			report.Digest = outcome.Result.Digest
+		}
+
+		if report.Error != "" {
+			break
+		}
+		if len(seen) < want {
+			// Give the upstream's load balancing a chance to pick a different
+			// instance rather than hammering it.
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+
+	for id := range seen {
+		report.Seen = append(report.Seen, id)
+	}
+	sort.Strings(report.Seen)
+
+	// Every instance must agree, or the fleet is split regardless of count.
+	digests := make(map[string]bool, len(seen))
+	for _, d := range seen {
+		digests[d] = true
+	}
+	if report.Error == "" && len(digests) > 1 {
+		report.Error = fmt.Sprintf("instances diverged: %d distinct digests", len(digests))
+	}
+	if report.Error == "" && len(seen) < want {
+		report.Error = fmt.Sprintf("timed out after %s: reached %d of %d instances",
+			timeout, len(seen), want)
+	}
+	report.Converged = report.Error == "" && len(seen) == want
+
+	if viper.GetString("output") == "json" {
+		data, _ := json.MarshalIndent(report, "", "  ")
+		fmt.Println(string(data))
+	} else if report.Converged {
+		fmt.Printf("✓ %s: %d/%d instances converged after %d reloads\n",
+			addr, len(seen), want, report.Attempts)
+		fmt.Printf("  Digest:    %s\n", report.Digest)
+		fmt.Printf("  Instances: %s\n", strings.Join(report.Seen, ", "))
+	} else {
+		fmt.Printf("✗ %s: %s\n", addr, report.Error)
+		fmt.Printf("  Reached %d of %d instances in %d reloads: %s\n",
+			len(seen), want, report.Attempts, strings.Join(report.Seen, ", "))
+	}
+
+	if !report.Converged {
+		osExit(1)
+	}
+	return nil
+}
+
+// reloadInstance reloads one server and applies the digest expectation.
+func reloadInstance(addr, expectDigest string) reloadOutcome {
+	outcome := reloadOutcome{Server: addr}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	c, err := client.NewClient(client.Config{Address: addr})
+	if err != nil {
+		outcome.Error = err.Error()
+		return outcome
+	}
+	defer func() { _ = c.Close() }()
+
+	result, err := c.ReloadPolicies(ctx)
+	if err != nil {
+		outcome.Error = err.Error()
+		return outcome
+	}
+	outcome.Result = result
+
+	if result.Success && expectDigest != "" && result.Digest != expectDigest {
+		outcome.Error = fmt.Sprintf("digest %s does not match expected %s", result.Digest, expectDigest)
+	}
+	return outcome
 }

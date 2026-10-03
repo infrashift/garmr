@@ -13,6 +13,7 @@ func TestNewEngine(t *testing.T) {
 	}
 	if eng == nil {
 		t.Fatal("engine is nil")
+		return
 	}
 	if len(eng.builtins) == 0 {
 		t.Error("no builtins registered")

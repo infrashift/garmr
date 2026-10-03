@@ -53,7 +53,7 @@ Examples:
   garmr test policies/ --filter "valid release"
 
   # Output JSON results
-  garmr test policies/ --output json
+  garmr test policies/ --format json
 `,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runTest,
@@ -69,64 +69,111 @@ var (
 )
 
 func init() {
-	testCmd.Flags().BoolVarP(&testVerbose, "verbose", "v", false,
-		"Show detailed test output")
+	// No -v shorthand: the root command already owns -v/--verbose, and a
+	// local one shadowed it. runTest reads the inherited flag instead.
 	testCmd.Flags().BoolVarP(&testRecursive, "recursive", "r", false,
 		"Process directories recursively")
 	testCmd.Flags().StringVar(&testFilter, "filter", "",
 		"Filter tests by name (substring match)")
-	testCmd.Flags().StringVarP(&testOutput, "output", "o", "text",
+	// --format, not -o: the root -o/--output takes table|json|yaml, a
+	// different value space from this command's text|json|tap, so sharing
+	// the shorthand made `garmr test -o table` silently invalid.
+	testCmd.Flags().StringVar(&testOutput, "format", "text",
 		"Output format: text, json, tap")
 	testCmd.Flags().BoolVar(&testFailFast, "fail-fast", false,
 		"Stop on first test failure")
 }
 
 func runTest(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	// Inherited from the root command's persistent flags.
+	testVerbose, _ = cmd.Flags().GetBool("verbose")
 	runner, err := qtesting.NewRunner(testVerbose)
 	if err != nil {
 		return fmt.Errorf("creating test runner: %w", err)
 	}
 
-	// Collect policy and test files
-	var policyFiles, testFiles []string
+	policyFiles, testFiles, err := collectTestFiles(args, testRecursive)
+	if err != nil {
+		return err
+	}
+	if len(testFiles) == 0 {
+		return fmt.Errorf("no test files found (use *_test.cue naming convention)")
+	}
+
+	for _, pf := range policyFiles {
+		if loadErr := runner.LoadPolicyFile(pf); loadErr != nil {
+			return fmt.Errorf("loading policy %s: %w", pf, loadErr)
+		}
+		if testVerbose {
+			fmt.Printf("Loaded policy: %s\n", pf)
+		}
+	}
+
+	allResults, totals, err := runTestSuites(context.Background(), runner, testFiles)
+	if err != nil {
+		return err
+	}
+
+	if testOutput == "json" {
+		printJSON(allResults)
+	}
+	if len(allResults) > 1 && testOutput == "text" {
+		fmt.Printf("\n=== Summary ===\n")
+		fmt.Printf("Suites: %d\n", len(allResults))
+		fmt.Printf("Tests:  %d passed, %d failed, %d skipped\n",
+			totals.passed, totals.failed, totals.skipped)
+	}
+
+	if totals.failed > 0 {
+		return fmt.Errorf("%d test(s) failed", totals.failed)
+	}
+	return nil
+}
+
+// collectTestFiles splits the arguments into policy files and *_test.cue
+// suites. Directory arguments are walked (only the top level unless recursive
+// is set), and when no suite was named explicitly, each policy file's sibling
+// _test.cue is picked up.
+func collectTestFiles(args []string, recursive bool) (policyFiles, testFiles []string, err error) {
+	classify := func(path string) {
+		if strings.HasSuffix(path, "_test.cue") {
+			testFiles = append(testFiles, path)
+		} else {
+			policyFiles = append(policyFiles, path)
+		}
+	}
 
 	for _, arg := range args {
 		info, err := os.Stat(arg)
 		if err != nil {
-			return fmt.Errorf("accessing %s: %w", arg, err)
+			return nil, nil, fmt.Errorf("accessing %s: %w", arg, err)
 		}
 
-		if info.IsDir() {
-			// Find all .cue files
-			err := filepath.Walk(arg, func(path string, info os.FileInfo, err error) error {
-				if err != nil {
-					return err
-				}
-				if !testRecursive && filepath.Dir(path) != arg {
-					if info.IsDir() {
-						return filepath.SkipDir
-					}
-					return nil
-				}
-				if !info.IsDir() && strings.HasSuffix(path, ".cue") {
-					if strings.HasSuffix(path, "_test.cue") {
-						testFiles = append(testFiles, path)
-					} else {
-						policyFiles = append(policyFiles, path)
-					}
+		if !info.IsDir() {
+			classify(arg)
+			continue
+		}
+
+		walkErr := filepath.Walk(arg, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			// Non-recursive mode only descends into the argument itself.
+			// (The root must not be skipped: SkipDir on it used to abort the
+			// whole walk, so `garmr test <dir>` without -r found nothing.)
+			if !recursive && path != arg && filepath.Dir(path) != arg {
+				if info.IsDir() {
+					return filepath.SkipDir
 				}
 				return nil
-			})
-			if err != nil {
-				return fmt.Errorf("walking directory: %w", err)
 			}
-		} else {
-			if strings.HasSuffix(arg, "_test.cue") {
-				testFiles = append(testFiles, arg)
-			} else {
-				policyFiles = append(policyFiles, arg)
+			if !info.IsDir() && strings.HasSuffix(path, ".cue") {
+				classify(path)
 			}
+			return nil
+		})
+		if walkErr != nil {
+			return nil, nil, fmt.Errorf("walking directory: %w", walkErr)
 		}
 	}
 
@@ -134,93 +181,72 @@ func runTest(cmd *cobra.Command, args []string) error {
 	if len(testFiles) == 0 {
 		for _, pf := range policyFiles {
 			testFile := strings.TrimSuffix(pf, ".cue") + "_test.cue"
-			if _, err := os.Stat(testFile); err == nil {
+			if _, statErr := os.Stat(testFile); statErr == nil {
 				testFiles = append(testFiles, testFile)
 			}
 		}
 	}
 
-	if len(testFiles) == 0 {
-		return fmt.Errorf("no test files found (use *_test.cue naming convention)")
-	}
+	return policyFiles, testFiles, nil
+}
 
-	// Load policies
-	for _, pf := range policyFiles {
-		if err := runner.LoadPolicyFile(pf); err != nil {
-			return fmt.Errorf("loading policy %s: %w", pf, err)
-		}
-		if testVerbose {
-			fmt.Printf("Loaded policy: %s\n", pf)
-		}
-	}
+// suiteTotals aggregates results across every suite of a run.
+type suiteTotals struct {
+	passed, failed, skipped int
+}
 
-	// Run tests
+// runTestSuites loads, filters, and runs each suite, streaming text/tap
+// output as it goes and honouring --fail-fast.
+func runTestSuites(ctx context.Context, runner *qtesting.Runner, testFiles []string) ([]*qtesting.SuiteResult, suiteTotals, error) {
 	var allResults []*qtesting.SuiteResult
-	totalPassed, totalFailed, totalSkipped := 0, 0, 0
+	var totals suiteTotals
 
 	for _, tf := range testFiles {
 		suite, err := runner.LoadTestSuiteFile(tf)
 		if err != nil {
-			return fmt.Errorf("loading test suite %s: %w", tf, err)
+			return nil, totals, fmt.Errorf("loading test suite %s: %w", tf, err)
 		}
 
-		// Apply filter if specified
 		if testFilter != "" {
-			var filtered []qtesting.TestCase
-			for _, tc := range suite.Tests {
-				if strings.Contains(strings.ToLower(tc.Name), strings.ToLower(testFilter)) {
-					filtered = append(filtered, tc)
-				}
-			}
-			suite.Tests = filtered
+			suite.Tests = filterTestCases(suite.Tests, testFilter)
 		}
-
 		if len(suite.Tests) == 0 {
 			continue
 		}
 
 		result := runner.RunSuite(ctx, suite)
 		allResults = append(allResults, result)
+		totals.passed += result.Passed
+		totals.failed += result.Failed
+		totals.skipped += result.Skipped
 
-		totalPassed += result.Passed
-		totalFailed += result.Failed
-		totalSkipped += result.Skipped
-
-		// Output based on format
 		switch testOutput {
 		case "text":
 			fmt.Print(qtesting.FormatResults(result, testVerbose))
 		case "json":
-			// Will output all at end
+			// Printed all together by the caller.
 		case "tap":
 			fmt.Print(formatTAP(result))
 		}
 
-		// Fail fast check
 		if testFailFast && result.Failed > 0 {
 			break
 		}
 	}
 
-	// JSON output (all results together)
-	if testOutput == "json" {
-		printJSON(allResults)
-	}
+	return allResults, totals, nil
+}
 
-	// Final summary for multiple suites
-	if len(allResults) > 1 && testOutput == "text" {
-		fmt.Printf("\n=== Summary ===\n")
-		fmt.Printf("Suites: %d\n", len(allResults))
-		fmt.Printf("Tests:  %d passed, %d failed, %d skipped\n",
-			totalPassed, totalFailed, totalSkipped)
+// filterTestCases keeps the cases whose name contains the filter,
+// case-insensitively.
+func filterTestCases(cases []qtesting.TestCase, filter string) []qtesting.TestCase {
+	var filtered []qtesting.TestCase
+	for _, tc := range cases {
+		if strings.Contains(strings.ToLower(tc.Name), strings.ToLower(filter)) {
+			filtered = append(filtered, tc)
+		}
 	}
-
-	// Exit with error if any tests failed
-	if totalFailed > 0 {
-		return fmt.Errorf("%d test(s) failed", totalFailed)
-	}
-
-	return nil
+	return filtered
 }
 
 func formatTAP(result *qtesting.SuiteResult) string {
@@ -250,5 +276,5 @@ func formatTAP(result *qtesting.SuiteResult) string {
 func printJSON(results interface{}) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	enc.Encode(results)
+	_ = enc.Encode(results)
 }

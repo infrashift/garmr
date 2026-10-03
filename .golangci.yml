@@ -1,0 +1,37 @@
+# Pinned linter set. Without this file golangci-lint runs on whatever its
+# defaults happen to be for the installed version, so the effective lint
+# surface changes silently across releases.
+run:
+  timeout: 5m
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - errorlint
+    - misspell
+    - unconvert
+
+linters-settings:
+  errcheck:
+    # Cobra flag lookups and viper binds are checked explicitly where it
+    # matters; these variants are noise on every command registration.
+    exclude-functions:
+      - (*github.com/spf13/pflag.FlagSet).MarkHidden
+  govet:
+    enable:
+      - shadow
+
+issues:
+  exclude-rules:
+    # Test helpers legitimately ignore Close/Write errors on temp resources.
+    - path: _test\.go
+      linters:
+        - errcheck
+  max-issues-per-linter: 0
+  max-same-issues: 0

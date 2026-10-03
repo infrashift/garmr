@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -38,8 +40,22 @@ func NewClient(cfg Config) (*Client, error) {
 		baseURL = "http://localhost:8080"
 	}
 
+	// Validate the address so the error return means something. It used to
+	// be unconditionally nil, which made `garmr health --wait` unreachable:
+	// --wait only triggered on a construction failure that could never occur.
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid server address %q: %w", baseURL, err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, fmt.Errorf("invalid server address %q: scheme must be http or https", baseURL)
+	}
+	if parsed.Host == "" {
+		return nil, fmt.Errorf("invalid server address %q: missing host", baseURL)
+	}
+
 	return &Client{
-		baseURL: baseURL,
+		baseURL: strings.TrimSuffix(baseURL, "/"),
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
@@ -55,7 +71,6 @@ func (c *Client) Close() error {
 type EvaluateOptions struct {
 	Policies      []string
 	Namespace     string
-	Trace         bool
 	IncludePassed bool
 	RequestID     string // Optional request ID for audit correlation
 }
@@ -66,6 +81,30 @@ type EvaluateResult struct {
 	RequestID string       `json:"request_id"`
 	Results   []RuleResult `json:"results"`
 	Metrics   Metrics      `json:"metrics"`
+
+	Summary         ResultSummary  `json:"summary"`
+	EvaluationMode  EvaluationMode `json:"evaluation_mode"`
+	TerminatedEarly bool           `json:"terminated_early"`
+	TerminationRule *RuleResult    `json:"termination_rule,omitempty"`
+}
+
+// ResultSummary counts rule outcomes for one evaluation.
+type ResultSummary struct {
+	TotalRules int `json:"total_rules"`
+	Passed     int `json:"passed"`
+	Failed     int `json:"failed"`
+	Skipped    int `json:"skipped"`
+}
+
+// EvaluationMode reports how the evaluation ran: whether dry-run or fail-fast
+// applied, and how much of the rule set was actually reached.
+type EvaluationMode struct {
+	DryRun            bool `json:"dry_run"`
+	FailFast          bool `json:"fail_fast"`
+	ShortCircuited    bool `json:"short_circuited"`
+	TotalRulesInScope int  `json:"total_rules_in_scope"`
+	RulesEvaluated    int  `json:"rules_evaluated"`
+	RulesSkipped      int  `json:"rules_skipped"`
 }
 
 // RuleResult is a single rule result.
@@ -93,7 +132,6 @@ func (c *Client) Evaluate(ctx context.Context, input map[string]interface{}, opt
 		"input":          input,
 		"namespace":      opts.Namespace,
 		"policies":       opts.Policies,
-		"trace":          opts.Trace,
 		"include_passed": opts.IncludePassed,
 	}
 
@@ -154,12 +192,11 @@ type ValidateResult struct {
 	Warnings []ValidationError `json:"warnings,omitempty"`
 }
 
-// ValidationError is a validation error.
+// ValidationError is a validation error. The server reports a message and a
+// coarse code (PARSE_ERROR, SCHEMA_ERROR, COMPILE_ERROR); it has no position information.
 type ValidationError struct {
 	Message string `json:"message"`
 	Code    string `json:"code,omitempty"`
-	Line    int    `json:"line,omitempty"`
-	Column  int    `json:"column,omitempty"`
 }
 
 // Validate validates a policy.
@@ -203,16 +240,29 @@ type PolicyInfo struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
 	RuleCount int    `json:"rule_count"`
+	Hash      string `json:"hash,omitempty"`
 }
 
-// ListPolicies lists all policies.
-func (c *Client) ListPolicies(ctx context.Context, namespace string) ([]PolicyInfo, error) {
-	url := c.baseURL + "/v1/policies"
+// PolicyList is the /v1/policies response: the loaded policies plus the
+// deterministic digest of the whole set, comparable with the output of
+// `garmr policy digest` on a git checkout.
+type PolicyList struct {
+	Policies []PolicyInfo `json:"policies"`
+	Digest   string       `json:"digest"`
+	// InstanceID names the instance that answered. Behind a mesh upstream
+	// every call load-balances, so this is the only way to tell one
+	// instance's answer from another's.
+	InstanceID string `json:"instance_id,omitempty"`
+}
+
+// ListPolicies lists all policies along with the policy-set digest.
+func (c *Client) ListPolicies(ctx context.Context, namespace string) (*PolicyList, error) {
+	reqURL := c.baseURL + "/v1/policies"
 	if namespace != "" {
-		url += "?namespace=" + namespace
+		reqURL += "?" + url.Values{"namespace": {namespace}}.Encode()
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -228,21 +278,24 @@ func (c *Client) ListPolicies(ctx context.Context, namespace string) ([]PolicyIn
 		return nil, fmt.Errorf("server error (%d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	var result struct {
-		Policies []PolicyInfo `json:"policies"`
-	}
+	var result PolicyList
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 
-	return result.Policies, nil
+	return &result, nil
 }
 
-// DeletePolicy deletes a policy.
+// DeletePolicy deletes a policy. Name and namespace are query-escaped: a
+// value containing `&`, `#`, `=` or a space must arrive as data, not as
+// query-string structure.
 func (c *Client) DeletePolicy(ctx context.Context, name, namespace string) (bool, error) {
-	url := fmt.Sprintf("%s/v1/policies?name=%s&namespace=%s", c.baseURL, name, namespace)
+	reqURL := c.baseURL + "/v1/policies?" + url.Values{
+		"name":      {name},
+		"namespace": {namespace},
+	}.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "DELETE", reqURL, nil)
 	if err != nil {
 		return false, fmt.Errorf("creating request: %w", err)
 	}
@@ -305,9 +358,13 @@ func (c *Client) Health(ctx context.Context) (*HealthResult, error) {
 type ReloadResult struct {
 	Success        bool   `json:"success"`
 	PoliciesLoaded int    `json:"policies_loaded"`
+	Digest         string `json:"digest,omitempty"`
 	ReloadTimeMs   int64  `json:"reload_time_ms"`
 	StorageType    string `json:"storage_type"`
 	Error          string `json:"error,omitempty"`
+	// InstanceID names the instance that performed this reload; convergence
+	// across a fleet is checked by collecting these.
+	InstanceID string `json:"instance_id,omitempty"`
 }
 
 // ReloadPolicies reloads policies from the configured directory.

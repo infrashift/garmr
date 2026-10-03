@@ -40,9 +40,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Run tests
-        run: |
-          PKGS=$(go list ./... | grep -v '/plugins/')
-          go test -short -race -coverprofile=coverage.out -covermode=atomic $PKGS
+        run: go test -short -race -coverprofile=coverage.out -covermode=atomic ./...
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -1
       - uses: actions/upload-artifact@v4
@@ -63,7 +61,73 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: gofmt
+        run: |
+          out="$(gofmt -l ./cmd ./internal)"
+          if [ -n "$out" ]; then
+            echo "The following files need gofmt:"
+            echo "$out"
+            exit 1
+          fi
+      # Pinned: `version: latest` lets an upstream release break CI with no
+      # change to this repo.
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v1.64.8
           args: --timeout=5m
+
+  schemas:
+    name: CUE Schemas & Policies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install cue
+        run: go install cuelang.org/go/cmd/cue@v0.15.1
+      - name: cue vet
+        run: cue vet ./schemas/...
+      - name: cue fmt --check
+        run: cue fmt --check ./schemas/... ./example-policies/...
+
+  container:
+    name: Container Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The image and its HEALTHCHECK were previously unverified on PRs,
+      # which is how a broken healthcheck and docker targets that pointed
+      # at a nonexistent Dockerfile shipped.
+      - name: Build image
+        run: docker build -f Containerfile -t garmr:ci .
+      - name: Smoke-test image
+        run: |
+          docker run -d --name garmr-ci \
+            -v "$PWD/example-policies:/policies:ro" \
+            garmr:ci --policy-dir /policies --http-addr :8080
+          for i in $(seq 1 30); do
+            if docker exec garmr-ci /usr/local/bin/garmr health --server http://localhost:8080; then
+              break
+            fi
+            if [ "$i" = 30 ]; then
+              echo "server never became healthy"; docker logs garmr-ci; exit 1
+            fi
+            sleep 1
+          done
+          docker exec garmr-ci wget -q -O- http://localhost:8080/readyz
+          docker rm -f garmr-ci
+
+  docs:
+    name: Docs Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install
+        working-directory: docs
+        run: bun install --frozen-lockfile
+      - name: Build
+        working-directory: docs
+        run: bun run build

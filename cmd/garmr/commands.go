@@ -31,6 +31,25 @@ func init() {
 	healthCmd.Flags().Duration("timeout", 30*time.Second, "timeout when waiting")
 }
 
+// newServerClient builds the REST client from the configured --server
+// address together with the standard 30-second request context shared by
+// every server-backed command. The returned cleanup releases both; callers
+// defer it immediately.
+func newServerClient() (*client.Client, context.Context, func(), error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	c, err := client.NewClient(client.Config{
+		Address: viper.GetString("server"),
+	})
+	if err != nil {
+		cancel()
+		return nil, nil, nil, fmt.Errorf("connecting to server: %w", err)
+	}
+	return c, ctx, func() {
+		cancel()
+		_ = c.Close()
+	}, nil
+}
+
 func runHealth(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -47,18 +66,22 @@ func runHealth(cmd *cobra.Command, args []string) error {
 		defer cancel()
 	}
 
+	// A bad address is a configuration error: waiting will never fix it.
 	c, err := client.NewClient(cfg)
 	if err != nil {
-		if wait {
-			return waitForHealth(ctx, cfg)
-		}
-		fmt.Printf("✗ Server unreachable: %v\n", err)
+		fmt.Printf("✗ %v\n", err)
 		osExit(1)
 	}
 	defer c.Close()
 
+	// --wait applies to the health check, not to client construction. It used
+	// to be checked only on a NewClient error, which could never happen, so
+	// `garmr health --wait` against a down server exited immediately.
 	result, err := c.Health(ctx)
 	if err != nil {
+		if wait {
+			return waitForHealth(ctx, cfg)
+		}
 		fmt.Printf("✗ Health check failed: %v\n", err)
 		osExit(1)
 	}

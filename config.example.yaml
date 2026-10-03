@@ -4,18 +4,34 @@
 # Server address
 http_addr: ":8080"
 
+# HTTP limits (defaults shown)
+# max_recv_size caps request bodies in bytes; evaluate buffers the whole
+# body, so size it together with the container's memory limit. Reconcile
+# the timeouts with the sidecar proxy in front (Envoy applies its own
+# request/idle timeouts and the shorter side wins).
+# max_recv_size: 16777216
+# read_timeout: "30s"
+# write_timeout: "60s"
+# idle_timeout: "120s"
+# max_validate_size caps the CUE source /v1/validate will compile. Keep it
+# well under max_recv_size: validation cost is driven by the source's
+# structure (unification is exponential in disjunctions), not its length.
+# max_validate_size: 1048576
+
+# Graceful shutdown budget. Readiness flips to 503 immediately, then
+# in-flight requests get up to this long to finish. Keep it below the
+# orchestrator's kill timeout, or a slow drain is cut short by SIGKILL.
+shutdown_timeout: "30s"
+
 # Policy configuration
 policy_dir: "/etc/garmr/policies"
 
-# TLS configuration (optional)
-# Server-side TLS only. Garmr deliberately does not implement mTLS — mutual
-# TLS is the service mesh's job (Consul Connect terminates client mTLS at
-# the sidecar and forwards the verified identity; see auth.identity_header
-# below and deploy/helm/garmr/examples/consul-connect/).
-tls:
-  enabled: false
-  cert: "/etc/garmr/tls/server.crt"
-  key: "/etc/garmr/tls/server.key"
+# Transport security
+# Garmr serves plain HTTP only. TLS — including mTLS — is the service mesh's
+# job: Consul Connect terminates mTLS at the sidecar and forwards the
+# verified identity (see auth.identity_header below and
+# deploy/helm/garmr/examples/consul-connect/). Deploying outside a mesh?
+# Front the server with a TLS-terminating proxy.
 
 # Logging configuration
 log:
@@ -28,13 +44,29 @@ log:
 # rather than silently allowing it. Set to false to restore the legacy
 # fail-open behavior — only do this if you knowingly evaluate inputs that
 # no policy targets.
+# timeout bounds a single evaluate/validate request, including time spent
+# waiting for an evaluation slot. This is the only limit that actually stops
+# work: write_timeout expires the connection without cancelling the handler,
+# and a policy's own spec.evaluation.timeout is optional. Keep it below the
+# sidecar's request timeout so Garmr, not the proxy, decides the outcome.
 evaluation:
   require_match: true
+  timeout: "10s"
 
 # Audit logging
+# path may be a file (rotated via max_size/max_backups/max_age) or the
+# literal "stdout"/"stderr" to stream records for platform-shipped logging.
+# In a mesh deployment prefer "stdout": the audit trail is the only record
+# of the mesh-verified principal, and a file on local disk dies with the
+# allocation. Application logs go to stderr, so the streams stay separable.
+# Rotation settings apply only when path is a file; they are ignored for
+# stdout/stderr, where the platform owns retention.
 audit:
   enabled: true
   path: "/var/log/garmr/audit.log"
+  max_size: 100      # MB before rotating
+  max_backups: 10    # old files retained
+  max_age: 30        # days
 
 # Authentication & caller identity
 # - api_key: if set, callers must present this value in api_key_header or
@@ -49,26 +81,46 @@ auth:
   api_key_header: "X-API-Key"
   identity_header: "X-Forwarded-Client-Cert"
 
+# CORS
+# Empty means every origin is allowed, which is the development default.
+# Set explicit origins if a browser ever reaches Garmr directly.
+# cors:
+#   allowed_origins: []
+
 # Storage backend configuration
 # By default, --policy-dir is used (filesystem backend).
-# For S3/MinIO, set storage.type and the s3 options below.
 #
 # storage:
-#   type: "filesystem"   # "filesystem", "s3", or "minio"
+#   type: "filesystem"   # the only implemented backend
 #   root: "/etc/garmr/policies"
 #
-# S3/MinIO example:
-# storage:
-#   type: "s3"
-#   root: "policies/"    # S3 key prefix
-#   s3:
-#     endpoint: "minio.example.com:9000"  # omit for AWS S3
-#     bucket: "garmr-policies"
-#     region: "us-east-1"
-#     access_key: ""
-#     secret_key: ""
-#     use_ssl: true
-#     poll_interval: "10s"
+# To serve policies from object storage, sync them to disk first — an init
+# container running `mc mirror` / `aws s3 sync`, or a CSI volume — and point
+# `root` (or --policy-dir) at the result. That keeps credential handling,
+# retries and rotation in tooling built for it.
+
+# Rate limiting (optional)
+# rate_limit:
+#   enabled: false
+#   rps: 100                  # global bucket
+#   burst: 200
+#   per_client: true
+#   client_rps: 1000          # each client's own bucket
+#   client_burst: 100
+#   max_clients: 10000        # LRU-evicted bound on tracked buckets
+#   # How per-client buckets are keyed:
+#   #   ip       — client IP (the default). WRONG behind a mesh sidecar:
+#   #              every caller's RemoteAddr is the local Envoy, so all
+#   #              traffic shares one bucket.
+#   #   identity — the mesh-verified SPIFFE URI from the XFCC header
+#   #              (auth.identity_header). Use this under Consul Connect.
+#   #              Only safe when a sidecar owns that header.
+#   #   header   — a caller-supplied header (header_name); trusted callers only.
+#   client_identifier: "ip"
+#   header_name: "X-Client-ID"
+#   # X-Forwarded-For is ignored unless the immediate peer is listed here,
+#   # otherwise any caller can rotate the header to get a fresh bucket.
+#   trusted_proxies: []
 
 # Development mode (optional)
 # dev: true  # Enables colored console output

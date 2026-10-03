@@ -2,8 +2,8 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -73,29 +73,16 @@ func init() {
 	evalCmd.Flags().StringSliceP("policy", "p", nil, "specific policies to evaluate (namespace/name)")
 	evalCmd.Flags().StringP("namespace", "n", "", "policy namespace to evaluate")
 
-	// Evaluation options
-	evalCmd.Flags().Bool("trace", false, "enable evaluation trace")
-
 	// Request tracking
 	evalCmd.Flags().String("request-id", "", "request ID for audit correlation (e.g., CI job ID)")
-
-	evalCmd.MarkFlagRequired("input")
 }
 
 func runEval(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	cfg := client.Config{
-		Address: viper.GetString("server"),
-		Timeout: 30 * time.Second,
-	}
-
-	c, err := client.NewClient(cfg)
+	c, ctx, cleanup, err := newServerClient()
 	if err != nil {
-		return fmt.Errorf("creating client: %w", err)
+		return err
 	}
-	defer c.Close()
+	defer cleanup()
 
 	// Read input
 	input, err := readInput(cmd)
@@ -117,7 +104,6 @@ func runEval(cmd *cobra.Command, args []string) error {
 	opts := client.EvaluateOptions{
 		Namespace:     namespace,
 		Policies:      policies,
-		Trace:         mustBool(cmd.Flags().GetBool("trace")),
 		IncludePassed: includePassed,
 		RequestID:     requestID,
 	}
@@ -156,15 +142,18 @@ func readInput(cmd *cobra.Command) (map[string]interface{}, error) {
 
 	// Check for inline data first
 	if data, _ := cmd.Flags().GetString("data"); data != "" {
-		result, err := parser.Parse([]byte(data), format)
-		if err != nil {
-			return nil, fmt.Errorf("parsing inline data: %w", err)
+		result, parseErr := parser.Parse([]byte(data), format)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing inline data: %w", parseErr)
 		}
 		return result, nil
 	}
 
 	// Read from file or stdin
 	inputPath, _ := cmd.Flags().GetString("input")
+	if inputPath == "" {
+		return nil, errors.New("one of --input or --data is required")
+	}
 
 	var data []byte
 
@@ -174,18 +163,18 @@ func readInput(cmd *cobra.Command) (map[string]interface{}, error) {
 			return nil, err
 		}
 		// For stdin, use format flag or auto-detect
-		result, err := parser.Parse(data, format)
-		if err != nil {
-			return nil, fmt.Errorf("parsing stdin: %w", err)
+		result, parseErr := parser.Parse(data, format)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing stdin: %w", parseErr)
 		}
 		return result, nil
 	}
 
 	// For files, auto-detect from extension if format is auto
 	if format == input.FormatAuto {
-		result, _, err := parser.ParseFile(inputPath)
-		if err != nil {
-			return nil, fmt.Errorf("parsing file: %w", err)
+		result, _, parseErr := parser.ParseFile(inputPath)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing file: %w", parseErr)
 		}
 		return result, nil
 	}
@@ -309,7 +298,26 @@ func outputTable(result *client.EvaluateResult, quiet, suppressDetails bool) err
 		)
 	}
 
+	// Rules that never ran. Reported because a partial evaluation is not the
+	// same as a clean one, and the command's help text promises this.
+	if !quiet {
+		mode := result.EvaluationMode
+		if mode.RulesSkipped > 0 {
+			fmt.Printf("Evaluated %d of %d rules (%d skipped)\n",
+				mode.RulesEvaluated, mode.TotalRulesInScope, mode.RulesSkipped)
+		}
+		if mode.DryRun {
+			fmt.Println("Dry run: violations reported but not enforced")
+		}
+		if result.TerminatedEarly {
+			if tr := result.TerminationRule; tr != nil {
+				fmt.Printf("Terminated early at %s/%s#%s (fail-fast)\n",
+					tr.PolicyNamespace, tr.PolicyName, tr.RuleID)
+			} else {
+				fmt.Println("Terminated early (fail-fast)")
+			}
+		}
+	}
+
 	return nil
 }
-
-func mustBool(b bool, _ error) bool { return b }

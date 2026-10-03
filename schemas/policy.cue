@@ -1,7 +1,10 @@
 // schemas/policy.cue
-// Package policy defines the core schema for Garmr policies.
-// All policies must conform to these schemas for validation and evaluation.
+// Package policy defines the schema for Garmr policies. The engine unifies
+// every policy with #Policy at load; `garmr validate` and `cue vet` use the
+// same file.
 package policy
+
+import "time"
 
 // Policy is the top-level unit of evaluation.
 // Each policy targets specific resources and defines rules to enforce.
@@ -18,7 +21,7 @@ package policy
 	name: string & =~"^[a-z][a-z0-9-]{0,62}$"
 
 	// namespace for logical grouping (default: "default")
-	namespace: string | *"default"
+	namespace: string & =~"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}$" | *"default"
 
 	// labels for filtering and selection
 	labels: [string]: string
@@ -38,7 +41,8 @@ package policy
 	// What this policy applies to
 	target: #Target
 
-	// Rules to evaluate (at least one required)
+	// Rules to evaluate (at least one required). Rule ids must be unique
+	// within a policy.
 	rules: [#Rule, ...#Rule]
 
 	// How violations are handled
@@ -51,15 +55,15 @@ package policy
 // EvaluationConfig controls how rules are evaluated.
 #EvaluationConfig: {
 	// Order in which rules are evaluated
-	// - "priority": Sort by priority field (lower first), then definition order
-	// - "severity": Sort by severity (critical first), then definition order
-	// - "definition": Evaluate in the order rules are defined (default)
-	// - "priority-then-severity": Sort by priority, then severity within same priority
+	// - "priority": by priority field (lower first; rules without one last),
+	//   then definition order (default)
+	// - "severity": by severity (critical first), then definition order
+	// - "definition": in the order rules are defined
+	// - "priority-then-severity": by priority, then severity within a priority
 	order: #EvaluationOrder | *"priority"
 
 	// Stop evaluation on first failure (fail-fast mode)
-	// Useful for expensive evaluations or when first failure is sufficient
-	failFast?: bool | *false
+	failFast?: bool
 
 	// Only evaluate rules matching these categories
 	includeCategories?: [...string]
@@ -74,10 +78,11 @@ package policy
 	excludeTags?: [...string]
 
 	// Maximum number of rules to evaluate (0 = unlimited)
-	maxRules?: int & >=0 | *0
+	maxRules?: int & >=0
 
-	// Timeout for entire policy evaluation
-	timeout?: string  // Duration string, e.g., "30s", "5m"
+	// Deadline for the whole evaluation, as a Go duration ("250ms", "30s").
+	// The smallest timeout among the matched policies applies.
+	timeout?: time.Duration
 }
 
 // Target specifies what resources a policy applies to.
@@ -85,14 +90,13 @@ package policy
 	// Resource selectors (OR semantics - matches any).
 	// A plain string is shorthand for {kind: <string>}.
 	resources: [...(string | #ResourceSelector)]
-
-	// Pre-conditions that must be true for policy to apply
-	conditions?: [...#Condition]
 }
 
-// ResourceSelector identifies resources by type and attributes.
+// ResourceSelector identifies resources by type and attributes. Patterns are
+// case-insensitive; "*" matches any run of characters.
 #ResourceSelector: {
-	// API group (empty string for core, "*" for any)
+	// API group, matched against the group part of the input's apiVersion
+	// ("apps" for "apps/v1"). "" is the core group ("v1"); "*" is any group.
 	apiGroup: string | *"*"
 
 	// Resource kind ("*" for any)
@@ -113,8 +117,8 @@ package policy
 
 // Rule is an individual policy check.
 #Rule: {
-	// Unique identifier within policy (e.g., "SEC-001")
-	id: string & =~"^[A-Z]{2,6}-[0-9]{3,4}$"
+	// Identifier, unique within the policy (e.g., "SEC-001").
+	id: string & =~"^[A-Za-z][A-Za-z0-9_-]{0,63}$"
 
 	// Human-readable description
 	description: string
@@ -122,19 +126,27 @@ package policy
 	// Severity level
 	severity: #Severity
 
-	// Priority for evaluation order (lower = evaluated first)
-	// If not specified, rules are evaluated in definition order
-	// Common patterns:
-	//   - 10, 20, 30, 40... (allows insertion)
-	//   - 100, 200, 300... (for major groupings)
-	//   - 1, 2, 3... (for strict ordering)
-	// Rules with same priority maintain definition order
+	// Priority for evaluation order (lower = evaluated first). Rules with the
+	// same priority keep definition order.
 	priority?: int & >=0 & <=9999
 
-	// The constraint expression
+	// The rule applies only when this holds; otherwise it passes as not
+	// applicable. "When the pod is in production, it needs 2 replicas":
+	//   when: match: {path: "metadata.labels.env", equals: "prod"}
+	//   expr: match: {path: "spec.replicas", greaterThanOrEqual: 2}
+	// A `when` that cannot be evaluated fails the rule.
+	when?: #Expression
+
+	// The check this rule performs.
 	expr: #Expression
 
-	// Custom violation message (supports template variables)
+	// Custom violation message. Placeholders:
+	//   {{.name}}  a binding: `length`, `version`, `datetime`, `count`, or a
+	//              `func` bind name
+	//   {{path}}   an input field, or a forEach alias path ({{c.name}});
+	//              {{_index}} is the element's position
+	// A message that refers to a forEach alias is rendered once per failing
+	// element. A placeholder that does not resolve is left as written.
 	message?: string
 
 	// Documentation URL
@@ -148,81 +160,63 @@ package policy
 
 	// Tags for filtering (e.g., ["pci-dss", "soc2", "slsa"])
 	tags?: [...string]
-
-	// Whether to continue evaluation after this rule fails
-	// Default: true (continue evaluating other rules)
-	// Set to false for critical gates that should halt evaluation
-	continueOnFail?: bool | *true
 }
 
 // Severity levels from informational to critical.
 #Severity: "critical" | "high" | "medium" | "low" | "info"
 
-// SeverityWeight maps severity to numeric weight for scoring.
-#SeverityWeight: {
-	critical: 100
-	high:     75
-	medium:   50
-	low:      25
-	info:     0
-}
-
 // EvaluationOrder defines how rules are sorted for evaluation.
 #EvaluationOrder: "priority" | "severity" | "definition" | "priority-then-severity"
 
-// Default priority values by category (for use in policies)
-#DefaultPriority: {
-	// Promotion/chain validation should run first
-	promotion:   100
-	// Security checks next
-	security:    200
-	// Quality gates
-	quality:     300
-	// Compliance checks
-	compliance:  400
-	// Best practices / recommendations last
-	advisory:    500
-}
-
-// Expression is the core constraint logic using a composable structure.
-// Exactly one field must be set.
+// Expression is a check. Exactly one operator must be set; combine checks
+// with all/any/not.
+//
+// Paths are dot-separated field names: `spec.containers`. Quote a key that
+// contains dots or other punctuation (`metadata.labels."app.kubernetes.io/name"`)
+// and index lists with `[N]` (`spec.containers[0].image`). `[*]` projects:
+// `spec.containers[*].cpu` is the list of every container's cpu (null where a
+// container has none), ready for `sum`, `len`, `unique` or the set operators.
+// Inside a forEach, a path starting with the alias reads the current element,
+// and `_index` is its position.
+//
+// A missing field fails a check. An operand of the wrong type (a string where
+// a number is required, an unparseable semver or datetime) is an evaluation
+// error: it fails the rule even under `not`.
 #Expression: {
 	// Logical operators
-	all?: [...#Expression]  // AND: all must pass
-	any?: [...#Expression]  // OR: at least one must pass
-	not?: #Expression       // NOT: must fail
+	all?: [...#Expression] // AND: all must pass
+	any?: [...#Expression] // OR: at least one must pass
+	not?:                  #Expression // NOT: must fail
 
-	// Field matching (supports equals, pattern, comparison, etc.)
-	match?:    #MatchExpr
+	// Check a field at a path
+	match?: #MatchExpr
 
-	// Cross-field comparison
-	compare?:  #CompareExpr
+	// Compare two values
+	compare?: #CompareExpr
 
-	// Existence checks
-	exists?: string  // Path must exist and be non-null
-	absent?: string  // Path must not exist or be null
+	// Check each element of a list
+	forEach?: #ForEachExpr
 
-	// Collection operators
-	contains?: #ContainsExpr
-	forEach?:  #ForEachExpr
-
-	// Builtin function call
-	"func"?: #FuncCallExpr
+	// Call a builtin function
+	func?: #FuncCallExpr
 }
 
-// MatchExpr matches a field at a given path against various conditions.
-// Exactly one condition operator must be specified alongside `path`.
+// MatchExpr checks the field at `path`. At least one operator must be set;
+// when several are set, every one must pass (AND semantics). The same holds
+// inside `length`, `semver` and `datetime`, e.g.
+// `datetime: {after: X, before: Y}` is a range check.
 #MatchExpr: {
-	// Path to the field in the input (dot-notation)
+	// Path to the field in the input
 	path: string
 
-	// --- Equality ---
-	// Exact value match (type-aware comparison)
-	equals?: _
-
-	// --- Existence ---
-	// Check if the field exists (true) or is absent (false)
+	// --- Presence ---
+	// true: the field exists and is not null. false: it is absent or null.
 	exists?: bool
+
+	// --- Equality ---
+	// Strict, JSON-typed equality: numbers compare by value (1 == 1.0),
+	// every other pair must have the same type ("1" != 1).
+	equals?: _
 
 	// --- Comparison (numeric) ---
 	greaterThan?:        number
@@ -231,7 +225,7 @@ package policy
 	lessThanOrEqual?:    number
 
 	// --- String matching ---
-	// Regex pattern match
+	// Regular expression (RE2) match
 	pattern?: string
 	// Substring containment
 	contains?: string
@@ -246,20 +240,22 @@ package policy
 	// Value must NOT be one of the listed values
 	notIn?: [...]
 
-	// --- Set validation (array fields) ---
-	// Array must have no duplicate values
+	// --- Set validation (list fields) ---
+	// List must have no duplicate values
 	unique?: bool
-	// Array of objects must have no duplicate values for this field
+	// List of objects must have no duplicate values for this field path
 	uniqueBy?: string
-	// Array must be sorted in the given order
+	// List must be sorted in the given order
 	sorted?: "asc" | "desc"
-	// Array must contain all listed values (superset check)
+	// List must contain all listed values (superset check)
 	containsAll?: [...]
-	// Every array element must be from the listed set (subset check)
+	// List must contain at least one of the listed values
+	containsAny?: [...]
+	// Every list element must be from the listed set (subset check)
 	subsetOf?: [...]
 
 	// --- Collection ---
-	// Length constraints for arrays or strings
+	// Length constraints for lists or strings (strings count characters)
 	length?: #LengthExpr
 
 	// --- Semantic versioning ---
@@ -276,8 +272,6 @@ package policy
 	greaterThanOrEqual?: int
 	lessThan?:           int
 	lessThanOrEqual?:    int
-	min?:                int
-	max?:                int
 }
 
 // SemverExpr defines semantic version constraints.
@@ -293,7 +287,8 @@ package policy
 	constraint?: string
 }
 
-// DatetimeExpr defines date/time constraints.
+// DatetimeExpr defines date/time constraints. Operands accept RFC3339,
+// "2006-01-02" and a few other common layouts, or "now".
 #DatetimeExpr: {
 	// Field timestamp must be after this time
 	after?: string
@@ -303,13 +298,13 @@ package policy
 	afterOrEqual?: string
 	// Field timestamp must be at or before this time
 	beforeOrEqual?: string
-	// Field must be within N days of now
+	// Field must be within N days of now, in either direction
 	withinDays?: int
-	// Field must be within N hours of now
+	// Field must be within N hours of now, in either direction
 	withinHours?: int
-	// Field must have at least N days until expiry
+	// Field must be at least N days in the future
 	expiresAfterDays?: int
-	// Field must not be expired (i.e., is in the future)
+	// true: field must be in the future. false: it must be in the past.
 	notExpired?: bool
 }
 
@@ -320,119 +315,110 @@ package policy
 	right: #Value
 }
 
+// CompareOp is a comparison operator.
+//   - == != : strict equality, as for match.equals
+//   - < <= > >= : two numbers, or two strings (lexical)
+//   - in notIn : membership of left in the list on the right
+//   - contains : left list contains right, or left string contains right
+//   - subsetOf : every key/value of the left object is in the right object
+//                (a label selector within labels), or every element of the
+//                left list is in the right list
+//   - hasPrefix hasSuffix matches : string operators (matches: RE2)
+//   - semver* : semantic versions; after/before/... : datetimes
 #CompareOp:
 	"==" | "!=" |
 	"<" | "<=" | ">" | ">=" |
-	"eq" | "ne" | "neq" |
-	"gt" | "gte" | "lt" | "lte" |
-	"in" | "not_in" | "notIn" |
-	"contains" | "hasPrefix" | "hasSuffix" |
-	"matches" | "startsWith" | "endsWith" |
+	"in" | "notIn" |
+	"contains" | "subsetOf" | "hasPrefix" | "hasSuffix" | "matches" |
 	"semverGt" | "semverGte" | "semverLt" | "semverLte" | "semverEq" |
 	"after" | "before" | "afterOrEqual" | "beforeOrEqual"
 
-// Value represents a value source in comparisons and function calls.
+// Value is an operand: exactly one of an input path, a literal, or a builtin
+// call. A path that does not exist resolves to null.
 #Value: {
-	// Reference to input field (dot-notation path)
+	// Reference to an input field
 	path?: string
 
 	// Literal value
 	literal?: _
 
-	// Function call result
+	// Builtin call result
 	func?: #FuncCall
-
-	// Environment variable
-	env?: string
-
-	// Data reference
-	data?: string
 }
 
-// FuncCall invokes a built-in function within a Value context.
+// FuncCall invokes a builtin function within a Value.
 #FuncCall: {
 	name: #BuiltinFunc
-	args: [...#Value]
+	args?: [...#Value]
 }
 
-// FuncCallExpr invokes a built-in function as a standalone expression.
-// The function result is evaluated for truthiness, or compared with `expect`.
+// FuncCallExpr invokes a builtin as a check. The result must be truthy (not
+// false, 0, "", [], {} or null), or equal `expect` when it is set.
 #FuncCallExpr: {
-	// Function name
 	name: #BuiltinFunc
-
-	// Arguments (literal values or input path references)
-	args: [...]
+	args?: [...#Value]
 
 	// Expected result value (if omitted, truthiness is used)
 	expect?: _
 
-	// Bind the result to a variable name for use in message templates
+	// Bind the result to a name for use in message templates
 	bind?: string
 }
 
-// BuiltinFunc defines all available built-in functions.
+// BuiltinFunc names the builtin functions.
 #BuiltinFunc:
 	// Core
-	"len" | "count" |
+	"len" |
 	// Aggregates
 	"sum" | "min" | "max" | "avg" |
-	// String manipulation
+	// Strings
 	"lower" | "upper" | "trim" | "trimPrefix" | "trimSuffix" |
-	"split" | "join" | "contains" | "startsWith" | "endsWith" |
-	"matches" | "regex" | "format" |
+	"split" | "join" | "matches" | "format" |
 	// Encoding
 	"base64Decode" | "base64Encode" |
 	// Time / duration
 	"now" | "duration" | "parseTime" |
 	// Type checking
 	"typeOf" | "isType" |
-	// Object / map
-	"hasKey" | "keys" | "values" |
+	// Objects
+	"hasKey" | "keys" | "values" | "lookup" |
 	// Network / CIDR
-	"cidr" | "cidrContains" | "cidrOverlap" | "ipVersion" |
+	"cidrContains" | "cidrOverlap" | "ipVersion" |
 	// Kubernetes units
 	"unitsParse" |
-	// Lookup / path
-	"lookup" | "jsonPath" |
-	// Array operations
-	"flatten" | "unique" | "sort" | "filter" |
-	// Semver
-	"semver"
+	// Lists
+	"flatten" | "unique" | "sort" | "filter"
 
-// ContainsExpr checks if a collection contains a value.
-#ContainsExpr: {
-	// Path to the collection or string field
-	path:   string
-	// Single value that must be present
-	value?: _
-	// All listed values must be present
-	all?:   [..._]
-	// At least one of the listed values must be present
-	any?:   [..._]
-}
-
-// ForEachExpr iterates over a collection and evaluates a condition per item.
+// ForEachExpr checks every element of a list.
 #ForEachExpr: {
-	// Path to the array field in input
+	// Path to the list
 	path: string
 
-	// Variable name for current item (default: "item")
-	as: string | *"item"
+	// Name the condition uses for the current element
+	as: string & =~"^[A-Za-z][A-Za-z0-9_]*$" | *"item"
 
-	// Condition to evaluate for each element (expression object)
-	condition: _
+	// Check applied to each element. Required: the loader rejects a forEach
+	// without one. (Declared optional because a required field here would be
+	// a structural cycle through #Expression.)
+	condition?: #Expression
 
-	// Mode: "all" = every item must pass, "any" = at least one must pass
-	mode: "all" | "any" | *"all"
+	// Only the elements for which this holds are checked (and counted);
+	// the alias is in scope. "Of the deployments with the
+	// same name as this service, ...":
+	//   where: compare: {left: {path: "d.metadata.name"}, op: "==", right: {path: "s.metadata.name"}}
+	// allowEmpty, mode "any" and count apply to the selected elements.
+	where?: #Expression
 
-	// Whether an empty array passes (true, the default) or fails (false)
+	// "all" (the default): every element must pass. "any": at least one.
+	mode?: "all" | "any"
+
+	// Whether an empty list passes (true, the default) or fails (false)
 	allowEmpty?: bool
-}
 
-// Condition for policy applicability.
-#Condition: {
-	expr: #Expression
+	// Count the elements that pass the condition and check the count, e.g.
+	// `count: {lessThanOrEqual: 1}` for "at most one". Replaces mode and
+	// allowEmpty; an empty list counts 0.
+	count?: #LengthExpr
 }
 
 // Enforcement defines how violations are handled.
@@ -440,96 +426,29 @@ package policy
 	// Primary action
 	action: #EnforcementAction
 
-	// Dry run mode (log but don't enforce)
+	// Dry run mode (report, but never deny)
 	dryRun: bool | *false
 
 	// Exceptions to enforcement
 	exceptions?: [...#Exception]
-
-	// Webhook for external decision
-	webhook?: #Webhook
 }
 
 #EnforcementAction: "deny" | "warn" | "audit"
 
-// Exception allows bypassing enforcement for specific cases.
+// Exception skips the whole policy for inputs its selector matches. The
+// selector must narrow something: an exception matching everything would
+// disable the policy.
 #Exception: {
 	name:   string
 	reason: string
 	match:  #ResourceSelector
 
-	// Expiration (RFC3339)
-	expiry?: string
+	// Expiration (RFC3339). After this instant the exception no longer applies.
+	expiry?: time.Time
 
 	// Approval chain
 	approvedBy?: [...string]
 
 	// Jira/issue tracker reference
 	ticket?: string
-}
-
-// Webhook for external policy decisions.
-#Webhook: {
-	url:     string & =~"^https?://"
-	timeout: string | *"5s"
-
-	// Retry configuration
-	retry?: {
-		attempts: int & >=0 & <=5 | *3
-		backoff:  string | *"1s"
-	}
-
-	// TLS configuration
-	tls?: {
-		insecure?: bool
-		ca?:       string  // Base64 encoded CA cert
-	}
-}
-
-// PolicyRef references another policy.
-#PolicyRef: {
-	name:      string
-	namespace: string | *"default"
-}
-
-// PolicySet groups policies for atomic evaluation.
-#PolicySet: {
-	apiVersion: "policy.garmr.io/v1"
-	kind:       "PolicySet"
-	metadata:   #Metadata
-	spec: {
-		// Policies in this set
-		policies: [...#Policy | #PolicyRef]
-
-		// Evaluation mode
-		mode: "all" | "any" | *"all"
-
-		// Stop on first failure
-		failFast: bool | *false
-	}
-}
-
-// EvaluationResult is the output of policy evaluation.
-#EvaluationResult: {
-	decision: "allow" | "deny" | "warn"
-
-	results: [...#RuleResult]
-
-	summary: {
-		total:    int
-		passed:   int
-		failed:   int
-		warnings: int
-		score:    float & >=0 & <=100
-	}
-}
-
-#RuleResult: {
-	policyName:      string
-	policyNamespace: string
-	ruleId:          string
-	severity:        #Severity
-	passed:          bool
-	message:         string
-	bindings: [string]: _
 }

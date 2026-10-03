@@ -25,11 +25,8 @@ type PrometheusMetrics struct {
 	activeEvaluations      prometheus.Gauge
 	policyLoadErrorsTotal  *prometheus.CounterVec
 	policiesLoaded         *prometheus.GaugeVec
-	cacheHitsTotal         *prometheus.CounterVec
-	cacheMissesTotal       *prometheus.CounterVec
+	policyReloadsTotal     *prometheus.CounterVec
 	rateLimitHitsTotal     *prometheus.CounterVec
-	inputErrorsTotal       *prometheus.CounterVec
-	pluginHealth           *prometheus.GaugeVec
 	panicsTotal            prometheus.Counter
 }
 
@@ -79,35 +76,17 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 		Help:      "Number of policies currently loaded, by namespace.",
 	}, []string{"namespace"})
 
-	m.cacheHitsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.policyReloadsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: promNamespace,
-		Name:      "cache_hits_total",
-		Help:      "Total cache hits by cache type.",
-	}, []string{"cache"})
-
-	m.cacheMissesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: promNamespace,
-		Name:      "cache_misses_total",
-		Help:      "Total cache misses by cache type.",
-	}, []string{"cache"})
+		Name:      "policy_reloads_total",
+		Help:      "Total policy reload attempts by result. A failed reload keeps the previous policy set serving.",
+	}, []string{"result"})
 
 	m.rateLimitHitsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: promNamespace,
 		Name:      "rate_limit_hits_total",
 		Help:      "Total requests rejected by the rate limiter, by client identifier.",
 	}, []string{"client"})
-
-	m.inputErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: promNamespace,
-		Name:      "input_validation_errors_total",
-		Help:      "Total input validation errors.",
-	}, []string{"policy", "field"})
-
-	m.pluginHealth = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: promNamespace,
-		Name:      "plugin_health",
-		Help:      "Plugin health (1=healthy, 0=unhealthy).",
-	}, []string{"plugin", "type"})
 
 	m.panicsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: promNamespace,
@@ -122,21 +101,12 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 		m.activeEvaluations,
 		m.policyLoadErrorsTotal,
 		m.policiesLoaded,
-		m.cacheHitsTotal,
-		m.cacheMissesTotal,
+		m.policyReloadsTotal,
 		m.rateLimitHitsTotal,
-		m.inputErrorsTotal,
-		m.pluginHealth,
 		m.panicsTotal,
 	)
 
 	return m
-}
-
-// Registry returns the underlying Prometheus registry. Useful for tests and
-// for wiring additional collectors.
-func (m *PrometheusMetrics) Registry() *prometheus.Registry {
-	return m.registry
 }
 
 // Handler returns an http.Handler that exposes metrics in Prometheus text
@@ -168,32 +138,26 @@ func (m *PrometheusMetrics) RecordPolicyLoadError(policy, namespace, errorType s
 	m.policyLoadErrorsTotal.WithLabelValues(policy, namespace, errorType).Inc()
 }
 
-func (m *PrometheusMetrics) SetPoliciesLoaded(namespace string, count int) {
-	m.policiesLoaded.WithLabelValues(namespace).Set(float64(count))
+func (m *PrometheusMetrics) SetPoliciesLoaded(counts map[string]int) {
+	// Reset first: the counts are a full snapshot, and a namespace that
+	// vanished on reload must drop out of the series rather than keep its
+	// last value forever.
+	m.policiesLoaded.Reset()
+	for namespace, count := range counts {
+		m.policiesLoaded.WithLabelValues(namespace).Set(float64(count))
+	}
 }
 
-func (m *PrometheusMetrics) RecordCacheHit(cacheType string) {
-	m.cacheHitsTotal.WithLabelValues(cacheType).Inc()
-}
-
-func (m *PrometheusMetrics) RecordCacheMiss(cacheType string) {
-	m.cacheMissesTotal.WithLabelValues(cacheType).Inc()
+func (m *PrometheusMetrics) RecordPolicyReload(success bool) {
+	result := "success"
+	if !success {
+		result = "failure"
+	}
+	m.policyReloadsTotal.WithLabelValues(result).Inc()
 }
 
 func (m *PrometheusMetrics) RecordRateLimitHit(client string) {
 	m.rateLimitHitsTotal.WithLabelValues(client).Inc()
-}
-
-func (m *PrometheusMetrics) RecordInputValidationError(policy, field string) {
-	m.inputErrorsTotal.WithLabelValues(policy, field).Inc()
-}
-
-func (m *PrometheusMetrics) SetPluginHealth(pluginName, pluginType string, healthy bool) {
-	v := 0.0
-	if healthy {
-		v = 1.0
-	}
-	m.pluginHealth.WithLabelValues(pluginName, pluginType).Set(v)
 }
 
 // IncPanicsRecovered is called by the HTTP recovery middleware.

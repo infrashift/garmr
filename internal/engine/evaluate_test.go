@@ -135,36 +135,18 @@ func TestEvaluate_DryRun(t *testing.T) {
 	}
 }
 
-func TestEvaluate_DryRunOverride(t *testing.T) {
-	// Policy is NOT dry run, but override is set
-	source := makePolicy("dro-test", "default", "dry run override",
-		`{id: "r1", description: "check", severity: "high", expr: {match: {path: "x", equals: 1}}, message: "x must be 1"}`,
-		"deny", "")
-	eng := loadTestPolicy(t, "dro-test", "default", source)
-
-	dryRun := true
-	resp, _ := eng.Evaluate(context.Background(), &EvaluateRequest{
-		Input:   map[string]any{"x": 2.0},
-		Options: EvaluateOptions{DryRunOverride: &dryRun},
-	})
-	if resp.Decision != DecisionWarn {
-		t.Errorf("expected warn (dry run override), got %s", resp.Decision)
-	}
-}
-
 // --- Category/Tag Filtering ---
 
 func TestEvaluate_CategoryFilter(t *testing.T) {
 	source := makePolicy("cat-test", "default", "category filter test",
 		`{id: "r1", description: "security check", severity: "high", category: "security", expr: {match: {path: "x", equals: 1}}, message: "fail"},
 		{id: "r2", description: "quality check", severity: "medium", category: "quality", expr: {match: {path: "x", equals: 1}}, message: "fail"}`,
-		"deny", "")
+		"deny", `evaluation: includeCategories: ["security"]`)
 	eng := loadTestPolicy(t, "cat-test", "default", source)
 
 	// Only evaluate security rules
 	resp, _ := eng.Evaluate(context.Background(), &EvaluateRequest{
-		Input:   map[string]any{"x": 2.0},
-		Options: EvaluateOptions{IncludeCategories: []string{"security"}},
+		Input: map[string]any{"x": 2.0},
 	})
 	// Only the security rule should have been evaluated and failed
 	if len(resp.Results) != 1 {
@@ -176,12 +158,11 @@ func TestEvaluate_TagFilter(t *testing.T) {
 	source := makePolicy("tag-test", "default", "tag filter test",
 		`{id: "r1", description: "prod check", severity: "high", tags: ["prod"], expr: {match: {path: "x", equals: 1}}, message: "fail"},
 		{id: "r2", description: "dev check", severity: "low", tags: ["dev"], expr: {match: {path: "x", equals: 1}}, message: "fail"}`,
-		"deny", "")
+		"deny", `evaluation: excludeTags: ["dev"]`)
 	eng := loadTestPolicy(t, "tag-test", "default", source)
 
 	resp, _ := eng.Evaluate(context.Background(), &EvaluateRequest{
-		Input:   map[string]any{"x": 2.0},
-		Options: EvaluateOptions{ExcludeTags: []string{"dev"}},
+		Input: map[string]any{"x": 2.0},
 	})
 	if len(resp.Results) != 1 {
 		t.Errorf("expected 1 result (excluding dev), got %d", len(resp.Results))
@@ -228,21 +209,94 @@ func TestEvaluate_Exception(t *testing.T) {
 
 // --- Timeout Enforcement ---
 
+// TestEvaluate_Timeout pins the fail-closed contract for evaluation
+// deadlines. Rules that never ran are not evidence of compliance, so an
+// expired deadline must DENY. The previous version of this test asserted
+// nothing (`_ = resp`), which is why the fail-open behaviour survived.
 func TestEvaluate_Timeout(t *testing.T) {
 	source := makePolicyFull("timeout-test", "default", "timeout test",
 		`{id: "r1", description: "check", severity: "low", expr: {match: {path: "x", equals: 1}}, message: "fail"}`,
 		"deny", "", `evaluation: timeout: "1ns"`)
 	eng := loadTestPolicy(t, "timeout-test", "default", source)
 
-	// With an absurdly short timeout, the context should be cancelled
 	resp, err := eng.Evaluate(context.Background(), &EvaluateRequest{
 		Input: map[string]any{"x": 2.0},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// With timeout, the rule may pass (timeout = don't penalize) or be skipped
-	_ = resp // Just ensure no panic/error
+
+	if resp.Decision != DecisionDeny {
+		t.Errorf("decision = %v, want %v (a timed-out evaluation must fail closed)", resp.Decision, DecisionDeny)
+	}
+	assertSoleTimeoutResult(t, resp)
+}
+
+// TestEvaluate_TimeoutNotDowngradedByWarn ensures `enforcement.action: "warn"`
+// cannot soften a timeout. A timeout is an engine failure, not a policy
+// verdict, so the enforcement action does not apply to it.
+func TestEvaluate_TimeoutNotDowngradedByWarn(t *testing.T) {
+	source := makePolicyFull("timeout-warn", "default", "timeout under warn",
+		`{id: "r1", description: "check", severity: "low", expr: {match: {path: "x", equals: 1}}, message: "fail"}`,
+		"warn", "", `evaluation: timeout: "1ns"`)
+	eng := loadTestPolicy(t, "timeout-warn", "default", source)
+
+	resp, err := eng.Evaluate(context.Background(), &EvaluateRequest{
+		Input: map[string]any{"x": 2.0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Decision != DecisionDeny {
+		t.Errorf("decision = %v, want %v (warn must not downgrade a timeout)", resp.Decision, DecisionDeny)
+	}
+	assertSoleTimeoutResult(t, resp)
+}
+
+// TestEvaluate_TimeoutNotDowngradedByDryRun is the dry-run counterpart:
+// dry-run caps a policy's own deny at warn, but must not cap a timeout.
+func TestEvaluate_TimeoutNotDowngradedByDryRun(t *testing.T) {
+	source := makePolicyFull("timeout-dryrun", "default", "timeout under dry run",
+		`{id: "r1", description: "check", severity: "low", expr: {match: {path: "x", equals: 1}}, message: "fail"}`,
+		"deny", "dryRun: true", `evaluation: timeout: "1ns"`)
+	eng := loadTestPolicy(t, "timeout-dryrun", "default", source)
+
+	resp, err := eng.Evaluate(context.Background(), &EvaluateRequest{
+		Input: map[string]any{"x": 2.0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Decision != DecisionDeny {
+		t.Errorf("decision = %v, want %v (dry run must not downgrade a timeout)", resp.Decision, DecisionDeny)
+	}
+	assertSoleTimeoutResult(t, resp)
+}
+
+// assertSoleTimeoutResult verifies the response carries exactly one result:
+// the synthetic system timeout, failing. Critically it also asserts that no
+// result passed — the old behaviour emitted synthetic passing results, and a
+// decision check alone would not catch a regression back to that.
+func assertSoleTimeoutResult(t *testing.T, resp *EvaluateResponse) {
+	t.Helper()
+
+	if len(resp.Results) != 1 {
+		t.Fatalf("got %d results, want exactly 1 (the timeout result); results=%+v", len(resp.Results), resp.Results)
+	}
+	r := resp.Results[0]
+	if r.PolicyNamespace != ReservedSystemNamespace || r.PolicyName != SystemPolicyNameTimeout || r.RuleID != RuleIDTimeout {
+		t.Errorf("result identity = %s/%s#%s, want %s/%s#%s",
+			r.PolicyNamespace, r.PolicyName, r.RuleID,
+			ReservedSystemNamespace, SystemPolicyNameTimeout, RuleIDTimeout)
+	}
+	for i, res := range resp.Results {
+		if res.Passed {
+			t.Errorf("result[%d] passed; a timed-out evaluation must not report any rule as passing: %+v", i, res)
+		}
+	}
+	if r.Remediation == "" {
+		t.Error("timeout result has no remediation; operators need to be told to raise the timeout")
+	}
 }
 
 // --- Namespace Filtering ---
@@ -403,8 +457,8 @@ spec: {
 				t.Fatalf("NewEngine: %v", err)
 			}
 			for _, p := range tc.seedPolicies {
-				if err := eng.LoadPolicy(context.Background(), p.name, p.ns, p.rules); err != nil {
-					t.Fatalf("LoadPolicy %s: %v", p.name, err)
+				if loadErr := eng.LoadPolicy(context.Background(), p.name, p.ns, p.rules); loadErr != nil {
+					t.Fatalf("LoadPolicy %s: %v", p.name, loadErr)
 				}
 			}
 			resp, err := eng.Evaluate(context.Background(), tc.req)
@@ -459,8 +513,8 @@ func TestEvaluate_NoMatch_DryRunNotApplicable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
-	if err := eng.LoadPolicy(context.Background(), "dry", "other", dryRunSource); err != nil {
-		t.Fatalf("LoadPolicy: %v", err)
+	if loadErr := eng.LoadPolicy(context.Background(), "dry", "other", dryRunSource); loadErr != nil {
+		t.Fatalf("LoadPolicy: %v", loadErr)
 	}
 
 	resp, err := eng.Evaluate(context.Background(), &EvaluateRequest{
@@ -569,7 +623,7 @@ func TestConcurrentCueContextPool_StressCorrectness(t *testing.T) {
 
 	// Load a second policy to stress multi-policy evaluation
 	policyName := makePolicy("check-name", "default", "check name present",
-		`{id: "r2", description: "name must exist", severity: "medium", expr: {exists: {path: "name"}}, message: "name missing"}`,
+		`{id: "r2", description: "name must exist", severity: "medium", expr: {match: {path: "name", exists: true}}, message: "name missing"}`,
 		"deny", "")
 	if err := eng.LoadPolicy(context.Background(), "check-name", "default", policyName); err != nil {
 		t.Fatalf("LoadPolicy check-name: %v", err)
@@ -884,7 +938,7 @@ func TestConcurrentCueContextPool_PoolIsolation(t *testing.T) {
 		},
 		{
 			name:      "exists-check",
-			rules:     `{id: "r5", description: "labels exist", severity: "medium", expr: {exists: {path: "metadata.labels"}}, message: "no labels"}`,
+			rules:     `{id: "r5", description: "labels exist", severity: "medium", expr: {match: {path: "metadata.labels", exists: true}}, message: "no labels"}`,
 			action:    "warn",
 			passInput: map[string]any{"metadata": map[string]any{"labels": map[string]any{"app": "test"}}},
 			failInput: map[string]any{"metadata": map[string]any{}},
@@ -958,9 +1012,9 @@ func TestConcurrentCueContextPool_PoolIsolation(t *testing.T) {
 
 	// Aggregate per-policy stats
 	type policyStats struct {
-		passCorrect, passWrong, failCorrect, failWrong int
-		errors                                         int
-		durations                                      []time.Duration
+		passCorrect, failCorrect int
+		errors                   int
+		durations                []time.Duration
 	}
 	perPolicy := make([]policyStats, len(policies))
 

@@ -19,7 +19,6 @@ func evalFlagSet(t *testing.T) *cobraCmd {
 		flagSpec{Kind: "string", Name: "format", Value: "auto"},
 		flagSpec{Kind: "stringSlice", Name: "policy"},
 		flagSpec{Kind: "stringSlice", Name: "namespace"},
-		flagSpec{Kind: "bool", Name: "trace"},
 		flagSpec{Kind: "bool", Name: "verbose"},
 		flagSpec{Kind: "string", Name: "request-id"},
 		flagSpec{Kind: "bool", Name: "quiet"},
@@ -357,15 +356,6 @@ func TestRunEval_QuietOutput(t *testing.T) {
 	})
 	if strings.Contains(stdout, "Decision:") {
 		t.Errorf("expected quiet output, got %q", stdout)
-	}
-}
-
-func TestMustBool(t *testing.T) {
-	if mustBool(true, nil) != true {
-		t.Error("mustBool failed on true")
-	}
-	if mustBool(false, nil) != false {
-		t.Error("mustBool failed on false")
 	}
 }
 

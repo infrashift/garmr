@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,7 +26,7 @@ func TestGetPolicy(t *testing.T) {
 
 	// Not found
 	_, err = eng.GetPolicy("prod", "nonexistent")
-	if err != ErrPolicyNotFound {
+	if !errors.Is(err, ErrPolicyNotFound) {
 		t.Errorf("expected ErrPolicyNotFound, got %v", err)
 	}
 }
@@ -48,18 +49,6 @@ func TestDeletePolicy(t *testing.T) {
 	ok = eng.DeletePolicy("default", "nope")
 	if ok {
 		t.Error("expected false for deleting nonexistent policy")
-	}
-}
-
-func TestClearPolicies(t *testing.T) {
-	source := makePolicy("p1", "default", "test",
-		`{id: "r1", description: "test", severity: "low", expr: {match: {path: "x", equals: 1}}, message: "fail"}`,
-		"deny", "")
-	eng := loadTestPolicy(t, "p1", "default", source)
-
-	eng.ClearPolicies()
-	if len(eng.ListPolicies("")) != 0 {
-		t.Error("expected no policies after clear")
 	}
 }
 

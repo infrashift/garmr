@@ -12,6 +12,7 @@ func TestNewHandler(t *testing.T) {
 	h := NewHandler("1.0.0")
 	if h == nil {
 		t.Fatal("NewHandler returned nil")
+		return
 	}
 	if h.version != "1.0.0" {
 		t.Errorf("expected version 1.0.0, got %s", h.version)
@@ -21,7 +22,7 @@ func TestNewHandler(t *testing.T) {
 	}
 }
 
-func TestRegisterUnregister(t *testing.T) {
+func TestRegister(t *testing.T) {
 	h := NewHandler("1.0.0")
 
 	called := false
@@ -36,17 +37,6 @@ func TestRegisterUnregister(t *testing.T) {
 	}
 	if _, ok := resp.Checks["test"]; !ok {
 		t.Error("expected 'test' check in response")
-	}
-
-	// Unregister
-	h.Unregister("test")
-	called = false
-	resp = h.Check(context.Background())
-	if called {
-		t.Error("unregistered checker should not be called")
-	}
-	if _, ok := resp.Checks["test"]; ok {
-		t.Error("check 'test' should not exist after unregister")
 	}
 }
 
@@ -103,20 +93,6 @@ func TestCheck_NoCheckers(t *testing.T) {
 	}
 }
 
-func TestSetLive(t *testing.T) {
-	h := NewHandler("1.0.0")
-
-	h.SetLive(false)
-	if h.liveStatus != StatusUnhealthy {
-		t.Errorf("expected unhealthy after SetLive(false), got %s", h.liveStatus)
-	}
-
-	h.SetLive(true)
-	if h.liveStatus != StatusHealthy {
-		t.Errorf("expected healthy after SetLive(true), got %s", h.liveStatus)
-	}
-}
-
 func TestLivenessHandler_Healthy(t *testing.T) {
 	h := NewHandler("1.0.0")
 	handler := h.LivenessHandler()
@@ -138,17 +114,22 @@ func TestLivenessHandler_Healthy(t *testing.T) {
 	}
 }
 
-func TestLivenessHandler_Unhealthy(t *testing.T) {
+// Liveness is deliberately constant: it means "the process is serving", and
+// nothing mutates it (the SetLive mutator was deleted as dead code). Failing
+// liveness restarts the process, which no current failure mode wants.
+func TestLivenessHandler_AlwaysHealthy(t *testing.T) {
 	h := NewHandler("1.0.0")
-	h.SetLive(false)
+	h.Register("failing", func(ctx context.Context) *Check {
+		return &Check{Status: StatusUnhealthy, Message: "down"}
+	})
 	handler := h.LivenessHandler()
 
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	w := httptest.NewRecorder()
 	handler(w, req)
 
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Errorf("liveness must stay 200 regardless of checkers, got %d", w.Code)
 	}
 }
 
@@ -191,13 +172,14 @@ func TestDeepHealthHandler(t *testing.T) {
 	})
 	handler := h.DeepHealthHandler()
 
-	req := httptest.NewRequest("GET", "/livez", nil)
+	req := httptest.NewRequest("GET", "/health/deep", nil)
 	w := httptest.NewRecorder()
 	handler(w, req)
 
-	// Deep health always returns 200
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w.Code)
+	// The status code is honest: an unhealthy check means 503, with the
+	// per-check detail in the body.
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 for an unhealthy check, got %d", w.Code)
 	}
 
 	var resp Response
@@ -206,6 +188,22 @@ func TestDeepHealthHandler(t *testing.T) {
 	}
 	if _, ok := resp.Checks["check"]; !ok {
 		t.Error("expected check details in deep health response")
+	}
+}
+
+func TestDeepHealthHandler_Healthy(t *testing.T) {
+	h := NewHandler("1.0.0")
+	h.Register("check", func(ctx context.Context) *Check {
+		return &Check{Status: StatusHealthy}
+	})
+	handler := h.DeepHealthHandler()
+
+	req := httptest.NewRequest("GET", "/health/deep", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for healthy checks, got %d", w.Code)
 	}
 }
 

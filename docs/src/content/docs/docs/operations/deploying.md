@@ -5,16 +5,17 @@ sidebar:
   order: 1
 ---
 
-Garmr is a stateless HTTP service. Replicas share policy state by polling a
-common storage backend — you can run as many pods as you like behind a service
+Garmr is a stateless HTTP service. Every replica compiles the same policy
+directory at startup, so you can run as many pods as you like behind a service
 or a mesh. This page covers the deployment models you'll hit in practice.
 
 ## Minimum configuration
 
 Whatever you deploy onto, Garmr needs:
 
-1. **A storage backend.** Either a filesystem directory mounted into the pod,
-   or S3/MinIO. See [Storage Backends](../advanced/storage-backends).
+1. **A policy directory** mounted into the pod — from a ConfigMap, a PVC, a
+   CSI volume, or an init container that syncs from object storage. See
+   [Policy Storage](../advanced/storage-backends).
 2. **An HTTP listen address.** Defaults to `:8080`.
 3. **An audit-log path.** Defaults to `/var/log/garmr/audit.log`.
 
@@ -41,18 +42,24 @@ image:
 policies:
   inline:
     example.cue: |
-      apiVersion: "policy.garmr.io/v1"
-      kind: "Policy"
-      metadata: { name: "example", namespace: "default" }
-      spec:
-        rules: [{
-          id: "r1"
-          description: "env must be prod"
-          severity: "high"
-          expr: { match: { path: "env", equals: "prod" } }
-          message: "env must be prod"
-        }]
-        enforcement: { action: "deny" }
+      package policies
+
+      example: {
+        apiVersion: "policy.garmr.io/v1"
+        kind: "Policy"
+        metadata: { name: "example", namespace: "default" }
+        spec: {
+          target: resources: ["*"]
+          rules: [{
+            id: "r1"
+            description: "env must be prod"
+            severity: "high"
+            expr: { match: { path: "env", equals: "prod" } }
+            message: "env must be prod"
+          }]
+          enforcement: { action: "deny" }
+        }
+      }
 ```
 
 The chart defaults assume:
@@ -110,9 +117,15 @@ spec:
 
 `/metrics` exposes Prometheus-format metrics for policy evaluations
 (`garmr_policy_evaluations_total`), evaluation duration histograms,
-violations, active evaluations, cache hits/misses, rate-limit hits, and
-recovered panics, plus Go runtime metrics. The endpoint is exempt from API
-key authentication so Prometheus scrapers work without a shared secret.
+violations, active evaluations, policies loaded, policy load errors,
+policy reloads (`garmr_policy_reloads_total{result="success"|"failure"}` —
+alert on failures: a failed reload keeps the previous policy set serving
+and is otherwise only visible in logs and the reload response),
+rate-limit hits, and recovered panics, plus Go runtime metrics.
+`garmr_policies_loaded{namespace=...}` is a snapshot of the current set:
+a namespace whose policies disappear on reload drops out of the series.
+The endpoint is exempt from API key authentication so Prometheus scrapers
+work without a shared secret.
 
 Expose it to a Consul-aware Prometheus by adding these pod annotations:
 
@@ -141,10 +154,14 @@ tracing:
 
 - `/healthz` and `/livez` — liveness (cheap, cached; both serve the same
   check). Return 200 while the process is live.
-- `/readyz` — readiness. Returns 503 until policies are loaded and the
-  storage backend is reachable.
-- `/health/deep` — comprehensive check including the storage backend, for
-  debugging and monitoring (not for probes).
+- `/readyz` — readiness. Returns 503 until policies are loaded. Runs only
+  cheap in-process checks: the storage backend is *not* contacted, so a
+  kubelet polling this endpoint does not generate backend traffic.
+- `/health/deep` — comprehensive check, adding the storage backend round
+  trip (is the policy volume still mounted and readable?), for operators
+  and monitoring, not for probes. Returns 503 when any check fails, and —
+  unlike the probe endpoints — requires the API key when one is set,
+  because every call performs storage I/O.
 
 The Helm chart wires these probes automatically.
 
@@ -152,35 +169,52 @@ The Helm chart wires these probes automatically.
 
 Garmr replicas are fully stateless. Each replica:
 
-- Loads policies from the configured storage backend at startup.
-- Re-reads the backend on `POST /v1/policies/reload` or on filesystem
-  inotify events (filesystem backend) or on a poll interval (S3 backend).
-- Serves evaluation requests from its in-memory cache.
+- Loads policies from the configured storage backend at startup, and fails
+  to start if that load fails.
+- Re-reads the backend on `POST /v1/policies/reload`. There is no watcher and
+  no poller: reload is explicit, or happens implicitly when the pod restarts.
+- Serves evaluation requests from its in-memory compiled policy set. A
+  reload builds a new set and swaps it in atomically: in-flight evaluations
+  finish on the old set, nothing waits on the reload, and a failed reload
+  publishes nothing.
 
 This means:
 
 - **Multiple replicas stay in sync** via the shared backend, not leader
   election. There is no cross-replica coordination to fail.
-- **Expect a brief convergence window** when a policy changes in S3 — new
-  replicas will read the update on their next poll interval. Filesystem
-  backends are eventually consistent only if a shared RWX volume is used.
+- **Expect a convergence window** when policies change: replicas pick up the
+  new set when they are reloaded or rolled. The chart's `checksum/config`
+  annotation rolls pods automatically when the ConfigMap changes, so the
+  window is the rollout.
 - **A lost backend does not take Garmr down.** Pods continue serving from
-  cached state until they restart.
+  their compiled policy set until they restart — but a restart with an
+  unreachable backend fails startup rather than serving zero policies.
 
 ## Graceful shutdown
 
-Garmr traps SIGTERM and shuts the HTTP server down within 5 seconds by
-default. Kubernetes sends SIGTERM at pod deletion and waits for
-`terminationGracePeriodSeconds` (default 30). The chart leaves the default
-grace period in place, which is more than enough for typical evaluations.
+Garmr traps SIGTERM, immediately flips `/readyz` to 503 so no new traffic
+routes to the instance, and drains in-flight requests for up to
+`shutdown_timeout` (default **30 seconds**, `--shutdown-timeout`).
+Kubernetes sends SIGTERM at pod deletion and waits for
+`terminationGracePeriodSeconds` (default 30). Because the drain budget and
+the default grace period are the same length, either lower
+`--shutdown-timeout` or raise `terminationGracePeriodSeconds` so a drain
+that uses its full budget is not cut short by SIGKILL.
 
 ## Backup & restore
 
-- **Filesystem backend:** policies are whatever files are on disk. Back up
-  the directory with your usual volume snapshot tooling.
-- **S3 backend:** enable bucket versioning and a lifecycle policy. Garmr
-  does not implement its own backup.
+Policies are whatever files are on disk, so they are backed up wherever they
+come from: the Git repository that renders the ConfigMap, the object-storage
+bucket an init container syncs from (enable versioning there), or your usual
+volume snapshot tooling for a PVC. Garmr does not implement its own backup.
 
-Audit logs rotate via lumberjack (`max_size`, `max_backups`, `max_age` in
-`config.audit`). Ship them off the pod to a long-term store — the chart
-mounts them on `emptyDir` so they do not survive a pod restart.
+Audit records are the only durable record of the mesh-verified
+`principal`, so ship them off the node. The recommended posture is
+`audit.path: stdout`: records stream to the process stdout, which the
+platform's log capture (Nomad alloc logs, kubelet, vector/promtail/
+fluent-bit) already ships — no sidecar tailer, no rotation to manage,
+and application logs stay separable on stderr. The file mode
+(`audit.path: /var/log/garmr/audit.log`, rotated via `max_size`,
+`max_backups`, `max_age`) remains for deployments that tail files, but
+note the chart mounts it on `emptyDir`, so an unshipped file dies with
+the pod.

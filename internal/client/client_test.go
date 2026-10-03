@@ -97,8 +97,8 @@ func TestClient_Evaluate_WithOptions(t *testing.T) {
 		if body["namespace"] != "prod" {
 			t.Errorf("expected namespace=prod, got %v", body["namespace"])
 		}
-		if body["trace"] != true {
-			t.Errorf("expected trace=true")
+		if _, present := body["trace"]; present {
+			t.Error("request body still carries a 'trace' field; the flag was removed")
 		}
 
 		json.NewEncoder(w).Encode(map[string]any{
@@ -121,7 +121,6 @@ func TestClient_Evaluate_WithOptions(t *testing.T) {
 	c, _ := NewClient(Config{Address: server.URL})
 	result, err := c.Evaluate(context.Background(), map[string]any{"key": "value"}, EvaluateOptions{
 		Namespace: "prod",
-		Trace:     true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -244,15 +243,15 @@ func TestClient_ListPolicies(t *testing.T) {
 	defer server.Close()
 
 	c, _ := NewClient(Config{Address: server.URL})
-	policies, err := c.ListPolicies(context.Background(), "")
+	list, err := c.ListPolicies(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(policies) != 2 {
-		t.Errorf("expected 2 policies, got %d", len(policies))
+	if len(list.Policies) != 2 {
+		t.Errorf("expected 2 policies, got %d", len(list.Policies))
 	}
-	if policies[0].Name != "p1" {
-		t.Errorf("expected first policy name=p1, got %s", policies[0].Name)
+	if list.Policies[0].Name != "p1" {
+		t.Errorf("expected first policy name=p1, got %s", list.Policies[0].Name)
 	}
 }
 
@@ -271,16 +270,56 @@ func TestClient_ListPolicies_WithNamespace(t *testing.T) {
 	defer server.Close()
 
 	c, _ := NewClient(Config{Address: server.URL})
-	policies, err := c.ListPolicies(context.Background(), "prod")
+	list, err := c.ListPolicies(context.Background(), "prod")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(policies) != 1 {
-		t.Errorf("expected 1 policy, got %d", len(policies))
+	if len(list.Policies) != 1 {
+		t.Errorf("expected 1 policy, got %d", len(list.Policies))
 	}
 }
 
 // --- DeletePolicy ---
+
+// Query parameters must be escaped: a policy name containing query-string
+// metacharacters has to arrive server-side as data. The Sprintf-built URL
+// this replaces let `&`/`#`/`=`/spaces restructure the request.
+func TestClient_QueryParamsEscaped(t *testing.T) {
+	const hostileName = "we&ird na=me#1?"
+	const hostileNS = "team/a&b"
+
+	var gotDeleteName, gotDeleteNS, gotListNS string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodDelete:
+			gotDeleteName = r.URL.Query().Get("name")
+			gotDeleteNS = r.URL.Query().Get("namespace")
+			json.NewEncoder(w).Encode(map[string]any{"deleted": true})
+		default:
+			gotListNS = r.URL.Query().Get("namespace")
+			json.NewEncoder(w).Encode(map[string]any{"policies": []any{}})
+		}
+	}))
+	defer server.Close()
+
+	c, _ := NewClient(Config{Address: server.URL})
+	defer c.Close()
+
+	if _, err := c.DeletePolicy(context.Background(), hostileName, hostileNS); err != nil {
+		t.Fatalf("DeletePolicy: %v", err)
+	}
+	if gotDeleteName != hostileName || gotDeleteNS != hostileNS {
+		t.Errorf("delete params arrived as (%q, %q), want (%q, %q)",
+			gotDeleteName, gotDeleteNS, hostileName, hostileNS)
+	}
+
+	if _, err := c.ListPolicies(context.Background(), hostileNS); err != nil {
+		t.Fatalf("ListPolicies: %v", err)
+	}
+	if gotListNS != hostileNS {
+		t.Errorf("list namespace arrived as %q, want %q", gotListNS, hostileNS)
+	}
+}
 
 func TestClient_DeletePolicy(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

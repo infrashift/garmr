@@ -88,8 +88,10 @@ jobs:
 
       - name: Install Garmr CLI
         run: |
-          curl -sL https://github.com/infrashift/garmr/releases/latest/download/garmr-linux-amd64 -o garmr
-          chmod +x garmr
+          # Extract the CLI from the published container image.
+          docker create --name garmr-cli ghcr.io/infrashift/garmr:latest
+          docker cp garmr-cli:/usr/local/bin/garmr ./garmr
+          docker rm garmr-cli
           sudo mv garmr /usr/local/bin/
 
       - name: Evaluate Kubernetes manifests
@@ -251,8 +253,9 @@ stages:
             inputs:
               targetType: 'inline'
               script: |
-                curl -sL https://github.com/infrashift/garmr/releases/latest/download/garmr-linux-amd64 -o garmr
-                chmod +x garmr
+                docker create --name garmr-cli ghcr.io/infrashift/garmr:latest
+                docker cp garmr-cli:/usr/local/bin/garmr ./garmr
+                docker rm garmr-cli
                 sudo mv garmr /usr/local/bin/
 
           - task: Bash@3
@@ -298,8 +301,9 @@ jobs:
       - run:
           name: Install Garmr CLI
           command: |
-            curl -sL https://github.com/infrashift/garmr/releases/latest/download/garmr-linux-amd64 -o garmr
-            chmod +x garmr
+            docker create --name garmr-cli ghcr.io/infrashift/garmr:latest
+            docker cp garmr-cli:/usr/local/bin/garmr ./garmr
+            docker rm garmr-cli
             sudo mv garmr /usr/local/bin/
       - run:
           name: Evaluate Policies
@@ -592,13 +596,18 @@ jobs:
       - name: Validate lock files
         run: garmr policy validate-lock policies/
 
-      # garmr validate is a server-side check: it needs a reachable
-      # Garmr server (set GARMR_SERVER or --server). It accepts
-      # directories directly and expands them recursively.
-      - name: Validate policy syntax
-        env:
-          GARMR_SERVER: ${{ vars.GARMR_SERVER_URL }}
+      # garmr validate runs locally with the same loader the server uses
+      # at startup — no server required. A green result means the server
+      # will load the set.
+      - name: Validate policies
         run: garmr validate policies/
+
+      - name: Run policy tests
+        run: garmr test policies/ --recursive --format tap
+
+      - name: Compute expected digest
+        id: digest
+        run: echo "value=$(garmr policy digest policies/)" >> "$GITHUB_OUTPUT"
 
   deploy:
     needs: validate
@@ -606,20 +615,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy policies
-        run: |
-          rsync -av policies/ ${{ secrets.GARMR_SERVER }}:/etc/garmr/policies/
-
+      # Land the files on the volume the server's --policy-dir points at.
+      # How depends on your platform: a Nomad artifact stanza fetching the
+      # git ref, an init container syncing object storage, a CSI/host
+      # volume writer, or a ConfigMap rollout on Kubernetes. Then either
+      # restart the instances (each loads at startup and fails closed on a
+      # bad set) or call the reload endpoint per instance:
       - name: Trigger reload
         run: |
-          curl -X POST https://${{ secrets.GARMR_SERVER }}/v1/policies/reload \
-            -H "Authorization: Bearer ${{ secrets.GARMR_API_TOKEN }}"
+          curl -fsS -X POST https://${{ secrets.GARMR_SERVER }}/v1/policies/reload
+          # Reload fails closed: a broken or empty policy tree returns 500
+          # and the previously loaded set keeps serving.
 
-      - name: Verify deployment
+      - name: Verify convergence
         run: |
-          # List policies and verify count
-          POLICY_COUNT=$(curl -s https://${{ secrets.GARMR_SERVER }}/v1/policies | jq '.policies | length')
-          echo "Deployed $POLICY_COUNT policies"
+          EXPECTED=$(garmr policy digest policies/)
+          ACTUAL=$(curl -s https://${{ secrets.GARMR_SERVER }}/v1/policies | jq -r '.digest')
+          test "$EXPECTED" = "$ACTUAL" || { echo "server did not converge on the shipped policies"; exit 1; }
 ```
 
 ### Rollback Strategy
@@ -629,10 +641,11 @@ jobs:
 git tag -a policy-v1.2.0 -m "Policy release 1.2.0"
 git push origin policy-v1.2.0
 
-# Rollback to previous version
+# Rollback = deploy the previous ref through the same pipeline: check out
+# the tag, land the files on the policy volume, restart or reload, then
+# verify the digest matches the rolled-back checkout.
 git checkout policy-v1.1.0 -- policies/
-rsync -av policies/ server:/etc/garmr/policies/
-curl -X POST https://garmr-server/v1/policies/reload
+garmr policy digest policies/   # expected digest after the rollback
 ```
 
 ---

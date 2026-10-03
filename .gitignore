@@ -4,7 +4,7 @@ out/
 /garmr-server
 q-audit/
 garmr-audit/
-**/q-server.config.yaml
+**/garmr-server.config.yaml
 coverage.out
 coverage.html
 *.so
@@ -17,3 +17,7 @@ coverage.html
 docs/node_modules/
 docs/dist/
 docs/.astro/
+
+# End-to-end benchmark scratch and results
+scripts/bench-e2e/work/
+scripts/bench-e2e/results/

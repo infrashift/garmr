@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -146,10 +147,6 @@ func (m *mockBackend) Stat(ctx context.Context, path string) (*storage.FileInfo,
 	return nil, nil
 }
 
-func (m *mockBackend) Watch(ctx context.Context, pattern string) (<-chan storage.Event, error) {
-	return nil, nil
-}
-
 func (m *mockBackend) Checksum(ctx context.Context, path string) (string, error) {
 	return "", nil
 }
@@ -268,7 +265,7 @@ func TestReloadPoliciesFromBackend_MockBackend(t *testing.T) {
 
 	// Old policy should be gone (atomic swap)
 	_, err = eng.GetPolicy("default", "old-policy")
-	if err != ErrPolicyNotFound {
+	if !errors.Is(err, ErrPolicyNotFound) {
 		t.Error("expected old-policy to be replaced after reload")
 	}
 

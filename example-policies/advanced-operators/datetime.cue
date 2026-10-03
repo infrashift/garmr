@@ -19,7 +19,7 @@ datetimePolicy: {
 				description: "Certificate must not be expired"
 				severity:    "critical"
 				expr: match: {
-					path:     "spec.certificate.notAfter"
+					path: "spec.certificate.notAfter"
 					datetime: notExpired: true
 				}
 				message:     "certificate has expired"
@@ -32,7 +32,7 @@ datetimePolicy: {
 				description: "Certificate must have at least 30 days until expiry"
 				severity:    "high"
 				expr: match: {
-					path:     "spec.certificate.notAfter"
+					path: "spec.certificate.notAfter"
 					datetime: expiresAfterDays: 30
 				}
 				message:     "certificate expires within 30 days — renew soon"
@@ -45,7 +45,7 @@ datetimePolicy: {
 				description: "Last security scan must be within 7 days"
 				severity:    "high"
 				expr: match: {
-					path:     "spec.lastSecurityScan"
+					path: "spec.lastSecurityScan"
 					datetime: withinDays: 7
 				}
 				message:     "last security scan is older than 7 days"
@@ -58,7 +58,7 @@ datetimePolicy: {
 				description: "Build timestamp must be within 24 hours"
 				severity:    "medium"
 				expr: match: {
-					path:     "spec.buildTimestamp"
+					path: "spec.buildTimestamp"
 					datetime: withinHours: 24
 				}
 				message:  "build is older than 24 hours — rebuild for freshness"

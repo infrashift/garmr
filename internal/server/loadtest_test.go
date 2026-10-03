@@ -36,21 +36,21 @@ type loadTestConfig struct {
 
 // stepResult captures aggregate metrics for a single ramp step.
 type stepResult struct {
-	TargetRPS   int
-	ActualRPS   float64
-	TotalReqs   int64
-	Successes   int64
-	Failures    int64
-	ErrorPct    float64
-	AllowCount  int64
-	DenyCount   int64
-	Min         time.Duration
-	Max         time.Duration
-	Mean        time.Duration
-	P50         time.Duration
-	P95         time.Duration
-	P99         time.Duration
-	WallTime    time.Duration
+	TargetRPS  int
+	ActualRPS  float64
+	TotalReqs  int64
+	Successes  int64
+	Failures   int64
+	ErrorPct   float64
+	AllowCount int64
+	DenyCount  int64
+	Min        time.Duration
+	Max        time.Duration
+	Mean       time.Duration
+	P50        time.Duration
+	P95        time.Duration
+	P99        time.Duration
+	WallTime   time.Duration
 }
 
 // setupLoadTestServer creates a lightweight httptest.Server wired to a real
@@ -418,9 +418,9 @@ func TestLoadTest_Sustained(t *testing.T) {
 	}
 
 	const (
-		targetRPS    = 5000
-		duration     = 30 * time.Second
-		sampleEvery  = 5 * time.Second
+		targetRPS   = 5000
+		duration    = 30 * time.Second
+		sampleEvery = 5 * time.Second
 	)
 
 	interval := time.Second / time.Duration(targetRPS)
@@ -525,21 +525,6 @@ func TestLoadTest_Sustained(t *testing.T) {
 	failRate := float64(atomic.LoadInt64(&totalFail)) / float64(atomic.LoadInt64(&totalReqs)) * 100
 	if failRate > 1.0 {
 		t.Errorf("sustained test error rate %.2f%% exceeds 1%% threshold", failRate)
-	}
-}
-
-// --- Helper: print a final summary table ---
-
-func printStepTable(t *testing.T, steps []stepResult) {
-	t.Helper()
-	t.Logf("")
-	t.Logf("%-12s %-12s %-10s %-10s %-8s %-10s %-10s %-10s %-10s",
-		"TARGET_RPS", "ACTUAL_RPS", "TOTAL", "ERRORS", "ERR%", "P50", "P95", "P99", "MAX")
-	t.Logf("%s", strings.Repeat("-", 102))
-	for _, s := range steps {
-		t.Logf("%-12d %-12.0f %-10d %-10d %-8.2f %-10v %-10v %-10v %-10v",
-			s.TargetRPS, s.ActualRPS, s.TotalReqs, s.Failures,
-			s.ErrorPct, s.P50, s.P95, s.P99, s.Max)
 	}
 }
 

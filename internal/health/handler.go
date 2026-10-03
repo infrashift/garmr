@@ -5,6 +5,7 @@ package health
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -41,9 +42,13 @@ type Checker func(ctx context.Context) *Check
 
 // Handler manages health checks and serves health endpoints.
 type Handler struct {
-	mu       sync.RWMutex
+	mu sync.RWMutex
+	// checkers run on readiness probes and must stay cheap.
 	checkers map[string]Checker
-	version  string
+	// deepCheckers run only on /health/deep — anything that talks to a
+	// network dependency belongs here.
+	deepCheckers map[string]Checker
+	version      string
 
 	// Cached status for liveness (avoids expensive checks)
 	liveStatus Status
@@ -52,43 +57,56 @@ type Handler struct {
 // NewHandler creates a new health handler.
 func NewHandler(version string) *Handler {
 	return &Handler{
-		checkers:   make(map[string]Checker),
-		version:    version,
-		liveStatus: StatusHealthy,
+		checkers:     make(map[string]Checker),
+		deepCheckers: make(map[string]Checker),
+		version:      version,
+		liveStatus:   StatusHealthy,
 	}
 }
 
-// Register registers a health checker.
+// Register registers a health checker that runs on readiness probes.
+//
+// Readiness is polled by the kubelet every few seconds, so only cheap,
+// in-process checks belong here. Anything that talks to a network dependency
+// should use RegisterDeep.
 func (h *Handler) Register(name string, checker Checker) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.checkers[name] = checker
 }
 
-// Unregister removes a health checker.
-func (h *Handler) Unregister(name string) {
+// RegisterDeep registers a health checker that runs only on /health/deep.
+//
+// Use this for checks with a real cost — a round trip to a storage backend,
+// for example. Registering those as readiness checks turns every kubelet
+// probe into external traffic.
+func (h *Handler) RegisterDeep(name string, checker Checker) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.checkers, name)
+	h.deepCheckers[name] = checker
 }
 
-// SetLive sets the liveness status.
-func (h *Handler) SetLive(live bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if live {
-		h.liveStatus = StatusHealthy
-	} else {
-		h.liveStatus = StatusUnhealthy
-	}
-}
-
-// Check runs all health checks.
+// Check runs every registered health check, readiness and deep alike.
+// /health/deep and external callers use this; readiness uses checkReadiness.
 func (h *Handler) Check(ctx context.Context) *Response {
+	return h.runCheckers(ctx, true)
+}
+
+// checkReadiness runs only the cheap readiness checkers.
+func (h *Handler) checkReadiness(ctx context.Context) *Response {
+	return h.runCheckers(ctx, false)
+}
+
+func (h *Handler) runCheckers(ctx context.Context, includeDeep bool) *Response {
 	h.mu.RLock()
 	checkers := make(map[string]Checker, len(h.checkers))
 	for k, v := range h.checkers {
 		checkers[k] = v
+	}
+	if includeDeep {
+		for k, v := range h.deepCheckers {
+			checkers[k] = v
+		}
 	}
 	h.mu.RUnlock()
 
@@ -109,7 +127,7 @@ func (h *Handler) Check(ctx context.Context) *Response {
 			defer wg.Done()
 
 			start := time.Now()
-			check := checker(ctx)
+			check := runChecker(ctx, name, checker)
 			check.Name = name
 			check.Latency = time.Since(start)
 
@@ -128,6 +146,32 @@ func (h *Handler) Check(ctx context.Context) *Response {
 
 	wg.Wait()
 	return resp
+}
+
+// runChecker invokes one checker, converting a panic or a nil result into an
+// unhealthy check.
+//
+// Checkers run on their own goroutines, so the server's recovery middleware —
+// which only wraps the request goroutine — cannot catch a panic here: one
+// misbehaving checker took the whole process down instead of reporting 503.
+// A checker that returns nil did the same via a nil dereference.
+func runChecker(ctx context.Context, name string, checker Checker) (check *Check) {
+	defer func() {
+		if r := recover(); r != nil {
+			check = &Check{
+				Status:  StatusUnhealthy,
+				Message: fmt.Sprintf("check panicked: %v", r),
+			}
+		}
+	}()
+
+	if check = checker(ctx); check == nil {
+		check = &Check{
+			Status:  StatusUnhealthy,
+			Message: "check returned no result",
+		}
+	}
+	return check
 }
 
 // LivenessHandler returns the liveness probe handler.
@@ -152,7 +196,7 @@ func (h *Handler) LivenessHandler() http.HandlerFunc {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}
 }
 
@@ -163,7 +207,10 @@ func (h *Handler) ReadinessHandler() http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
-		resp := h.Check(ctx)
+		// Readiness checks only — deep checkers (e.g. a storage round trip)
+		// are excluded so a kubelet probe does not generate external traffic
+		// every few seconds.
+		resp := h.checkReadiness(ctx)
 
 		// Headers must be set before WriteHeader or they are dropped
 		w.Header().Set("Content-Type", "application/json")
@@ -173,12 +220,16 @@ func (h *Handler) ReadinessHandler() http.HandlerFunc {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}
 }
 
-// DeepHealthHandler returns a comprehensive health check.
-// This is for debugging and monitoring, not for probes.
+// DeepHealthHandler returns a comprehensive health check, running the deep
+// checkers (storage round trip) alongside the cheap ones. It is for
+// operators and monitoring, not for probes — but the status code is still
+// honest: 200 only when every check is healthy, 503 otherwise, so `curl -f`
+// and alerting rules work without parsing the body. Per-check detail stays
+// in the body.
 func (h *Handler) DeepHealthHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
@@ -187,8 +238,12 @@ func (h *Handler) DeepHealthHandler() http.HandlerFunc {
 		resp := h.Check(ctx)
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK) // Always 200 for deep health
-		json.NewEncoder(w).Encode(resp)
+		if resp.Status == StatusHealthy {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		_ = json.NewEncoder(w).Encode(resp)
 	}
 }
 
@@ -203,69 +258,4 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/livez", h.LivenessHandler())
 	mux.HandleFunc("/readyz", h.ReadinessHandler())
 	mux.HandleFunc("/health/deep", h.DeepHealthHandler())
-}
-
-// Common health checkers
-
-// PolicyLoaderChecker creates a checker for policy loader health.
-func PolicyLoaderChecker(loader interface{ Health() error }) Checker {
-	return func(ctx context.Context) *Check {
-		if err := loader.Health(); err != nil {
-			return &Check{
-				Status:  StatusUnhealthy,
-				Message: err.Error(),
-			}
-		}
-		return &Check{Status: StatusHealthy}
-	}
-}
-
-// StorageBackendChecker creates a checker for storage backend health.
-func StorageBackendChecker(name string, backend interface{ Health(context.Context) error }) Checker {
-	return func(ctx context.Context) *Check {
-		if err := backend.Health(ctx); err != nil {
-			return &Check{
-				Status:  StatusUnhealthy,
-				Message: err.Error(),
-			}
-		}
-		return &Check{Status: StatusHealthy}
-	}
-}
-
-// PluginChecker creates a checker for a plugin.
-func PluginChecker(name string, plugin interface{ Health(context.Context) error }) Checker {
-	return func(ctx context.Context) *Check {
-		if err := plugin.Health(ctx); err != nil {
-			return &Check{
-				Status:  StatusUnhealthy,
-				Message: err.Error(),
-			}
-		}
-		return &Check{Status: StatusHealthy}
-	}
-}
-
-// DiskSpaceChecker creates a checker for available disk space.
-func DiskSpaceChecker(path string, minFreeBytes uint64) Checker {
-	return func(ctx context.Context) *Check {
-		// In production, use syscall.Statfs
-		// This is a placeholder
-		return &Check{
-			Status:  StatusHealthy,
-			Message: "disk space OK",
-		}
-	}
-}
-
-// MemoryChecker creates a checker for memory usage.
-func MemoryChecker(maxUsagePercent float64) Checker {
-	return func(ctx context.Context) *Check {
-		// In production, use runtime.MemStats
-		// This is a placeholder
-		return &Check{
-			Status:  StatusHealthy,
-			Message: "memory OK",
-		}
-	}
 }

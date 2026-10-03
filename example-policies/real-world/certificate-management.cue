@@ -24,7 +24,7 @@ certificateManagementPolicy: {
 				severity:    "critical"
 				priority:    10
 				expr: match: {
-					path:     "spec.notAfter"
+					path: "spec.notAfter"
 					datetime: notExpired: true
 				}
 				message:     "certificate has expired — immediate renewal required"
@@ -38,7 +38,7 @@ certificateManagementPolicy: {
 				severity:    "high"
 				priority:    20
 				expr: match: {
-					path:     "spec.notAfter"
+					path: "spec.notAfter"
 					datetime: expiresAfterDays: 30
 				}
 				message:     "certificate expires within 30 days — schedule renewal"
@@ -81,7 +81,7 @@ certificateManagementPolicy: {
 				severity:    "medium"
 				priority:    30
 				expr: match: {
-					path:   "spec.subjectAlternativeNames"
+					path: "spec.subjectAlternativeNames"
 					length: greaterThan: 0
 				}
 				message:     "certificate must include at least one Subject Alternative Name (SAN)"

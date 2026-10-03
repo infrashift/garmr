@@ -8,7 +8,7 @@ sidebar:
 
 Complete command reference for the Garmr CLI.
 
-The CLI is a thin REST client: `eval`, `validate`, `policy list/get/delete/reload`, and `health` all require a running Garmr server. Only `test`, `docs generate`, and `policy lock/validate-lock/diff` run locally without a server.
+`eval`, `policy list/get/delete/reload`, and `health` are REST clients and require a running Garmr server. `validate`, `test`, `docs generate`, and `policy digest/lock/validate-lock/diff` run locally without a server — `validate` and `policy digest` embed the exact engine loader the server runs, so their results predict what the server will load.
 
 The CLI has no authentication or TLS client options and cannot talk to an API-key-protected server. Run the CLI against the server over a trusted network (localhost, cluster-internal), or behind a service mesh sidecar that handles mTLS — the same deployment model the server's `auth.identity_header` support is designed for.
 
@@ -38,13 +38,12 @@ garmr eval --input <file> [flags]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--input` | `-i` | Input file (required, `-` for stdin) | |
+| `--input` | `-i` | Input file (`-` for stdin). One of `--input` or `--data` is required. | |
 | `--data` | `-d` | Inline JSON/YAML data | |
 | `--format` | `-f` | Input format (json, yaml, auto) | `auto` |
 | `--policy` | `-p` | Specific policies to evaluate (namespace/name, repeatable) | |
 | `--namespace` | `-n` | Policy namespace to evaluate (single value) | |
 | `--request-id` | | Request ID for audit correlation | |
-| `--trace` | | Enable evaluation trace | `false` |
 | `--verbose` | `-v` | Show rule details. Default shows details on fail, hides on pass. `--verbose=false` always hides. | unset |
 
 **Examples:**
@@ -119,7 +118,7 @@ or pass `--require-match=false` to `garmr-server`.
 
 ### garmr validate
 
-Validate policy syntax. Accepts files and directories (directories are expanded recursively to `.cue` files). Requires a running server — validation happens server-side.
+Validate policies locally with the same schema and loader the server uses at startup — no server required. A green result means the server will load the set. Directories are loaded as CUE packages, so multi-file policy packages (shared definitions + policies) validate correctly. On success the policy-set digest is printed for convergence checks.
 
 ```bash
 garmr validate <file-or-dir> [file-or-dir...] [flags]
@@ -129,23 +128,19 @@ garmr validate <file-or-dir> [file-or-dir...] [flags]
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--warn` | Show warnings | `false` |
-| `--strict` | Treat warnings as errors | `false` |
+| `--remote` | Validate via a running server's `/v1/validate` instead of locally (compiles each file in isolation) | `false` |
 
 **Examples:**
 
 ```bash
-# Validate a policy file
-garmr validate policies/security.cue
-
-# Validate all policies in directory
+# Validate a policy tree locally (CI gate)
 garmr validate policies/
 
-# Show warnings
-garmr validate policies/ --warn
+# Validate a single file
+garmr validate policies/security.cue
 
-# Strict mode (warnings are errors)
-garmr validate policies/ --strict
+# Validate against a running server
+garmr validate --remote --server http://garmr:8080 policies/security.cue
 ```
 
 ---
@@ -212,19 +207,51 @@ garmr policy delete <name> [flags]
 
 #### garmr policy reload
 
-Reload policies from disk.
+Reload policies from disk on one or more instances. The reload endpoint
+mutates a single server process — behind a load balancer or mesh, pass
+every instance via `--servers` so all of them converge. Exits nonzero if
+any instance fails, if `--expect-digest` doesn't match, or if instances
+end up with diverging digests.
 
 ```bash
-garmr policy reload
+garmr policy reload [flags]
 ```
+
+**Flags:**
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--servers` | Reload every listed instance (comma-separated or repeated) | the `--server` address |
+| `--expect-digest` | Fail unless every instance reports this policy-set digest | |
+| `--converge` | Repeat the reload against one address until `--instances` distinct instances have acknowledged | `false` |
+| `--instances` | Number of distinct instances to converge (required with `--converge`) | |
+| `--converge-timeout` | Give up if `--converge` has not reached every instance in this long | `2m` |
+
+Use `--servers` when you can address instances directly. Behind a service-mesh
+upstream you cannot — every call load-balances and there is only one address —
+so `--servers` would reload one arbitrary instance, see a single digest, and
+exit 0 with the rest of the fleet stale. `--converge` handles that case: each
+response carries an `instance_id`, and the command keeps reloading until it has
+seen `--instances` distinct instances all reporting the expected digest,
+failing on timeout, digest mismatch, or divergence.
 
 **Examples:**
 
 ```bash
-# Reload policies
+# Reload the single configured instance
 garmr policy reload
 
-# Check result
+# Through a mesh upstream that load-balances (e.g. Consul Connect)
+garmr policy reload --server http://localhost:8080 \
+  --converge --instances 2 \
+  --expect-digest "$(garmr policy digest policies/)"
+
+# Fan out to every instance with convergence enforced
+garmr policy reload \
+  --servers http://10.0.0.11:8080,http://10.0.0.12:8080 \
+  --expect-digest "$(garmr policy digest policies/)"
+
+# Machine-readable result
 garmr policy reload -o json
 ```
 
@@ -314,7 +341,7 @@ garmr test <policy-file> [test-file] [flags]
 | `--verbose` | `-v` | Show detailed output | `false` |
 | `--recursive` | `-r` | Process directories recursively | `false` |
 | `--filter` | | Filter tests by name | |
-| `--output` | `-o` | Output format (text, json, tap) | `text` |
+| `--format` | | Output format (text, json, tap) — deliberately not `-o`, which is the root output flag | `text` |
 | `--fail-fast` | | Stop on first failure | `false` |
 
 **Examples:**
@@ -330,10 +357,10 @@ garmr test policies/ --recursive
 garmr test policies/ --filter "valid release"
 
 # TAP output for CI
-garmr test policies/ -o tap
+garmr test policies/ --format tap
 
 # JSON output
-garmr test policies/ -o json
+garmr test policies/ --format json
 
 # Verbose output
 garmr test policies/ -v
@@ -390,18 +417,17 @@ garmr docs generate <policy-dir> [flags]
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--format` | `-f` | Output format (only `generic-markdown` is currently supported) | `generic-markdown` |
-| `--output` | `-o` | Output directory | `./docs/policies` |
+| `--out-dir` | | Output directory | `./docs/policies` |
 | `--recursive` | `-r` | Process recursively | `true` |
-| `--author` | | Author for front matter | |
 
 **Examples:**
 
 ```bash
 # Generate docs from examples
-garmr docs generate ./example-policies --output ./out/docs
+garmr docs generate ./example-policies --out-dir ./out/docs
 
 # Specify format
-garmr docs generate ./policies --format generic-markdown --output ./docs
+garmr docs generate ./policies --format generic-markdown --out-dir ./docs
 ```
 
 ---
@@ -466,7 +492,8 @@ garmr eval --input deployment.json
 
 ## Configuration File
 
-Create `~/.garmr.yaml` or `./garmr.yaml`:
+Create `~/.garmr.yaml` or `./.garmr.yaml` (the file name is `.garmr.yaml`
+in both locations), or point `--config` / `GARMR_CONFIG` at any path:
 
 ```yaml
 server: "http://localhost:8080"
@@ -563,5 +590,5 @@ garmr policy list
 garmr policy list -n security
 
 # Generate documentation
-garmr docs generate ./example-policies --output ./out/docs
+garmr docs generate ./example-policies --out-dir ./out/docs
 ```

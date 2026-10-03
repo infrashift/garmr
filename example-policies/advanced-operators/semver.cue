@@ -19,7 +19,7 @@ semverPolicy: {
 				description: "Application version must be >= 2.0.0"
 				severity:    "high"
 				expr: match: {
-					path:   "spec.version"
+					path: "spec.version"
 					semver: greaterThanOrEqual: "2.0.0"
 				}
 				message:     "application version must be >= 2.0.0"
@@ -31,7 +31,7 @@ semverPolicy: {
 				description: "Application version must be < 4.0.0 (unsupported)"
 				severity:    "medium"
 				expr: match: {
-					path:   "spec.version"
+					path: "spec.version"
 					semver: lessThan: "4.0.0"
 				}
 				message:  "version 4.x is not yet supported"
@@ -42,7 +42,7 @@ semverPolicy: {
 				description: "Database driver must be exact version 1.5.2"
 				severity:    "critical"
 				expr: match: {
-					path:   "spec.dependencies.dbDriver"
+					path: "spec.dependencies.dbDriver"
 					semver: equals: "1.5.2"
 				}
 				message:     "database driver must be exactly version 1.5.2 (known stable)"

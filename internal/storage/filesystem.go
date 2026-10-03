@@ -12,9 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
-
-	"github.com/fsnotify/fsnotify"
 )
 
 func init() {
@@ -28,10 +25,6 @@ type FilesystemBackend struct {
 	root     string
 	includes []string
 	excludes []string
-
-	watcherMu sync.Mutex
-	watcher   *fsnotify.Watcher
-	watching  bool
 }
 
 // FilesystemOptions contains filesystem-specific options.
@@ -125,13 +118,21 @@ func (b *FilesystemBackend) List(ctx context.Context, pattern string) ([]FileInf
 	return files, err
 }
 
-// withinRoot reports whether fullPath is the backend root or inside it.
+// WithinRoot reports whether fullPath is root or inside it.
 // A bare prefix check is not enough: "/policiesX" has "/policies" as a
 // string prefix without being inside it.
-func (b *FilesystemBackend) withinRoot(fullPath string) bool {
-	root := filepath.Clean(b.root)
+//
+// Exported because the engine needs the same containment check when staging
+// files from a non-filesystem backend into a temp directory.
+func WithinRoot(root, fullPath string) bool {
+	cleanRoot := filepath.Clean(root)
 	cleaned := filepath.Clean(fullPath)
-	return cleaned == root || strings.HasPrefix(cleaned, root+string(os.PathSeparator))
+	return cleaned == cleanRoot || strings.HasPrefix(cleaned, cleanRoot+string(os.PathSeparator))
+}
+
+// withinRoot reports whether fullPath is the backend root or inside it.
+func (b *FilesystemBackend) withinRoot(fullPath string) bool {
+	return WithinRoot(b.root, fullPath)
 }
 
 func (b *FilesystemBackend) Get(ctx context.Context, path string) ([]byte, error) {
@@ -202,108 +203,9 @@ func (b *FilesystemBackend) Checksum(ctx context.Context, path string) (string, 
 	return "sha256:" + hex.EncodeToString(hash[:]), nil
 }
 
-func (b *FilesystemBackend) Watch(ctx context.Context, pattern string) (<-chan Event, error) {
-	b.watcherMu.Lock()
-	defer b.watcherMu.Unlock()
-
-	if b.watching {
-		return nil, nil // Already watching
-	}
-
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return nil, err
-	}
-	b.watcher = watcher
-
-	// Add root directory and subdirectories
-	err = filepath.WalkDir(b.root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return watcher.Add(path)
-		}
-		return nil
-	})
-	if err != nil {
-		watcher.Close()
-		return nil, err
-	}
-
-	events := make(chan Event, 100)
-	b.watching = true
-
-	go b.watchLoop(ctx, watcher, events)
-
-	return events, nil
-}
-
-func (b *FilesystemBackend) watchLoop(ctx context.Context, watcher *fsnotify.Watcher, events chan<- Event) {
-	defer close(events)
-	defer watcher.Close()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-
-		case event, ok := <-watcher.Events:
-			if !ok {
-				return
-			}
-
-			relPath, err := filepath.Rel(b.root, event.Name)
-			if err != nil {
-				continue
-			}
-
-			if !b.matchesPatterns(relPath) {
-				continue
-			}
-
-			var eventType EventType
-			switch {
-			case event.Op&fsnotify.Create == fsnotify.Create:
-				eventType = EventCreate
-			case event.Op&fsnotify.Write == fsnotify.Write:
-				eventType = EventModify
-			case event.Op&fsnotify.Remove == fsnotify.Remove:
-				eventType = EventDelete
-			case event.Op&fsnotify.Rename == fsnotify.Rename:
-				eventType = EventDelete
-			default:
-				continue
-			}
-
-			select {
-			case events <- Event{Type: eventType, Path: relPath}:
-			default:
-				// Channel full: the event is dropped, but say so — a lost
-				// change notification means a missed reload.
-				log.Printf("garmr/storage: watch event channel full, dropping %s event for %s", eventType, relPath)
-			}
-
-		case err, ok := <-watcher.Errors:
-			if !ok {
-				return
-			}
-			select {
-			case events <- Event{Type: EventError, Error: err}:
-			default:
-			}
-		}
-	}
-}
-
+// Close releases resources held by the backend. The filesystem backend holds
+// none: it opens files per call and keeps no long-lived handles.
 func (b *FilesystemBackend) Close() error {
-	b.watcherMu.Lock()
-	defer b.watcherMu.Unlock()
-
-	if b.watcher != nil {
-		b.watching = false
-		return b.watcher.Close()
-	}
 	return nil
 }
 

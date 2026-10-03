@@ -53,11 +53,7 @@ export default defineConfig({
 					collapsed: true,
 					items: [
 						{ label: 'Real-World Examples', slug: 'docs/policies/real-world' },
-						{
-							label: 'Other Examples',
-							collapsed: true,
-							autogenerate: { directory: 'docs/policies/generated' },
-						},
+						{ label: 'Example Policy Catalog', slug: 'docs/policies/catalog' },
 					],
 				},
 				{

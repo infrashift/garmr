@@ -23,15 +23,19 @@ Garmr provides a flexible, type-safe policy engine that uses [CUE](https://cuela
 
 ### Condition Operators
 
+Each expression sets exactly one of `all`, `any`, `not`, `match`, `compare`, `forEach`, or `func`. A `match` checks the field at a path with one or more of these operators:
+
 | Category | Operators |
 |----------|-----------|
-| Existence | `exists`, `absent` |
+| Existence | `exists: true`, `exists: false` |
 | Equality | `equals` |
 | Comparison | `greaterThan`, `greaterThanOrEqual`, `lessThan`, `lessThanOrEqual` |
 | String | `contains`, `hasPrefix`, `hasSuffix`, `pattern` (regex) |
 | Set | `in`, `notIn` |
-| Logical | `all`, `any`, `not` |
-| Advanced | `forEach`, `length`, `semver`, `datetime`, `compare` (cross-field) |
+| Lists | `containsAll`, `containsAny`, `subsetOf`, `unique`, `uniqueBy`, `sorted` |
+| Advanced | `length`, `semver`, `datetime` |
+
+Combine checks with `all`, `any`, and `not`. Use `forEach` for list elements, `compare` for cross-field comparisons, and `func` for builtin calls. The schema types every expression, so a misspelled operator is rejected when the policy loads. Rules can apply conditionally (`when`), `forEach` can filter (`where`) and count matches, paths can project lists (`spec.containers[*].cpu`), and messages can name the failing element (`{{c.name}}`).
 
 ### Target Filtering
 

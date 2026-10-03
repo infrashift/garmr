@@ -4,7 +4,7 @@
 // InitTracing configures a global OTel TracerProvider driven by OTel's
 // standard environment variables. If OTEL_EXPORTER_OTLP_ENDPOINT (or the
 // trace-specific variant) is unset, it returns a no-op shutdown and leaves
-// the existing NoopTracer in place — tracing stays opt-in.
+// the global no-op tracer provider in place — tracing stays opt-in.
 package observability
 
 import (

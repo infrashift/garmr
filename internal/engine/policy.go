@@ -2,31 +2,28 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
-	"time"
 
 	"cuelang.org/go/cue"
-	"cuelang.org/go/cue/cuecontext"
 	"cuelang.org/go/cue/load"
 	"go.uber.org/zap"
 
 	"github.com/infrashift/garmr/internal/storage"
 )
 
-// ListPolicies returns all loaded policies.
-//
-// The returned CompiledPolicy values must be treated as read-only metadata
-// snapshots; their CUE values belong to a pooled replica context.
+// ListPolicies returns the loaded policies, sorted by namespace/name. The
+// returned values are shared and must be treated as read-only.
 func (e *Engine) ListPolicies(namespace string) []*CompiledPolicy {
-	set := e.currentSet()
-	rep := set.get()
-	defer set.put(rep)
-
 	var result []*CompiledPolicy
-	for _, p := range rep.policies {
+	for _, p := range e.set.Load().all {
 		if namespace == "" || p.Namespace == namespace {
 			result = append(result, p)
 		}
@@ -34,105 +31,148 @@ func (e *Engine) ListPolicies(namespace string) []*CompiledPolicy {
 	return result
 }
 
-// GetPolicy returns a specific policy (read-only metadata snapshot).
+// GetPolicy returns a specific policy (read-only).
 func (e *Engine) GetPolicy(namespace, name string) (*CompiledPolicy, error) {
-	set := e.currentSet()
-	rep := set.get()
-	defer set.put(rep)
-
-	key := policyKey(namespace, name)
-	if p, ok := rep.policies[key]; ok {
+	if p, ok := e.set.Load().policies[policyKey(namespace, name)]; ok {
 		return p, nil
 	}
 	return nil, ErrPolicyNotFound
 }
 
+// errNoPoliciesFound marks a directory that yielded zero policy documents.
+// The walker treats it as "keep scanning"; every other load error is a real
+// failure and aborts the load.
+var errNoPoliciesFound = errors.New("no policies found")
+
+// mutate builds the policies staged by build in a fresh CUE context and
+// publishes a new set: the staged policies alone when replace is set,
+// otherwise merged over the current set. Nothing is published if build
+// fails, so a failed load never leaves a partial set.
+func (e *Engine) mutate(replace bool, build func(cctx *cue.Context, schema cue.Value, pending map[string]*CompiledPolicy) error) error {
+	e.loadMu.Lock()
+	defer e.loadMu.Unlock()
+
+	cctx, schema, err := newLoadContext()
+	if err != nil {
+		return err
+	}
+	pending := make(map[string]*CompiledPolicy)
+	if err := build(cctx, schema, pending); err != nil {
+		return err
+	}
+
+	next := pending
+	if !replace {
+		next = maps.Clone(e.set.Load().policies)
+		maps.Copy(next, pending)
+	}
+	e.publish(next)
+	return nil
+}
+
+// publish swaps in a new set. Callers hold loadMu.
+func (e *Engine) publish(policies map[string]*CompiledPolicy) {
+	e.set.Store(newPolicySet(policies))
+	e.observability().Metrics().SetPoliciesLoaded(namespaceCounts(policies))
+}
+
 // DeletePolicy removes a policy.
 func (e *Engine) DeletePolicy(namespace, name string) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.loadMu.Lock()
+	defer e.loadMu.Unlock()
 
 	key := policyKey(namespace, name)
-	found := false
-	e.set.forEachExclusive(func(i int, r *policyReplica) error {
-		if _, ok := r.policies[key]; ok {
-			delete(r.policies, key)
-			if i == 0 {
-				found = true
-			}
+	cur := e.set.Load().policies
+	if _, ok := cur[key]; !ok {
+		return false
+	}
+	next := maps.Clone(cur)
+	delete(next, key)
+	e.publish(next)
+	return true
+}
+
+// namespaceCounts returns the per-namespace counts published as the
+// policies_loaded gauge snapshot.
+func namespaceCounts(policies map[string]*CompiledPolicy) map[string]int {
+	counts := make(map[string]int, len(policies))
+	for _, p := range policies {
+		counts[p.Namespace]++
+	}
+	return counts
+}
+
+// ReloadPoliciesFromDir atomically replaces the loaded set with the policies
+// in a directory tree. In-flight evaluations finish against the set they
+// started with.
+//
+// Any failure — a policy that does not compile or validate, or a directory
+// tree yielding zero policies — leaves the existing set live and returns the
+// error. Swapping in an empty or partial set on a bad deploy would silently
+// deny (or skip) everything, which is an outage a 200 response would hide.
+func (e *Engine) ReloadPoliciesFromDir(ctx context.Context, dir string) (int, error) {
+	count := 0
+	err := e.mutate(true, func(cctx *cue.Context, schema cue.Value, pending map[string]*CompiledPolicy) error {
+		if err := e.loadDir(cctx, schema, dir, pending); err != nil {
+			return err
+		}
+		if count = len(pending); count == 0 {
+			return fmt.Errorf("%w in %s; keeping the existing policy set", errNoPoliciesFound, dir)
 		}
 		return nil
 	})
-	return found
-}
-
-// ClearPolicies removes all loaded policies.
-func (e *Engine) ClearPolicies() {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	e.set.forEachExclusive(func(i int, r *policyReplica) error {
-		r.policies = make(map[string]*CompiledPolicy)
-		return nil
-	})
-	e.logger.Info("cleared all policies")
-}
-
-// ReloadPoliciesFromDir atomically reloads all policies from a directory.
-// This is safe to call while evaluations are in progress - in-flight evaluations
-// will complete with the old policy set, new evaluations will use the new set.
-func (e *Engine) ReloadPoliciesFromDir(ctx context.Context, dir string) (int, error) {
-	// Build a completely new replica set (no lock needed during load)
-	newSet, err := newPolicySet(defaultReplicaCount())
+	e.observability().Metrics().RecordPolicyReload(err == nil)
 	if err != nil {
 		return 0, err
 	}
-
-	count := 0
-	if err := newSet.forEachExclusive(func(i int, r *policyReplica) error {
-		if err := e.loadDirIntoReplica(ctx, dir, r, i != 0); err != nil {
-			return err
-		}
-		if i == 0 {
-			count = len(r.policies)
-		}
-		return nil
-	}); err != nil {
-		return 0, err
-	}
-
-	// Atomic swap - only hold lock briefly. In-flight evaluations keep the
-	// replicas of the old set alive until they finish.
-	e.mu.Lock()
-	e.set = newSet
-	e.mu.Unlock()
-
 	e.logger.Info("policies reloaded atomically", zap.Int("count", count))
 	return count, nil
 }
 
 // LoadPoliciesFromDir loads all policies from a directory and its
-// subdirectories, adding to any policies already loaded.
+// subdirectories, adding to any policies already loaded. Like the reload
+// path it fails closed: a policy that does not compile or validate, or a
+// tree yielding zero policies, is an error and nothing is loaded.
 func (e *Engine) LoadPoliciesFromDir(ctx context.Context, dir string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	return e.set.forEachExclusive(func(i int, r *policyReplica) error {
-		return e.loadDirIntoReplica(ctx, dir, r, i != 0)
+	return e.mutate(false, func(cctx *cue.Context, schema cue.Value, pending map[string]*CompiledPolicy) error {
+		if err := e.loadDir(cctx, schema, dir, pending); err != nil {
+			return err
+		}
+		if len(pending) == 0 {
+			return fmt.Errorf("%w in %s", errNoPoliciesFound, dir)
+		}
+		return nil
 	})
 }
 
-// loadDirIntoReplica loads policies from dir (and its subdirectories) into a
-// replica, compiling everything with the replica's own context. When quiet is
-// true, logs and metrics are suppressed — used when replaying the same load
-// onto the remaining replicas of a set.
-func (e *Engine) loadDirIntoReplica(ctx context.Context, dir string, r *policyReplica, quiet bool) error {
-	// Load from the directory itself
-	if err := e.loadSingleDirIntoReplica(dir, r, quiet); err != nil && !quiet {
-		e.logger.Debug("no policies in root, scanning subdirectories", zap.String("dir", dir))
+// loadDir loads policies from dir and every subdirectory beneath it into
+// pending.
+//
+// A directory that simply contains no policy documents (errNoPoliciesFound)
+// keeps the scan going — shared-definition packages and test fixtures are
+// legitimate. Every other error (a policy that fails to compile or validate)
+// aborts the load: skipping a broken policy and continuing would deploy a
+// partial policy set that looks healthy.
+//
+// Every directory is loaded as its own CUE package and the walk continues
+// beneath it. It used to stop descending as soon as a directory had .cue files
+// of its own, so given policies/security/{base.cue,k8s/pod.cue} the k8s/
+// subtree was never visited: pod.cue silently went unenforced, the load
+// *succeeded* because base.cue satisfied the non-empty check, and the server
+// came up reporting ready.
+func (e *Engine) loadDir(cctx *cue.Context, schema cue.Value, dir string, pending map[string]*CompiledPolicy) error {
+	// Load from the directory itself when it has CUE files of its own; a
+	// directory that only holds subdirectories is not an error.
+	if hasCue, _ := hasCueFiles(dir); hasCue {
+		keys, err := e.loadInstances(cctx, schema, []string{"."}, dir, pending)
+		if err != nil {
+			return err
+		}
+		if len(keys) == 0 {
+			e.logger.Debug("no policy documents here, continuing scan", zap.String("dir", dir))
+		}
 	}
 
-	// Walk subdirectories
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("reading directory: %w", err)
@@ -143,136 +183,94 @@ func (e *Engine) loadDirIntoReplica(ctx context.Context, dir string, r *policyRe
 			continue
 		}
 
-		// Skip hidden directories and common non-policy directories
+		// Skip hidden directories and common non-policy directories.
+		//
+		// testdata is skipped to match the storage backend's default exclude
+		// patterns (internal/storage/filesystem.go), which /health/deep's
+		// List() consults: otherwise it would report fixture files as absent
+		// while the loader compiled and enforced them. (*_test.cue needs no
+		// handling here: CUE itself excludes test files unless
+		// load.Config.Tests is set, which it is not.)
 		name := entry.Name()
-		if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "cue.mod" {
+		if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" ||
+			name == "cue.mod" || name == "testdata" {
 			continue
 		}
 
-		subdir := filepath.Join(dir, name)
-
-		hasCueFiles, _ := e.hasCueFiles(subdir)
-		if hasCueFiles {
-			if err := e.loadSingleDirIntoReplica(subdir, r, quiet); err != nil {
-				if !quiet {
-					e.logger.Warn("failed to load policies from subdirectory",
-						zap.String("dir", subdir),
-						zap.Error(err),
-					)
-				}
-				continue
-			}
-		} else {
-			// Recursively check deeper directories
-			if err := e.loadDirIntoReplica(ctx, subdir, r, quiet); err != nil && !quiet {
-				e.logger.Debug("no policies in subdirectory", zap.String("dir", subdir))
-			}
+		if err := e.loadDir(cctx, schema, filepath.Join(dir, name), pending); err != nil {
+			return err
 		}
 	}
 
 	return nil
 }
 
-// loadSingleDirIntoReplica loads policies from a single directory (non-recursive)
-// into a replica using the replica's context.
-func (e *Engine) loadSingleDirIntoReplica(dir string, r *policyReplica, quiet bool) error {
-	keys, err := e.loadInstancesIntoReplica([]string{"."}, dir, r, quiet)
-	if err != nil {
-		return err
-	}
-	if len(keys) == 0 {
-		return fmt.Errorf("no policies found in %s", dir)
-	}
-	return nil
-}
-
-// loadInstancesIntoReplica loads the given CUE package/file args (resolved
-// relative to dir) into a replica using the replica's context. It returns
-// the namespace/name keys of the policies loaded.
-func (e *Engine) loadInstancesIntoReplica(args []string, dir string, r *policyReplica, quiet bool) ([]string, error) {
-	cfg := &load.Config{
-		Dir: dir,
-	}
-
-	instances := load.Instances(args, cfg)
+// loadInstances compiles the given CUE package/file args (resolved relative
+// to dir), staging every policy document found into pending. It returns the
+// namespace/name keys of the policies loaded.
+func (e *Engine) loadInstances(cctx *cue.Context, schema cue.Value, args []string, dir string, pending map[string]*CompiledPolicy) ([]string, error) {
+	instances := load.Instances(args, &load.Config{Dir: dir})
 	var keys []string
-
-	// Track namespaces that got policies loaded for metrics
-	namespaceCounts := make(map[string]int)
 
 	for _, inst := range instances {
 		if inst.Err != nil {
-			if !quiet {
-				e.obs.Metrics().RecordPolicyLoadError("", dir, "compilation")
-			}
+			e.observability().Metrics().RecordPolicyLoadError("", dir, "compilation")
 			return nil, fmt.Errorf("loading instance: %w", inst.Err)
 		}
 
-		val := r.ctx.BuildInstance(inst)
+		val := cctx.BuildInstance(inst)
 		if val.Err() != nil {
-			if !quiet {
-				e.obs.Metrics().RecordPolicyLoadError("", dir, "compilation")
-			}
+			e.observability().Metrics().RecordPolicyLoadError("", dir, "compilation")
 			return nil, fmt.Errorf("building instance: %w", val.Err())
 		}
 
-		// Iterate fields to find policies
 		iter, _ := val.Fields()
 		for iter.Next() {
 			fieldVal := iter.Value()
 
-			// Check if this is a policy
 			kindVal := fieldVal.LookupPath(cue.ParsePath("kind"))
-			if !kindVal.Exists() {
+			if kind, _ := kindVal.String(); kind != "Policy" {
 				continue
 			}
 
-			kind, _ := kindVal.String()
-			if kind != "Policy" {
-				continue
-			}
-
-			// Extract name
-			nameVal := fieldVal.LookupPath(cue.ParsePath("metadata.name"))
-			nsVal := fieldVal.LookupPath(cue.ParsePath("metadata.namespace"))
-
-			name, _ := nameVal.String()
+			name, _ := fieldVal.LookupPath(cue.ParsePath("metadata.name")).String()
 			ns := "default"
-			if nsVal.Exists() {
+			if nsVal := fieldVal.LookupPath(cue.ParsePath("metadata.namespace")); nsVal.Exists() {
 				ns, _ = nsVal.String()
 			}
 
-			compiled, err := e.compilePolicy(fieldVal, name, ns)
+			// Unify with the schema before compiling — the directory loader is
+			// the production path, and an unvalidated load here would accept
+			// policies that `garmr validate` rejects. A failure aborts the
+			// whole load rather than skipping the policy: silently deploying
+			// a partial policy set is the outage this loader must prevent.
+			unified := fieldVal.Unify(schema)
+			if unified.Err() != nil {
+				e.observability().Metrics().RecordPolicyLoadError(name, ns, "schema")
+				return nil, fmt.Errorf("policy %s/%s in %s failed schema validation: %w", ns, name, dir, unified.Err())
+			}
+
+			compiled, err := e.compilePolicy(unified, name, ns)
 			if err != nil {
-				if !quiet {
-					e.obs.Metrics().RecordPolicyLoadError(name, ns, "compilation")
-					e.logger.Warn("skipping invalid policy",
-						zap.String("name", name),
-						zap.Error(err),
-					)
-				}
-				continue
+				e.observability().Metrics().RecordPolicyLoadError(name, ns, "compilation")
+				return nil, fmt.Errorf("policy %s/%s in %s failed to compile: %w", ns, name, dir, err)
 			}
+			compiled.Source = dir
 
-			compiled.LoadedAt = time.Now()
+			// Two documents declaring the same policy used to load with the
+			// last one silently winning, so which rules were enforced
+			// depended on directory walk order.
 			key := policyKey(ns, name)
-			r.policies[key] = compiled
-			keys = append(keys, key)
-			namespaceCounts[ns]++
-
-			if !quiet {
-				e.logger.Info("loaded policy from directory",
-					zap.String("name", name),
-					zap.String("namespace", ns),
-				)
+			if prev, ok := pending[key]; ok {
+				return nil, fmt.Errorf("policy %s is declared twice (in %s and %s)", key, prev.Source, dir)
 			}
-		}
-	}
+			pending[key] = compiled
+			keys = append(keys, key)
 
-	// Record loaded policy counts per namespace
-	if !quiet {
-		for ns, count := range namespaceCounts {
-			e.obs.Metrics().SetPoliciesLoaded(ns, count)
+			e.logger.Info("loaded policy from directory",
+				zap.String("name", name),
+				zap.String("namespace", ns),
+			)
 		}
 	}
 
@@ -288,26 +286,20 @@ func (e *Engine) LoadPoliciesFromFile(ctx context.Context, path string) ([]strin
 		return nil, fmt.Errorf("resolving %s: %w", path, err)
 	}
 
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	var keys []string
-	err = e.set.forEachExclusive(func(i int, r *policyReplica) error {
-		loaded, err := e.loadInstancesIntoReplica(
-			[]string{"./" + filepath.Base(abs)}, filepath.Dir(abs), r, i != 0)
-		if err != nil {
-			return err
+	err = e.mutate(false, func(cctx *cue.Context, schema cue.Value, pending map[string]*CompiledPolicy) error {
+		var loadErr error
+		keys, loadErr = e.loadInstances(cctx, schema, []string{"./" + filepath.Base(abs)}, filepath.Dir(abs), pending)
+		if loadErr != nil {
+			return loadErr
 		}
-		if i == 0 {
-			keys = loaded
+		if len(keys) == 0 {
+			return fmt.Errorf("no policies found in %s", path)
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
-	}
-	if len(keys) == 0 {
-		return nil, fmt.Errorf("no policies found in %s", path)
 	}
 	return keys, nil
 }
@@ -315,15 +307,14 @@ func (e *Engine) LoadPoliciesFromFile(ctx context.Context, path string) ([]strin
 // Validate validates policy source without loading it. It accepts both a
 // bare policy document (as used by LoadPolicy) and the on-disk file format
 // where one or more policies are declared as named top-level fields (as used
-// by the directory loader). It uses a throwaway CUE context so concurrent
-// validations never share evaluator state.
+// by the directory loader), and applies the same schema and compile checks
+// as the loader. It uses a throwaway CUE context so concurrent validations
+// never share evaluator state.
 func (e *Engine) Validate(source string) ([]ValidationError, []ValidationError) {
-	vctx := cuecontext.New()
-
-	schema := vctx.CompileString(policySchemaSource)
-	if schema.Err() != nil {
+	vctx, schemaPolicy, err := newLoadContext()
+	if err != nil {
 		return []ValidationError{{
-			Message: schema.Err().Error(),
+			Message: err.Error(),
 			Code:    "SCHEMA_ERROR",
 		}}, nil
 	}
@@ -363,17 +354,66 @@ func (e *Engine) Validate(source string) ([]ValidationError, []ValidationError) 
 	}
 
 	var errs []ValidationError
-	schemaPolicy := schema.LookupPath(cue.ParsePath("#Policy"))
 	for _, candidate := range candidates {
-		if unified := candidate.Unify(schemaPolicy); unified.Err() != nil {
+		unified := candidate.Unify(schemaPolicy)
+		if unified.Err() != nil {
 			errs = append(errs, ValidationError{
 				Message: unified.Err().Error(),
 				Code:    "SCHEMA_ERROR",
+			})
+			continue
+		}
+		// Run the loader's compile step too: a policy that passes the schema
+		// but that the server would refuse to load is not valid.
+		if _, err := e.compilePolicy(unified, "", ""); err != nil {
+			errs = append(errs, ValidationError{
+				Message: err.Error(),
+				Code:    "COMPILE_ERROR",
 			})
 		}
 	}
 
 	return errs, nil
+}
+
+// setSnapshot identifies a policy set's content.
+type setSnapshot struct {
+	// Count is the number of loaded policies.
+	Count int
+	// Digest identifies the set's content; see PolicySetDigest.
+	Digest string
+}
+
+// snapshotOf derives a snapshot from a policy map. A nil or empty map yields
+// the digest of the empty set.
+func snapshotOf(policies map[string]*CompiledPolicy) setSnapshot {
+	lines := make([]string, 0, len(policies))
+	for k, p := range policies {
+		lines = append(lines, k+":"+p.Hash)
+	}
+	sort.Strings(lines)
+
+	h := sha256.New()
+	for _, line := range lines {
+		h.Write([]byte(line))
+		h.Write([]byte{'\n'})
+	}
+	return setSnapshot{Count: len(policies), Digest: hex.EncodeToString(h.Sum(nil))}
+}
+
+// PolicyCount returns the number of loaded policies. It never blocks, so it
+// is safe to call from a health probe.
+func (e *Engine) PolicyCount() int {
+	return e.set.Load().snap.Count
+}
+
+// PolicySetDigest returns a deterministic digest of the loaded policy set:
+// sha256 over the sorted "namespace/name:hash" lines of every policy. Two
+// processes hold identical policy content iff their digests match, so a CI
+// pipeline can compare the digest of its git checkout (via `garmr policy
+// digest`) with the digest a running server reports.
+func (e *Engine) PolicySetDigest() string {
+	return e.set.Load().snap.Digest
 }
 
 // policyKey creates a unique key for a policy.
@@ -385,7 +425,7 @@ func policyKey(namespace, name string) string {
 }
 
 // hasCueFiles checks if a directory contains .cue files
-func (e *Engine) hasCueFiles(dir string) (bool, error) {
+func hasCueFiles(dir string) (bool, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return false, err
@@ -399,41 +439,39 @@ func (e *Engine) hasCueFiles(dir string) (bool, error) {
 	return false, nil
 }
 
-// LoadPoliciesFromBackend loads all policies from a storage backend.
-// For FilesystemBackend, this delegates directly to LoadPoliciesFromDir (zero overhead).
-// For other backends, files are staged to a temp directory then loaded via CUE.
-func (e *Engine) LoadPoliciesFromBackend(ctx context.Context, backend storage.Backend) error {
-	// Filesystem shortcut: use the root directory directly
+// withBackendDir resolves a storage backend to an on-disk directory and
+// calls fn on it: the filesystem backend's root is used directly (zero
+// overhead), any other backend is staged into a temp directory first.
+func (e *Engine) withBackendDir(ctx context.Context, backend storage.Backend, fn func(dir string) error) error {
 	if fsBackend, ok := backend.(*storage.FilesystemBackend); ok {
-		return e.LoadPoliciesFromDir(ctx, fsBackend.Root())
+		return fn(fsBackend.Root())
 	}
 
-	// Other backends: stage files to temp dir, then load
 	tempDir, cleanup, err := e.stageBackendFiles(ctx, backend)
 	if err != nil {
 		return fmt.Errorf("staging backend files: %w", err)
 	}
 	defer cleanup()
 
-	return e.LoadPoliciesFromDir(ctx, tempDir)
+	return fn(tempDir)
+}
+
+// LoadPoliciesFromBackend loads all policies from a storage backend.
+func (e *Engine) LoadPoliciesFromBackend(ctx context.Context, backend storage.Backend) error {
+	return e.withBackendDir(ctx, backend, func(dir string) error {
+		return e.LoadPoliciesFromDir(ctx, dir)
+	})
 }
 
 // ReloadPoliciesFromBackend atomically reloads all policies from a storage backend.
 // This is safe to call while evaluations are in progress.
 func (e *Engine) ReloadPoliciesFromBackend(ctx context.Context, backend storage.Backend) (int, error) {
-	// Filesystem shortcut: use the root directory directly
-	if fsBackend, ok := backend.(*storage.FilesystemBackend); ok {
-		return e.ReloadPoliciesFromDir(ctx, fsBackend.Root())
-	}
-
-	// Other backends: stage files to temp dir, then reload
-	tempDir, cleanup, err := e.stageBackendFiles(ctx, backend)
-	if err != nil {
-		return 0, fmt.Errorf("staging backend files: %w", err)
-	}
-	defer cleanup()
-
-	count, err := e.ReloadPoliciesFromDir(ctx, tempDir)
+	var count int
+	err := e.withBackendDir(ctx, backend, func(dir string) error {
+		var reloadErr error
+		count, reloadErr = e.ReloadPoliciesFromDir(ctx, dir)
+		return reloadErr
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -466,13 +504,28 @@ func (e *Engine) stageBackendFiles(ctx context.Context, backend storage.Backend)
 	cleanup := func() { os.RemoveAll(tempDir) }
 
 	for _, file := range files {
+		// Containment check before touching the filesystem. A backend key
+		// containing ".." or an absolute path would otherwise write outside
+		// the temp directory as the server user. Fail the whole load rather
+		// than skipping the file: a partially staged policy set is exactly
+		// the silent-pass that requireMatch exists to prevent.
+		rel := filepath.FromSlash(file.Path)
+		if !filepath.IsLocal(rel) {
+			cleanup()
+			return "", func() {}, fmt.Errorf("backend %s returned unsafe path %q", backend.Type(), file.Path)
+		}
+
+		destPath := filepath.Join(tempDir, rel)
+		if !storage.WithinRoot(tempDir, destPath) {
+			cleanup()
+			return "", func() {}, fmt.Errorf("backend %s returned path %q that escapes the staging directory", backend.Type(), file.Path)
+		}
+
 		content, err := backend.Get(ctx, file.Path)
 		if err != nil {
 			cleanup()
 			return "", func() {}, fmt.Errorf("reading %s from backend: %w", file.Path, err)
 		}
-
-		destPath := filepath.Join(tempDir, filepath.FromSlash(file.Path))
 
 		// Ensure parent directory exists
 		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {

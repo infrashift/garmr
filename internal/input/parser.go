@@ -74,11 +74,6 @@ func (p *Parser) Parse(data []byte, format Format) (map[string]any, error) {
 	}
 }
 
-// ParseBytes is a convenience method that auto-detects format.
-func (p *Parser) ParseBytes(data []byte) (map[string]any, error) {
-	return p.Parse(data, FormatAuto)
-}
-
 // DetectFormat attempts to detect the format from content.
 func (p *Parser) DetectFormat(data []byte) Format {
 	// Trim whitespace
@@ -135,7 +130,7 @@ func (p *Parser) DetectFormatFromContentType(contentType string) Format {
 func (p *Parser) parseJSON(data []byte) (map[string]any, error) {
 	var result map[string]any
 	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("%w: invalid JSON: %v", ErrParseFailure, err)
+		return nil, fmt.Errorf("%w: invalid JSON: %w", ErrParseFailure, err)
 	}
 	return result, nil
 }
@@ -144,24 +139,9 @@ func (p *Parser) parseJSON(data []byte) (map[string]any, error) {
 func (p *Parser) parseYAML(data []byte) (map[string]any, error) {
 	var result map[string]any
 	if err := yaml.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("%w: invalid YAML: %v", ErrParseFailure, err)
+		return nil, fmt.Errorf("%w: invalid YAML: %w", ErrParseFailure, err)
 	}
 	return result, nil
-}
-
-// ToJSON converts a map to JSON bytes.
-func ToJSON(data map[string]any) ([]byte, error) {
-	return json.Marshal(data)
-}
-
-// ToJSONIndent converts a map to indented JSON bytes.
-func ToJSONIndent(data map[string]any, prefix, indent string) ([]byte, error) {
-	return json.MarshalIndent(data, prefix, indent)
-}
-
-// ToYAML converts a map to YAML bytes.
-func ToYAML(data map[string]any) ([]byte, error) {
-	return yaml.Marshal(data)
 }
 
 // FormatString returns a string representation of the format.
@@ -181,14 +161,4 @@ func ParseFormat(s string) (Format, error) {
 	default:
 		return "", fmt.Errorf("%w: %s", ErrUnsupportedFormat, s)
 	}
-}
-
-// SupportedFormats returns list of supported input formats.
-func SupportedFormats() []Format {
-	return []Format{FormatJSON, FormatYAML}
-}
-
-// SupportedExtensions returns list of supported file extensions.
-func SupportedExtensions() []string {
-	return []string{".json", ".yaml", ".yml"}
 }

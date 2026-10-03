@@ -27,6 +27,35 @@ type cobraCmd = cobra.Command
 // Policy fixtures reused across command tests. Shapes match the engine's
 // #Policy schema (see internal/engine).
 const (
+	// testDirPolicy is testPassPolicy in the on-disk format the directory
+	// loader expects: a package clause and a named top-level document. The
+	// bare-document form is invisible to the loader (its top-level fields are
+	// apiVersion/kind/..., none of which declare kind: "Policy"), so a dir
+	// seeded with it reloads to zero policies — which now fails closed.
+	testDirPolicy = `package policy
+
+pass_policy: {
+	apiVersion: "policy.garmr.io/v1"
+	kind:       "Policy"
+	metadata: {
+		name:      "pass-policy"
+		namespace: "default"
+	}
+	spec: {
+		description: "Policy that passes when status is active"
+		target: resources: [{kind: "*"}]
+		rules: [{
+			id:          "r1"
+			description: "always pass"
+			severity:    "low"
+			expr: {match: {path: "status", equals: "active"}}
+			message:     "status must be active"
+		}]
+		enforcement: action: "deny"
+	}
+}
+`
+
 	testPassPolicy = `
 apiVersion: "policy.garmr.io/v1"
 kind:       "Policy"
@@ -144,8 +173,8 @@ func newTestServerCfg(t *testing.T, cfg server.Config, policies ...policyFixture
 	}
 
 	for _, p := range policies {
-		if err := eng.LoadPolicy(context.Background(), p.Name, p.Namespace, p.Source); err != nil {
-			t.Fatalf("LoadPolicy %s/%s: %v", p.Namespace, p.Name, err)
+		if loadErr := eng.LoadPolicy(context.Background(), p.Name, p.Namespace, p.Source); loadErr != nil {
+			t.Fatalf("LoadPolicy %s/%s: %v", p.Namespace, p.Name, loadErr)
 		}
 	}
 
@@ -316,6 +345,9 @@ func newTestCmd(t *testing.T, flags ...flagSpec) *cobraCmd {
 		case "bool":
 			v, _ := f.Value.(bool)
 			cmd.Flags().Bool(f.Name, v, "")
+		case "int":
+			v, _ := f.Value.(int)
+			cmd.Flags().Int(f.Name, v, "")
 		case "stringSlice":
 			v, _ := f.Value.([]string)
 			cmd.Flags().StringSlice(f.Name, v, "")

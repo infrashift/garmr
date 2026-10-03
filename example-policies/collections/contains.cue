@@ -1,9 +1,9 @@
 // example-policies/collections/contains.cue
-// Demonstrates the contains expression for collection membership checks
-// Contains checks if an array/collection includes specific values
+// Demonstrates collection membership checks with match.containsAll and
+// match.containsAny
 package collections
 
-// Contains with single value — check if a collection includes a specific item
+// containsAll with one value — the collection includes a specific item
 containsValuePolicy: {
 	apiVersion: "policy.garmr.io/v1"
 	kind:       "Policy"
@@ -19,9 +19,9 @@ containsValuePolicy: {
 				id:          "COL-001"
 				description: "Approved reviewers list must include the security team"
 				severity:    "high"
-				expr: contains: {
-					path:  "spec.reviewers"
-					value: "security-team"
+				expr: match: {
+					path: "spec.reviewers"
+					containsAll: ["security-team"]
 				}
 				message:     "the security team must be included in the reviewers list"
 				remediation: "Add 'security-team' to spec.reviewers"
@@ -31,9 +31,9 @@ containsValuePolicy: {
 				id:          "COL-002"
 				description: "Supported protocols must include HTTPS"
 				severity:    "critical"
-				expr: contains: {
-					path:  "spec.protocols"
-					value: "https"
+				expr: match: {
+					path: "spec.protocols"
+					containsAll: ["https"]
 				}
 				message:  "HTTPS must be in the list of supported protocols"
 				category: "security"
@@ -43,7 +43,7 @@ containsValuePolicy: {
 	}
 }
 
-// Contains with "all" — every listed value must be present in the collection
+// containsAll — every listed value must be present in the collection
 containsAllPolicy: {
 	apiVersion: "policy.garmr.io/v1"
 	kind:       "Policy"
@@ -59,9 +59,9 @@ containsAllPolicy: {
 				id:          "COL-003"
 				description: "Required labels must all be present"
 				severity:    "high"
-				expr: contains: {
+				expr: match: {
 					path: "metadata.requiredLabels"
-					all: ["environment", "owner", "cost-center"]
+					containsAll: ["environment", "owner", "cost-center"]
 				}
 				message:     "must have all required labels: environment, owner, cost-center"
 				remediation: "Add all mandatory labels to the resource"
@@ -72,9 +72,9 @@ containsAllPolicy: {
 				id:          "COL-004"
 				description: "Monitoring endpoints must include health and metrics"
 				severity:    "medium"
-				expr: contains: {
+				expr: match: {
 					path: "spec.monitoring.endpoints"
-					all: ["/healthz", "/metrics"]
+					containsAll: ["/healthz", "/metrics"]
 				}
 				message:  "monitoring must expose both /healthz and /metrics endpoints"
 				category: "observability"
@@ -84,7 +84,7 @@ containsAllPolicy: {
 	}
 }
 
-// Contains with "any" — at least one of the listed values must be present
+// containsAny — at least one of the listed values must be present
 containsAnyPolicy: {
 	apiVersion: "policy.garmr.io/v1"
 	kind:       "Policy"
@@ -100,9 +100,9 @@ containsAnyPolicy: {
 				id:          "COL-005"
 				description: "At least one approved logging format must be configured"
 				severity:    "medium"
-				expr: contains: {
+				expr: match: {
 					path: "spec.logging.formats"
-					any: ["json", "structured"]
+					containsAny: ["json", "structured"]
 				}
 				message:     "at least one structured logging format must be configured"
 				remediation: "Add 'json' or 'structured' to spec.logging.formats"
@@ -112,9 +112,9 @@ containsAnyPolicy: {
 				id:          "COL-006"
 				description: "Deployment must target at least one approved availability zone"
 				severity:    "high"
-				expr: contains: {
+				expr: match: {
 					path: "spec.availabilityZones"
-					any: ["us-east-1a", "us-east-1b", "us-east-1c", "eu-west-1a", "eu-west-1b"]
+					containsAny: ["us-east-1a", "us-east-1b", "us-east-1c", "eu-west-1a", "eu-west-1b"]
 				}
 				message:  "must target at least one approved availability zone"
 				category: "compliance"

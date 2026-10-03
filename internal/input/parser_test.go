@@ -10,6 +10,7 @@ func TestNewParser(t *testing.T) {
 	p := NewParser()
 	if p == nil {
 		t.Fatal("NewParser returned nil")
+		return
 	}
 	if p.DefaultFormat != FormatJSON {
 		t.Errorf("expected default format JSON, got %s", p.DefaultFormat)
@@ -229,19 +230,6 @@ func TestParseFile_NotFound(t *testing.T) {
 	}
 }
 
-// --- ParseBytes ---
-
-func TestParseBytes(t *testing.T) {
-	p := NewParser()
-	result, err := p.ParseBytes([]byte(`{"auto": true}`))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result["auto"] != true {
-		t.Errorf("expected auto=true, got %v", result["auto"])
-	}
-}
-
 // --- ParseFormat ---
 
 func TestParseFormat(t *testing.T) {
@@ -276,44 +264,6 @@ func TestParseFormat(t *testing.T) {
 	}
 }
 
-// --- Conversion Helpers ---
-
-func TestToJSON(t *testing.T) {
-	data := map[string]any{"key": "value"}
-	b, err := ToJSON(data)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if string(b) != `{"key":"value"}` {
-		t.Errorf("unexpected JSON: %s", b)
-	}
-}
-
-func TestToJSONIndent(t *testing.T) {
-	data := map[string]any{"key": "value"}
-	b, err := ToJSONIndent(data, "", "  ")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	expected := "{\n  \"key\": \"value\"\n}"
-	if string(b) != expected {
-		t.Errorf("unexpected indented JSON: %s", b)
-	}
-}
-
-func TestToYAML(t *testing.T) {
-	data := map[string]any{"key": "value"}
-	b, err := ToYAML(data)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if string(b) != "key: value\n" {
-		t.Errorf("unexpected YAML: %q", b)
-	}
-}
-
-// --- Unsupported format ---
-
 func TestParse_UnsupportedFormat(t *testing.T) {
 	p := NewParser()
 	_, err := p.Parse([]byte("data"), Format("xml"))
@@ -330,21 +280,5 @@ func TestFormat_String(t *testing.T) {
 	}
 	if FormatYAML.String() != "yaml" {
 		t.Errorf("expected 'yaml', got %s", FormatYAML.String())
-	}
-}
-
-// --- SupportedFormats/Extensions ---
-
-func TestSupportedFormats(t *testing.T) {
-	formats := SupportedFormats()
-	if len(formats) != 2 {
-		t.Errorf("expected 2 formats, got %d", len(formats))
-	}
-}
-
-func TestSupportedExtensions(t *testing.T) {
-	exts := SupportedExtensions()
-	if len(exts) != 3 {
-		t.Errorf("expected 3 extensions, got %d", len(exts))
 	}
 }

@@ -17,3 +17,7 @@ coverage.html
 docs/node_modules/
 docs/dist/
 docs/.astro/
+
+# End-to-end benchmark scratch and results
+scripts/bench-e2e/work/
+scripts/bench-e2e/results/

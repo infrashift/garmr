@@ -6,7 +6,7 @@ BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)"
 
-.PHONY: all build build-server build-cli test test-load lint fmt-check clean docker help \
+.PHONY: all build build-server build-cli test test-load lint fmt-check clean docker help bench-e2e \
 	test-storage doc-dev
 
 all: build
@@ -61,6 +61,9 @@ test-storage: ## Run storage backend unit tests
 
 bench: ## Run benchmarks
 	go test -bench=. -benchmem ./internal/engine/...
+
+bench-e2e: ## Benchmark garmr-server vs OPA end to end over HTTP (~40 min; ARGS=-quick for a smoke run)
+	./scripts/bench-e2e/run.sh $(ARGS)
 
 ## Lint and format
 

@@ -15,7 +15,7 @@ Garmr provides a flexible, type-safe policy engine that uses [CUE](https://cuela
 - **20+ condition operators** for flexible rule construction
 - **Target filtering** to apply policies to specific resource types
 - **Namespace organization** for team-based policy management
-- **Hot reload** for zero-downtime policy updates
+- **Explicit, atomic reload** for zero-downtime policy updates: a set that fails to load never replaces the running one, and `garmr policy reload` confirms every instance converged on the same policy-set digest
 - **Audit logging** with request correlation for compliance
 - **CI/CD integration** via CLI and REST API
 
@@ -57,24 +57,30 @@ target: {
 
 ### Namespace Organization
 
-Organize policies by team or function:
+Organize policies by team or function. A policy's namespace is its
+`metadata.namespace` (default `"default"`); directories are a convention
+for humans and carry no meaning to the loader:
 
 ```
 policies/
-├── security/       # Security team policies
-├── compliance/     # Compliance requirements
-├── platform/       # Platform team standards
-└── release/        # Release gate policies
+├── security/       # policies declaring namespace: "security"
+├── compliance/     # namespace: "compliance"
+├── platform/       # namespace: "platform"
+└── release/        # namespace: "release"
 ```
+
+Callers select a namespace per evaluation (`garmr eval -n security`).
 
 ### Audit Logging
 
-Every evaluation is logged with:
-- Request ID for correlation
-- Decision (allow/deny/warn)
-- Violations count
-- Resource metadata
-- Client information
+Every evaluation is logged as a JSON record, to a rotated file or to
+stdout/stderr for the platform's log pipeline, with:
+- Request ID and W3C trace ID for correlation
+- Decision (allow/deny/warn), policies and rules evaluated, violations count
+- The input's `kind` and `metadata.name`
+- The caller: source IP, user agent, and the service-mesh identity (SPIFFE principal)
+
+Validation, policy deletion and reload requests are audited too.
 
 ## Example Policy
 

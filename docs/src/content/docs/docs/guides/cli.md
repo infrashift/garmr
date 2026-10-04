@@ -16,7 +16,7 @@ The CLI has no authentication or TLS client options and cannot talk to an API-ke
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--config` | | Config file path | `~/.garmr.yaml` |
+| `--config` | | Config file path (env: `GARMR_CONFIG`) | `~/.garmr.yaml`, then `./.garmr.yaml` |
 | `--server` | | Garmr server URL | `http://localhost:8080` |
 | `--output` | `-o` | Output format (table, json, yaml) | `table` |
 | `--quiet` | `-q` | Suppress non-essential output | `false` |
@@ -41,7 +41,7 @@ garmr eval --input <file> [flags]
 | `--input` | `-i` | Input file (`-` for stdin). One of `--input` or `--data` is required. | |
 | `--data` | `-d` | Inline JSON/YAML data | |
 | `--format` | `-f` | Input format (json, yaml, auto) | `auto` |
-| `--policy` | `-p` | Specific policies to evaluate (namespace/name, repeatable) | |
+| `--policy` | `-p` | Specific policies to evaluate, by bare `metadata.name` (repeatable). Names resolve inside `--namespace`, or `default` when it is unset. | |
 | `--namespace` | `-n` | Policy namespace to evaluate (single value) | |
 | `--request-id` | | Request ID for audit correlation | |
 | `--verbose` | `-v` | Show rule details. Default shows details on fail, hides on pass. `--verbose=false` always hides. | unset |
@@ -54,6 +54,10 @@ garmr eval --input deployment.json
 
 # Filter by namespace (single namespace per invocation)
 garmr eval --input deployment.json -n security
+
+# Evaluate one named policy: bare name plus its namespace
+# (-p security/container-security would look for that name in "default")
+garmr eval --input deployment.json -n security -p container-security
 
 # JSON output for CI/CD
 garmr eval --input deployment.json -o json
@@ -76,7 +80,12 @@ garmr eval --input deployment.json --verbose=false
 | Code | Meaning |
 |------|---------|
 | 0 | ALLOW or WARN - Nothing blocked the evaluation |
-| 1 | DENY - A deny-enforced policy failed |
+| 1 | DENY - A deny-enforced policy failed, **or** the command itself failed (server unreachable, a `4xx`/`5xx` from the server, unreadable input) |
+
+Exit code `1` alone does not distinguish a deny from an outage. A CI step
+that must tell them apart should use `-o json` and read `.decision`: a
+deny prints a decision, while a failed call prints `Error: ...` on stderr
+and no JSON on stdout.
 
 Warn is advisory by design, so `garmr eval` exits `0` on warn decisions.
 If a team needs warnings to gate CI, change the policy's
@@ -130,6 +139,8 @@ garmr validate <file-or-dir> [file-or-dir...] [flags]
 |------|-------------|---------|
 | `--remote` | Validate via a running server's `/v1/validate` instead of locally (compiles each file in isolation) | `false` |
 
+Exits `0` when every input is valid and `1` otherwise.
+
 **Examples:**
 
 ```bash
@@ -176,6 +187,11 @@ garmr policy list -o json
 garmr policy list -n security
 ```
 
+The table ends with a `Digest:` line: the server's policy-set digest, the
+same value `garmr policy digest` computes locally. `-o json` prints the raw
+`GET /v1/policies` body: `{"policies": [...], "digest": ..., "instance_id": ...}`,
+so select policies with `jq '.policies[]'`.
+
 #### garmr policy get
 
 Get a policy by name.
@@ -192,7 +208,14 @@ garmr policy get <name> [flags]
 
 #### garmr policy delete
 
-Delete a policy from the server.
+Delete a policy from the server's memory.
+
+:::caution
+This removes the policy from the **one** instance that receives the request.
+Other instances keep serving it, and the next reload or restart brings it
+back everywhere. To remove a policy permanently, delete it from the policy
+source (git) and deploy.
+:::
 
 ```bash
 garmr policy delete <name> [flags]
@@ -205,13 +228,38 @@ garmr policy delete <name> [flags]
 | `--namespace` | `-n` | Policy namespace | `default` |
 | `--force` | | Skip confirmation | `false` |
 
+#### garmr policy digest
+
+Load policies locally exactly as the server does and print the
+deterministic policy-set digest. Runs locally (no server needed).
+
+```bash
+garmr policy digest <policy-dir|policy-file>
+```
+
+Compare the result with the `digest` field of `GET /v1/policies`, or of a
+reload response, to verify that a server converged on exactly the content
+that was shipped. Exits `1` if the policies fail to load.
+
+```bash
+# Digest of the checkout
+garmr policy digest policies/
+
+# What one server is actually serving
+curl -s http://garmr:8080/v1/policies | jq -r .digest
+
+# Reload every instance and require that digest
+garmr policy reload --servers http://10.0.0.11:8080,http://10.0.0.12:8080 \
+  --expect-digest "$(garmr policy digest policies/)"
+```
+
 #### garmr policy reload
 
 Reload policies from disk on one or more instances. The reload endpoint
 mutates a single server process — behind a load balancer or mesh, pass
-every instance via `--servers` so all of them converge. Exits nonzero if
-any instance fails, if `--expect-digest` doesn't match, or if instances
-end up with diverging digests.
+every instance via `--servers`, or use `--converge`, so all of them
+converge. Exits `1` if any instance fails, if `--expect-digest` doesn't
+match, or if instances end up with diverging digests.
 
 ```bash
 garmr policy reload [flags]
@@ -233,7 +281,14 @@ so `--servers` would reload one arbitrary instance, see a single digest, and
 exit 0 with the rest of the fleet stale. `--converge` handles that case: each
 response carries an `instance_id`, and the command keeps reloading until it has
 seen `--instances` distinct instances all reporting the expected digest,
-failing on timeout, digest mismatch, or divergence.
+failing on timeout, digest mismatch, or divergence. `--converge` takes exactly
+one address (combining it with several `--servers` is an error), and it
+fails if the server does not report an `instance_id`.
+
+`instance_id` is the server's `NOMAD_ALLOC_ID`, else `NOMAD_SHORT_ALLOC_ID`,
+else `HOSTNAME`, else the OS hostname. Instances that share one of those
+values (for example two processes on one host outside Nomad) look like one
+instance to `--converge`.
 
 **Examples:**
 
@@ -254,6 +309,43 @@ garmr policy reload \
 # Machine-readable result
 garmr policy reload -o json
 ```
+
+**JSON output (`-o json`)** has three shapes:
+
+```jsonc
+// One address that answered: the bare server response
+{
+  "success": true,
+  "policies_loaded": 45,
+  "digest": "907537ab...bdf7e8dd",
+  "reload_time_ms": 183,
+  "storage_type": "filesystem",
+  "instance_id": "8f3c2a1e-alloc"
+}
+
+// --servers with several addresses: one entry per address
+[
+  {"server": "http://10.0.0.11:8080", "result": {"success": true, "digest": "907537ab...", "...": "..."}},
+  {"server": "http://10.0.0.12:8080", "error": "making request: ... connection refused"}
+]
+
+// --converge
+{
+  "server": "http://localhost:8080",
+  "converged": true,
+  "instances_wanted": 2,
+  "instances_seen": ["8f3c2a1e-alloc", "b21d9e07-alloc"],
+  "digest": "907537ab...bdf7e8dd",
+  "attempts": 3
+}
+```
+
+In the list, an entry has `result`, `error`, or both (a digest mismatch
+reports the result alongside the error). A single address whose call failed
+outright (connection refused, non-`200`) also uses the list shape. With a
+single address, an `--expect-digest` mismatch prints the bare response with
+no error field — rely on the exit code, not the JSON, for that case. The
+`--converge` report adds `"error"` when it fails.
 
 #### garmr policy lock
 
@@ -288,6 +380,9 @@ Validate policy against its lock file. Runs locally (no server needed). Accepts 
 garmr policy validate-lock <file-or-dir> [file-or-dir...]
 ```
 
+Exits `0` when every policy matches its lock file and `1` otherwise
+(including a missing lock file), so it can gate CI.
+
 **Examples:**
 
 ```bash
@@ -300,7 +395,7 @@ garmr policy validate-lock policies/
 
 #### garmr policy diff
 
-Show differences between policy and lock file. Runs locally (no server needed).
+Show differences between policy and lock file. Runs locally (no server needed). It is informational: it exits `0` whether the policy is in sync or not — gate on `validate-lock` instead.
 
 ```bash
 garmr policy diff <file>
@@ -338,11 +433,13 @@ garmr test <policy-file> [test-file] [flags]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--verbose` | `-v` | Show detailed output | `false` |
+| `--verbose` | `-v` | Show detailed output (the global flag) | `false` |
 | `--recursive` | `-r` | Process directories recursively | `false` |
 | `--filter` | | Filter tests by name | |
 | `--format` | | Output format (text, json, tap) — deliberately not `-o`, which is the root output flag | `text` |
 | `--fail-fast` | | Stop on first failure | `false` |
+
+Exits `0` when every test passes and `1` when any test fails or a suite can't be loaded.
 
 **Examples:**
 
@@ -447,6 +544,12 @@ garmr health [flags]
 | `--wait` | Wait for server to be ready | `false` |
 | `--timeout` | Timeout when waiting | `30s` |
 
+Calls the server's `/health` endpoint. Exits `0` when the server answers
+healthy and `1` when it is unreachable or reports unhealthy (with
+`--wait`, `1` once `--timeout` passes without a healthy answer). With
+`-o json` the response is printed and an unhealthy answer still exits `0`
+— check `.healthy` in that case.
+
 **Examples:**
 
 ```bash
@@ -471,7 +574,9 @@ garmr version
 
 ## Environment Variables
 
-All flags can be set via environment variables with `GARMR_` prefix:
+Three settings can be set via environment variables. Other flags
+(`--quiet`, `--verbose`, and every per-command flag) have no environment
+equivalent.
 
 | Variable | Flag |
 |----------|------|
@@ -513,15 +618,21 @@ Decision: ✗ DENY
 
 SEVERITY     POLICY/RULE                    RESULT     ID       MESSAGE
 ----------------------------------------------------------------------------------------------------
-HIGH         security/container-security    FAIL       SEC-001  Container is running as root
-MEDIUM       security/container-security    FAIL       SEC-002  Root filesystem is not read-only
+CRITICAL     security/container-security    FAIL       SEC-001  containers must set securityContext.r...
+                                                                 ↳ Set securityContext.runAsNonRoot: true and specify a non-root runAsUser
+MEDIUM       security/container-security    FAIL       SEC-006  containers should use a read-only roo...
+                                                                 ↳ Set securityContext.readOnlyRootFilesystem: true and use volume mounts for writable paths
 
-Evaluated 2 policies, 5 rules in 3.2ms
+Evaluated 1 policies, 6 rules in 98.962µs
 ```
+
+Messages are truncated to fit the column; `↳` lines carry each failure's
+remediation.
 
 ### JSON
 
-Machine-readable JSON:
+Machine-readable JSON — the full `/v1/evaluate` response (see the
+[REST API reference](/garmr/docs/guides/rest-api/#post-v1evaluate) for every field):
 
 ```json
 {
@@ -532,33 +643,51 @@ Machine-readable JSON:
       "policy_name": "container-security",
       "policy_namespace": "security",
       "rule_id": "SEC-001",
-      "severity": "high",
+      "description": "Containers must assert runAsNonRoot",
+      "severity": "critical",
       "passed": false,
-      "message": "Container is running as root"
+      "message": "containers must set securityContext.runAsNonRoot: true",
+      "remediation": "Set securityContext.runAsNonRoot: true and specify a non-root runAsUser"
     }
   ],
   "metrics": {
-    "evaluation_time_ns": 3200000,
-    "policies_evaluated": 2,
-    "rules_evaluated": 5
-  }
+    "evaluation_time_ns": 59524,
+    "policies_evaluated": 1,
+    "rules_evaluated": 6
+  },
+  "summary": {
+    "total_rules": 6,
+    "passed": 5,
+    "failed": 1,
+    "skipped": 0
+  },
+  "evaluation_mode": {
+    "dry_run": false,
+    "fail_fast": false,
+    "short_circuited": false,
+    "total_rules_in_scope": 6,
+    "rules_evaluated": 6,
+    "rules_skipped": 0
+  },
+  "terminated_early": false
 }
 ```
 
+`termination_rule` is added when fail-fast stopped the evaluation.
+
 ### YAML
 
-YAML output:
+A compact YAML summary — the decision and, per result, the rule ID, outcome,
+message, and remediation. It is not the full response; use `-o json` when
+you need policy names, severities, or the summary counts.
 
 ```yaml
 decision: deny
-request_id: abc-123
 results:
-  - policy_name: container-security
-    policy_namespace: security
-    rule_id: SEC-001
-    severity: high
+  - rule_id: SEC-001
     passed: false
-    message: Container is running as root
+    message: containers must set securityContext.runAsNonRoot: true
+    remediation: Set securityContext.runAsNonRoot: true and specify a non-root runAsUser
 ```
 
 ---
@@ -566,8 +695,8 @@ results:
 ## Examples with Test Data
 
 ```bash
-# Start server
-make run
+# Start server (builds, then serves ./example-policies on :8080)
+make dev
 
 # Basic evaluation
 garmr eval --input testdata/real-world/k8s-pod-security-context-pass.json

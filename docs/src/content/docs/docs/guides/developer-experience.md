@@ -59,15 +59,23 @@ package <namespace>
 
 ```cue
 {
-    id: "RULE-001"                    // Unique identifier
+    id: "RULE-001"                    // Unique within the policy
     description: "Rule description"   // Human-readable description
     severity: "critical" | "high" | "medium" | "low" | "info"
-    expr: {
-        // Condition expression (see [Policy Schema](/docs/reference/policy-schema/))
-    }
-    message: "Failure message"        // Shown when rule fails
+    expr: <expression>                // The check: exactly one operator
+    // Optional:
+    when: <expression>                // Rule applies only when this holds
+    priority: 10                      // Lower is evaluated first
+    message: "Failure message"        // Template, shown when the rule fails
+    remediation: "How to fix it"
+    url: "https://..."                // Documentation link
+    category: "security"              // For evaluation filters and reports
+    tags: ["pci-dss"]                 // For evaluation filters
 }
 ```
+
+See the [Policy Schema reference](/garmr/docs/reference/policy-schema/) for
+the operators and every field.
 
 ### Example: Security Policy
 
@@ -162,19 +170,24 @@ garmr validate policies/
 
 ### Test Against Sample Data
 
-```bash
-# Test with passing data
-garmr eval --input testdata/valid-deployment.json -n security
+Against the example policies, with fixtures from the repository:
 
-# Test with failing data
-garmr eval --input testdata/invalid-deployment.json -n security
+```bash
+# Should ALLOW
+garmr eval --input testdata/real-world/k8s-pod-security-context-pass.json -n security
+
+# Should DENY
+garmr eval --input testdata/real-world/k8s-pod-security-context-fail.yml -n security
 
 # Include passed rules in output
-garmr eval --input testdata/valid-deployment.json --verbose
+garmr eval --input testdata/real-world/k8s-pod-security-context-pass.json -n security --verbose
 
 # JSON output for detailed inspection
-garmr eval --input testdata/valid-deployment.json -o json | jq
+garmr eval --input testdata/real-world/k8s-pod-security-context-pass.json -n security -o json | jq
 ```
+
+To check one policy in isolation, name it with `-p` (with its namespace in
+`-n`): `garmr eval --input pod.json -n security -p container-security`.
 
 ---
 
@@ -533,15 +546,15 @@ test_case() {
         ARGS="$ARGS -n $namespace"
     fi
 
-    RESULT=$(./bin/garmr eval$ARGS 2>/dev/null || true)
+    RESULT=$(./bin/garmr eval $ARGS 2>/dev/null || true)
     DECISION=$(echo "$RESULT" | jq -r '.decision')
 
     if [ "$DECISION" = "$expected_decision" ]; then
         echo -e "${GREEN}PASS${NC}"
-        ((PASS++))
+        PASS=$((PASS + 1))
     else
         echo -e "${RED}FAIL${NC} (got: $DECISION)"
-        ((FAIL++))
+        FAIL=$((FAIL + 1))
     fi
 }
 
@@ -748,6 +761,12 @@ message: "Failed"
 // Good
 message: "Container must specify resource limits for memory and CPU"
 
-// Better
-message: "Container 'web' is missing resource limits. Add spec.containers[].resources.limits"
+// Better: a template names the offending element
+message: "container {{c.name}} has no memory limit; set resources.limits.memory"
 ```
+
+Messages are templates: `{{path}}` inserts an input field, `{{c.name}}` a
+field of the element a `forEach` alias `c` points at (the message is then
+rendered once per failing element), and `{{.length}}`, `{{.count}}`,
+`{{.version}}`, `{{.datetime}}` or a `func` `bind` name insert the value the
+check used. See [Messages](/garmr/docs/reference/policy-schema/#messages).

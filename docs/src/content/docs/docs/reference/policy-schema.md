@@ -62,9 +62,16 @@ Paths are dot-separated field names into the input: `spec.containers`.
   absent.
 - **An operand of the wrong type is an evaluation error**, not a failure: a
   string where a number is needed, an unparseable semver or datetime, a list
-  operator on a non-list, a builtin that returns an error. An error fails
-  the rule **even under `not` or `any`**, and the violation message says the
-  rule could not be evaluated.
+  operator on a non-list, a builtin that returns an error. An error never
+  turns into a pass:
+  - `not` of an error is an error.
+  - `any` (and `forEach` `mode: "any"`) passes if some branch passes;
+    otherwise an error in any branch makes the result an error.
+  - `all` (and `forEach` in its default mode) fails if some branch fails;
+    otherwise an error in any branch makes the result an error.
+
+  A rule whose result is an error fails, and its violation message says the
+  rule could not be evaluated ("Rule SV-001 could not be evaluated: …").
 
 ## Input Formats
 
@@ -121,6 +128,12 @@ Policies specify an `enforcement.action` that determines behavior:
 | `warn` | Log warning but allow | 0 |
 | `audit` | Log only, always allow | 0 |
 
+The request's decision is the strictest across the matched policies:
+`deny` beats `warn` beats `allow`. With `enforcement.dryRun: true`, a
+policy reports its violations (each message prefixed `[DRY RUN]`) but its
+`deny` is lowered to `warn`. A policy that runs out of time denies
+regardless of `action` or `dryRun`.
+
 ### Severity Levels
 
 Rules specify severity to prioritize violations:
@@ -137,7 +150,13 @@ Rules specify severity to prioritize violations:
 
 ## Condition Operators
 
-Note: several example policies in the `condition-operators` namespace target all kinds (`*`), so an evaluation against that namespace can run multiple policies at once. The expected decisions below describe the rules of the operator being illustrated.
+Each section below quotes the rules of an example policy in
+`example-policies/` (abbreviated to `id` and `expr`) and evaluates them.
+Most example policies target every kind (`*`), so an evaluation against a
+whole namespace runs all of them and almost any input is denied by one or
+another. The examples therefore name the policies they exercise: `-p`
+(repeatable or comma-separated) on the CLI, `"policies"` in the REST body,
+both together with the namespace.
 
 A `match` block may specify more than one operator alongside `path`; every specified operator must pass (AND semantics). The same holds inside the `length`, `semver`, and `datetime` blocks, so `datetime: {after: X, before: Y}` is a range check and `semver: {greaterThanOrEqual: "1.0.0", lessThan: "2.0.0"}` bounds a version. When several operators fail, the violation message reports each unmet check.
 
@@ -145,18 +164,17 @@ A `match` block may specify more than one operator alongside `path`; every speci
 
 Validates field presence or absence.
 
-**Policy:** `example-policies/condition-operators/exists.cue`
+**Policies:** `exists-operator` and `absent-operator` in
+`example-policies/condition-operators/exists.cue`
 
 ```cue
-expr: match: {
-    path:   "requiredField"
-    exists: true
-}
+// exists-operator (targets kind "test-exists")
+{id: "EXISTS-001", expr: match: {path: "requiredField", exists: true}}
+{id: "EXISTS-002", expr: match: {path: "metadata.name", exists: true}}
 
-expr: match: {
-    path:   "deprecatedField"
-    exists: false
-}
+// absent-operator (targets kind "test-absent")
+{id: "ABSENT-001", expr: match: {path: "deprecatedField", exists: false}}
+{id: "ABSENT-002", expr: match: {path: "config.legacy", exists: false}}
 ```
 
 `exists: true` passes when the field is present and not null; `exists:
@@ -165,10 +183,10 @@ false` passes when it is absent or null.
 **CLI:**
 ```bash
 # Should ALLOW (required field present)
-garmr eval -d '{"kind": "test-exists", "requiredField": "present", "metadata": {"name": "test"}}' -n condition-operators
+garmr eval -d '{"kind": "test-exists", "requiredField": "present", "metadata": {"name": "test"}}' -n condition-operators -p exists-operator
 
 # Should DENY (missing requiredField)
-garmr eval -d '{"kind": "test-exists", "metadata": {"name": "test"}}' -n condition-operators
+garmr eval -d '{"kind": "test-exists", "metadata": {"name": "test"}}' -n condition-operators -p exists-operator
 ```
 
 **curl (JSON):**
@@ -176,7 +194,7 @@ garmr eval -d '{"kind": "test-exists", "metadata": {"name": "test"}}' -n conditi
 # Should ALLOW
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
-  -d '{"input": {"kind": "test-exists", "requiredField": "present", "metadata": {"name": "test"}}, "namespace": "condition-operators"}'
+  -d '{"input": {"kind": "test-exists", "requiredField": "present", "metadata": {"name": "test"}}, "namespace": "condition-operators", "policies": ["exists-operator"]}'
 ```
 
 **curl (YAML):**
@@ -191,6 +209,7 @@ input:
   metadata:
     name: test
 namespace: condition-operators
+policies: [exists-operator]
 '
 ```
 
@@ -198,34 +217,32 @@ namespace: condition-operators
 
 ### equals
 
-Validates exact field value (string, number, or boolean).
+Validates exact field value (string, number, or boolean). Equality is
+strict: `"true"` does not equal `true`.
 
-**Policy:** `example-policies/condition-operators/equals.cue`
+**Policies:** `equals-string`, `equals-numeric` (`action: warn`) and
+`equals-boolean` in `example-policies/condition-operators/equals.cue`
 
 ```cue
-expr: match: {
-    path:   "status"
-    equals: "active"
-}
-
-expr: match: {
-    path:   "count"
-    equals: 10
-}
-
-expr: match: {
-    path:   "enabled"
-    equals: true
-}
+// equals-string
+{id: "EQ-001", expr: match: {path: "environment", equals: "production"}}
+{id: "EQ-002", expr: match: {path: "metadata.region", equals: "us-east-1"}}
+// equals-numeric
+{id: "EQ-003", expr: match: {path: "spec.replicas", equals: 3}}
+// equals-boolean
+{id: "EQ-004", expr: match: {path: "spec.tls.enabled", equals: true}}
 ```
 
 **CLI:**
 ```bash
 # Should ALLOW
-garmr eval -d '{"kind": "test-equals", "status": "active", "count": 10, "enabled": true}' -n condition-operators
+garmr eval -d '{"kind": "Service", "environment": "production", "metadata": {"region": "us-east-1"}, "spec": {"replicas": 3, "tls": {"enabled": true}}}' -n condition-operators -p equals-string,equals-numeric,equals-boolean
 
-# Should DENY (wrong status)
-garmr eval -d '{"kind": "test-equals", "status": "inactive", "count": 10, "enabled": true}' -n condition-operators
+# Should WARN (replicas 5 fails EQ-003, whose policy only warns)
+garmr eval -d '{"kind": "Service", "environment": "production", "metadata": {"region": "us-east-1"}, "spec": {"replicas": 5, "tls": {"enabled": true}}}' -n condition-operators -p equals-string,equals-numeric,equals-boolean
+
+# Should DENY (the string "true" is not the boolean true)
+garmr eval -d '{"kind": "Service", "environment": "production", "metadata": {"region": "us-east-1"}, "spec": {"replicas": 3, "tls": {"enabled": "true"}}}' -n condition-operators -p equals-string,equals-numeric,equals-boolean
 ```
 
 **curl:**
@@ -233,46 +250,33 @@ garmr eval -d '{"kind": "test-equals", "status": "inactive", "count": 10, "enabl
 # Should ALLOW
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
-  -d '{"input": {"kind": "test-equals", "status": "active", "count": 10, "enabled": true}, "namespace": "condition-operators"}'
+  -d '{"input": {"kind": "Service", "environment": "production", "metadata": {"region": "us-east-1"}, "spec": {"replicas": 3, "tls": {"enabled": true}}}, "namespace": "condition-operators", "policies": ["equals-string", "equals-numeric", "equals-boolean"]}'
 ```
 
 ---
 
 ### Comparison Operators
 
-Numeric comparisons: `greaterThan`, `greaterThanOrEqual`, `lessThan`, `lessThanOrEqual`.
+Numeric comparisons: `greaterThan`, `greaterThanOrEqual`, `lessThan`,
+`lessThanOrEqual`. A non-numeric value at the path is an evaluation error.
 
-**Policy:** `example-policies/condition-operators/comparison.cue`
+**Policy:** `numeric-comparison` in
+`example-policies/condition-operators/comparison.cue`
 
 ```cue
-expr: match: {
-    path:        "replicas"
-    greaterThan: 0
-}
-
-expr: match: {
-    path:               "replicas"
-    greaterThanOrEqual: 2
-}
-
-expr: match: {
-    path:            "memoryMB"
-    lessThanOrEqual: 4096
-}
-
-expr: match: {
-    path:     "cpuCores"
-    lessThan: 8
-}
+{id: "CMP-001", expr: match: {path: "spec.replicas", greaterThanOrEqual: 2}}
+{id: "CMP-002", expr: match: {path: "spec.replicas", lessThanOrEqual: 10}}
+{id: "CMP-003", expr: match: {path: "spec.resources.cpu", greaterThan: 0}}
+{id: "CMP-004", expr: match: {path: "spec.resources.memoryMB", lessThan: 8192}}
 ```
 
 **CLI:**
 ```bash
-# Should ALLOW (replicas=3, memory=2048, cpu=4)
-garmr eval -d '{"kind": "test-comparison", "replicas": 3, "memoryMB": 2048, "cpuCores": 4}' -n condition-operators
+# Should ALLOW (replicas=3, cpu=2, memory=4096)
+garmr eval -d '{"kind": "Deployment", "spec": {"replicas": 3, "resources": {"cpu": 2, "memoryMB": 4096}}}' -n condition-operators -p numeric-comparison
 
-# Should DENY (replicas=1, memory=8192, cpu=16)
-garmr eval -d '{"kind": "test-comparison", "replicas": 1, "memoryMB": 8192, "cpuCores": 16}' -n condition-operators
+# Should DENY (replicas=1 fails CMP-001, memory=8192 fails CMP-004)
+garmr eval -d '{"kind": "Deployment", "spec": {"replicas": 1, "resources": {"cpu": 2, "memoryMB": 8192}}}' -n condition-operators -p numeric-comparison
 ```
 
 **curl:**
@@ -280,48 +284,34 @@ garmr eval -d '{"kind": "test-comparison", "replicas": 1, "memoryMB": 8192, "cpu
 # Should ALLOW
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
-  -d '{"input": {"kind": "test-comparison", "replicas": 3, "memoryMB": 2048, "cpuCores": 4}, "namespace": "condition-operators"}'
+  -d '{"input": {"kind": "Deployment", "spec": {"replicas": 3, "resources": {"cpu": 2, "memoryMB": 4096}}}, "namespace": "condition-operators", "policies": ["numeric-comparison"]}'
 ```
 
 ---
 
 ### String Operators
 
-String matching: `contains`, `hasPrefix`, `hasSuffix`, `pattern`.
+String matching: `contains`, `hasPrefix`, `hasSuffix`, `pattern` (RE2,
+compiled when the policy loads; at most 512 bytes). A non-string value at
+the path is an evaluation error.
 
-**Policy:** `example-policies/condition-operators/string.cue`
+**Policy:** `string-matching` in
+`example-policies/condition-operators/string.cue`
 
 ```cue
-expr: match: {
-    path:      "image"
-    hasPrefix: "gcr.io/"
-}
-
-expr: {
-    not: match: {
-        path:      "image"
-        hasSuffix: ":latest"
-    }
-}
-
-expr: match: {
-    path:     "environment"
-    contains: "prod"
-}
-
-expr: match: {
-    path:    "metadata.name"
-    pattern: "^[a-z][a-z0-9-]*[a-z0-9]$"
-}
+{id: "STR-001", expr: not: match: {path: "spec.image.tag", contains: "latest"}}
+{id: "STR-002", expr: match: {path: "metadata.name", hasPrefix: "team-"}}
+{id: "STR-003", expr: match: {path: "spec.ingress.hostname", hasSuffix: ".example.com"}}
+{id: "STR-004", expr: match: {path: "metadata.labels.version", pattern: "^v?[0-9]+\\.[0-9]+\\.[0-9]+(-[a-zA-Z0-9.]+)?$"}}
 ```
 
 **CLI:**
 ```bash
 # Should ALLOW
-garmr eval -d '{"kind": "test-string", "metadata": {"name": "web-api"}, "image": "gcr.io/project/app:v1.0.0", "environment": "production"}' -n condition-operators
+garmr eval -d '{"kind": "Service", "metadata": {"name": "team-payments", "labels": {"version": "v1.4.2"}}, "spec": {"image": {"tag": "v1.4.2"}, "ingress": {"hostname": "payments.example.com"}}}' -n condition-operators -p string-matching
 
-# Should DENY (wrong registry, :latest tag)
-garmr eval -d '{"kind": "test-string", "metadata": {"name": "web-api"}, "image": "docker.io/app:latest", "environment": "production"}' -n condition-operators
+# Should DENY (tag contains "latest", name lacks the "team-" prefix)
+garmr eval -d '{"kind": "Service", "metadata": {"name": "payments", "labels": {"version": "v1.4.2"}}, "spec": {"image": {"tag": "latest"}, "ingress": {"hostname": "payments.example.com"}}}' -n condition-operators -p string-matching
 ```
 
 **curl:**
@@ -329,7 +319,7 @@ garmr eval -d '{"kind": "test-string", "metadata": {"name": "web-api"}, "image":
 # Should ALLOW
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
-  -d '{"input": {"kind": "test-string", "metadata": {"name": "web-api"}, "image": "gcr.io/project/app:v1.0.0", "environment": "production"}, "namespace": "condition-operators"}'
+  -d '{"input": {"kind": "Service", "metadata": {"name": "team-payments", "labels": {"version": "v1.4.2"}}, "spec": {"image": {"tag": "v1.4.2"}, "ingress": {"hostname": "payments.example.com"}}}, "namespace": "condition-operators", "policies": ["string-matching"]}'
 ```
 
 ---
@@ -338,27 +328,23 @@ curl -X POST http://localhost:8080/v1/evaluate \
 
 Set membership and array validation: `in`, `notIn`, `unique`, `uniqueBy`, `sorted`, `containsAll`, `containsAny`, `subsetOf`.
 
-**Policy:** `example-policies/condition-operators/set.cue`
+**Policy:** `set-membership` in `example-policies/condition-operators/set.cue`
 
 ```cue
-expr: match: {
-    path: "environment"
-    in: ["development", "staging", "production"]
-}
-
-expr: match: {
-    path: "region"
-    notIn: ["cn-north-1", "cn-northwest-1", "ru-west-1"]
-}
+{id: "SET-001", expr: match: {path: "environment", in: ["development", "staging", "production"]}}
+{id: "SET-002", expr: match: {path: "region", in: ["us-east-1", "us-west-2", "eu-west-1", "eu-central-1"]}}
+{id: "SET-003", expr: match: {path: "spec.image.registry", notIn: ["docker.io", "quay.io", "public.ecr.aws"]}}
 ```
+
+Like every check, `notIn` fails when the field is missing.
 
 **CLI:**
 ```bash
-# Should ALLOW (production, us-east-1)
-garmr eval -d '{"kind": "test-set", "environment": "production", "region": "us-east-1", "tier": "premium"}' -n condition-operators
+# Should ALLOW (production, us-east-1, private registry)
+garmr eval -d '{"kind": "Deployment", "environment": "production", "region": "us-east-1", "spec": {"image": {"registry": "registry.example.com"}}}' -n condition-operators -p set-membership
 
-# Should DENY (unknown environment)
-garmr eval -d '{"kind": "test-set", "environment": "test", "region": "us-east-1", "tier": "premium"}' -n condition-operators
+# Should DENY (unknown environment, public registry)
+garmr eval -d '{"kind": "Deployment", "environment": "test", "region": "us-east-1", "spec": {"image": {"registry": "docker.io"}}}' -n condition-operators -p set-membership
 ```
 
 **curl:**
@@ -366,7 +352,7 @@ garmr eval -d '{"kind": "test-set", "environment": "test", "region": "us-east-1"
 # Should ALLOW
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
-  -d '{"input": {"kind": "test-set", "environment": "production", "region": "us-east-1", "tier": "premium"}, "namespace": "condition-operators"}'
+  -d '{"input": {"kind": "Deployment", "environment": "production", "region": "us-east-1", "spec": {"image": {"registry": "registry.example.com"}}}, "namespace": "condition-operators", "policies": ["set-membership"]}'
 ```
 
 #### Advanced Set Operators
@@ -375,111 +361,33 @@ Array validation operators. Element equality is the strict equality above
 (`1` and `1.0` are the same value; `"1"` and `1` are not), and a non-array
 value at the path is an evaluation error.
 
-**Policy:** `example-policies/condition-operators/set.cue` (the
-`set-advanced` policy, targeting `kind: "test-set-advanced"`)
-
-##### unique / uniqueBy
-
-Validates no duplicate values in arrays.
+**Policy:** `set-advanced` in `example-policies/condition-operators/set.cue`
+(targets `kind: "test-set-advanced"`)
 
 ```cue
-// Simple array - no duplicate values
-expr: match: {
-    path:   "spec.ports"
-    unique: true
-}
-
-// Array of objects - no duplicates by field (dot-notation paths supported)
-expr: match: {
-    path:     "spec.containers"
-    uniqueBy: "name"
-}
+{id: "SET-101", expr: match: {path: "spec.ports", unique: true}}
+{id: "SET-102", expr: match: {path: "spec.containers", uniqueBy: "name"}}
+{id: "SET-103", expr: match: {path: "spec.priorities", sorted: "asc"}}
+{id: "SET-104", expr: match: {path: "spec.regions", containsAll: ["us-east-1", "eu-west-1"]}}
+{id: "SET-105", expr: match: {path: "spec.zones", subsetOf: ["zone-a", "zone-b", "zone-c", "zone-d"]}}
 ```
 
-An element missing the `uniqueBy` field fails the rule. `unique: false`
-places no constraint.
+| Operator | Passes when |
+|----------|-------------|
+| `unique: true` | The list has no duplicate values (`unique: false` places no constraint) |
+| `uniqueBy: "<path>"` | No two elements share the value at that path (dot-notation paths supported); an element missing the field fails the rule |
+| `sorted: "asc"` / `"desc"` | The list is in order; equal neighbours are allowed. Elements must be all numbers or all strings; anything else is not orderable and fails |
+| `containsAll: [...]` | Every listed value is in the list (superset check) |
+| `containsAny: [...]` | At least one listed value is in the list |
+| `subsetOf: [...]` | Every element is one of the listed values; an empty list passes |
 
-**Use Cases:**
-- No duplicate port numbers in a service
-- No duplicate container names in a pod
-- No duplicate environment variable names
+**Use Cases:** no duplicate ports or container names; ordered priority
+lists; DR compliance (deployed to every required region); zones or
+permissions chosen from an approved set.
 
-##### sorted
-
-Validates array is in sorted order (`"asc"` or `"desc"`). Equal neighbors
-are allowed. Elements must be all numbers or all strings; anything else
-(objects, mixed kinds) is not orderable and fails the rule.
-
-```cue
-// Ascending order
-expr: match: {
-    path:   "spec.priorities"
-    sorted: "asc"
-}
-
-// Descending order
-expr: match: {
-    path:   "spec.versions"
-    sorted: "desc"
-}
-```
-
-**Use Cases:**
-- Priority queues must be ordered
-- Version lists in descending order (newest first)
-
-##### containsAll
-
-Validates array contains all required values (superset check).
-
-```cue
-expr: match: {
-    path: "spec.regions"
-    containsAll: ["us-east-1", "eu-west-1"]
-}
-```
-
-**Use Cases:**
-- DR compliance: must deploy to all required regions
-- Must include all mandatory labels
-- Must have all required capabilities
-
-##### containsAny
-
-Validates array contains at least one of the listed values.
-
-```cue
-expr: match: {
-    path: "spec.logging.formats"
-    containsAny: ["json", "structured"]
-}
-```
-
-##### subsetOf
-
-Validates all array values are from an approved list (subset check). An
-empty array passes.
-
-```cue
-expr: match: {
-    path: "spec.zones"
-    subsetOf: ["zone-a", "zone-b", "zone-c", "zone-d"]
-}
-```
-
-**Use Cases:**
-- Selected zones must be from approved list
-- Requested permissions must be from allowed set
-- Chosen options must be valid
-
-#### Advanced Set Test Data
-
+**Test Data:**
 - Pass: `testdata/condition-operators/set-advanced-pass.json`
 - Fail: `testdata/condition-operators/set-advanced-fail.json`
-
-The `condition-operators` namespace contains several wildcard-target
-policies, so evaluate these fixtures against the `set-advanced` policy
-specifically with `-p`:
 
 **CLI:**
 ```bash
@@ -492,7 +400,7 @@ garmr eval --input testdata/condition-operators/set-advanced-fail.json -n condit
 
 **curl:**
 ```bash
-# Test unique ports - should DENY (duplicate port 80)
+# Should DENY (duplicate port 80)
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
   -d '{
@@ -515,47 +423,50 @@ curl -X POST http://localhost:8080/v1/evaluate \
 
 ### Logical Operators
 
-Boolean logic: `all` (AND), `any` (OR), `not` (NOT).
+Boolean logic: `all` (AND), `any` (OR), `not` (NOT). See
+[Evaluation semantics](#evaluation-semantics) for how they treat evaluation
+errors.
 
-**Policy:** `example-policies/condition-operators/logical.cue`
+**Policies:** `logical-all`, `logical-any`, `logical-not` and
+`logical-nested` in `example-policies/condition-operators/logical.cue`
 
 ```cue
-// AND - all conditions must pass
-expr: {
-    all: [
-        {match: {path: "name", exists: true}},
-        {match: {path: "version", exists: true}},
-        {match: {path: "environment", exists: true}},
-    ]
-}
+// AND - every condition must pass
+{id: "LOG-001", expr: all: [
+    {match: {path: "environment", equals: "production"}},
+    {match: {path: "spec.replicas", greaterThanOrEqual: 2}},
+    {match: {path: "spec.resources.cpuLimit", greaterThan: 0}},
+    {match: {path: "spec.resources.memoryLimit", greaterThan: 0}},
+]}
 
 // OR - at least one must pass
-expr: {
-    any: [
-        {match: {path: "contact.email", exists: true}},
-        {match: {path: "contact.phone", exists: true}},
-        {match: {path: "contact.slack", exists: true}},
-    ]
-}
+{id: "LOG-002", expr: any: [
+    {match: {path: "spec.auth.method", equals: "oauth2"}},
+    {match: {path: "spec.auth.method", equals: "oidc"}},
+    {match: {path: "spec.auth.method", equals: "mtls"}},
+]}
 
-// NOT - negates condition
-expr: {
-    not: {
-        all: [
-            {match: {path: "environment", equals: "production"}},
-            {match: {path: "debug", equals: true}},
-        ]
-    }
-}
+// NOT - passes when the inner check fails (including when spec.debug is absent)
+{id: "LOG-003", expr: not: match: {path: "spec.debug", equals: true}}
+
+// Nested
+{id: "LOG-004", expr: all: [
+    {match: {path: "spec.tls.enabled", equals: true}},
+    {any: [
+        {match: {path: "spec.protocol", equals: "https"}},
+        {match: {path: "spec.protocol", equals: "grpcs"}},
+    ]},
+    {not: match: {path: "spec.runAsRoot", equals: true}},
+]}
 ```
 
 **CLI:**
 ```bash
 # Should ALLOW
-garmr eval -d '{"kind": "test-logical", "name": "app", "version": "1.0.0", "environment": "production", "debug": false, "contact": {"email": "team@example.com"}}' -n condition-operators
+garmr eval -d '{"kind": "Service", "environment": "production", "spec": {"replicas": 3, "resources": {"cpuLimit": 2, "memoryLimit": 4096}, "auth": {"method": "oidc"}, "debug": false, "tls": {"enabled": true}, "protocol": "https", "runAsRoot": false}}' -n condition-operators -p logical-all,logical-any,logical-not,logical-nested
 
-# Should DENY (missing version, no contact, debug in prod)
-garmr eval -d '{"kind": "test-logical", "name": "app", "environment": "production", "debug": true}' -n condition-operators
+# Should DENY (unapproved auth method, debug on, plain http)
+garmr eval -d '{"kind": "Service", "environment": "production", "spec": {"replicas": 3, "resources": {"cpuLimit": 2, "memoryLimit": 4096}, "auth": {"method": "basic"}, "debug": true, "tls": {"enabled": true}, "protocol": "http", "runAsRoot": false}}' -n condition-operators -p logical-all,logical-any,logical-not,logical-nested
 ```
 
 **curl:**
@@ -563,34 +474,42 @@ garmr eval -d '{"kind": "test-logical", "name": "app", "environment": "productio
 # Should ALLOW
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
-  -d '{"input": {"kind": "test-logical", "name": "app", "version": "1.0.0", "environment": "production", "debug": false, "contact": {"email": "team@example.com"}}, "namespace": "condition-operators"}'
+  -d '{"input": {"kind": "Service", "environment": "production", "spec": {"replicas": 3, "resources": {"cpuLimit": 2, "memoryLimit": 4096}, "auth": {"method": "oidc"}, "debug": false, "tls": {"enabled": true}, "protocol": "https", "runAsRoot": false}}, "namespace": "condition-operators", "policies": ["logical-all", "logical-any", "logical-not", "logical-nested"]}'
 ```
 
 ---
 
 ## Advanced Operators
 
-Note: the example policies in the `advanced-operators` namespace mostly target all kinds (`*`), so an evaluation against that namespace runs every policy in it — expect results from rules beyond the operator being illustrated. Rules whose fields are missing from the input fail closed.
+As above, the examples name the policies they exercise, because most
+policies in the `advanced-operators` namespace target every kind. Rules
+whose fields are missing from the input fail closed.
 
 ### forEach
 
 Iterates over arrays and validates each element.
 
-**Policy:** `example-policies/advanced-operators/foreach.cue`
+**Policies:** `foreach-all`, `foreach-any` (`action: warn`) and
+`foreach-nested` in `example-policies/advanced-operators/foreach.cue`
 
 ```cue
-expr: {
-    forEach: {
-        path: "spec.containers"
-        as:   "container"
-        condition: {
-            all: [
-                {match: {path: "container.resources.limits.memory", exists: true}},
-                {match: {path: "container.resources.limits.cpu", exists: true}},
-            ]
-        }
-    }
-}
+{id: "FE-001", expr: forEach: {
+    path: "spec.containers"
+    as:   "container"
+    mode: "all"
+    condition: all: [
+        {match: {path: "container.resources.cpuLimit", exists: true}},
+        {match: {path: "container.resources.memoryLimit", exists: true}},
+    ]
+}}
+{id: "FE-002", expr: forEach: {
+    path: "spec.containers", as: "c", mode: "all"
+    condition: match: {path: "c.image", hasPrefix: "registry.example.com/"}
+}}
+{id: "FE-003", expr: forEach: {
+    path: "spec.maintainers", as: "maintainer", mode: "any"
+    condition: match: {path: "maintainer.role", equals: "admin"}
+}}
 ```
 
 **Properties:**
@@ -598,17 +517,20 @@ expr: {
 | Property | Type | Description |
 |----------|------|-------------|
 | `path` | string | Path to the list |
-| `as` | string | Name the condition uses for the current element (default `item`) |
+| `as` | string | Name the condition uses for the current element (default `item`); must be an identifier (letters, digits, underscores, starting with a letter) |
+| `condition` | expression | Expression evaluated per element (required) |
 | `mode` | string | `all` (default): every element must pass; `any`: at least one |
 | `allowEmpty` | bool | Whether an empty list passes (default `true`) |
 | `where` | expression | Only elements for which this holds are checked (and counted) |
-| `condition` | expression | Expression evaluated per element |
+| `count` | length operators | Check how many elements pass instead of `mode`/`allowEmpty` (see below) |
 
 Inside `condition`, paths starting with the alias read the element and
-`_index` is its position; other paths read the input. `forEach` nests, and
-an inner condition can refer to both aliases. A missing list fails; a
-non-list value is an evaluation error. The evaluation deadline is checked on
-every element.
+`_index` is its position; other paths read the input. Because of that, a
+path whose first key is literally `_index` reads the position, not an input
+field of that name, anywhere inside a `forEach`. `forEach` nests, and an
+inner condition can refer to both aliases. A missing list fails; a non-list
+value is an evaluation error. The evaluation deadline is checked on every
+element.
 
 **Filtering.** `where` selects the elements the condition applies to; the
 others are skipped entirely. `allowEmpty`, `mode: "any"` and `count` apply
@@ -627,8 +549,8 @@ expr: forEach: {
 
 **Counting.** `count` checks how many elements pass instead of requiring
 all or any of them. It takes the same operators as `length` and replaces
-`mode` and `allowEmpty` (an empty list counts 0). The count is available to
-the message as `{{.count}}`.
+`mode` and `allowEmpty` (setting both is a load error; an empty list counts
+0). The count is available to the message as `{{.count}}`.
 
 ```cue
 // At most one container may run privileged.
@@ -646,11 +568,47 @@ with an evaluation error.
 
 **CLI:**
 ```bash
-# All containers have limits - forEach rules FE-001 pass
-garmr eval -d '{"kind": "Pod", "spec": {"containers": [{"name": "app", "image": "registry.corp.example.com/app:v1", "resources": {"cpuLimit": "500m", "memoryLimit": "512Mi"}}]}}' -n advanced-operators
+# Should ALLOW (limits set, approved registry, an admin maintainer, a named non-restricted port)
+garmr eval -d '{"kind": "Pod", "spec": {"containers": [{"name": "app", "image": "registry.example.com/app:v1", "resources": {"cpuLimit": "500m", "memoryLimit": "512Mi"}}], "maintainers": [{"name": "ana", "role": "admin"}], "ports": [{"name": "http", "number": 8080}]}}' -n advanced-operators -p foreach-all,foreach-any,foreach-nested
 
-# Container missing limits - forEach rules fail
-garmr eval -d '{"kind": "Pod", "spec": {"containers": [{"name": "app", "image": "registry.corp.example.com/app:v1"}]}}' -n advanced-operators
+# Should DENY (no limits, docker.io image, restricted port 22: FE-001, FE-002, FE-004)
+garmr eval -d '{"kind": "Pod", "spec": {"containers": [{"name": "app", "image": "docker.io/app:v1"}], "maintainers": [{"name": "ana", "role": "admin"}], "ports": [{"name": "ssh", "number": 22}]}}' -n advanced-operators -p foreach-all,foreach-any,foreach-nested
+```
+
+#### Projections, counts and per-element messages
+
+**Policy:** `aggregate-checks` in
+`example-policies/advanced-operators/aggregate.cue` (targets `kind:
+"test-aggregate"`) combines a `[*]` projection with `sum`, a counted
+`forEach`, a nested `forEach` with `where`, `unique` over a projection, and
+a rule `when`:
+
+```cue
+{id: "AGG-001", expr: compare: {
+    left: {func: {name: "sum", args: [{path: "spec.containers[*].cpu"}]}}
+    op: "<="
+    right: {literal: 4}
+}}
+{id: "AGG-004", expr: match: {path: "spec.containers[*].name", unique: true}}
+{id: "AGG-005"
+    when: match: {path: "metadata.labels.env", equals: "prod"}
+    expr: forEach: {
+        path: "spec.containers", as: "c"
+        condition: match: {path: "c.resources.limits.memory", exists: true}
+    }
+    message: "production container {{c.name}} has no memory limit"
+}
+```
+
+**CLI:**
+```bash
+# Should ALLOW
+garmr eval -d '{"kind": "test-aggregate", "metadata": {"name": "web", "labels": {"env": "prod"}}, "spec": {"declaredPorts": [8080], "containers": [{"name": "app", "cpu": 1, "ports": [{"containerPort": 8080}], "resources": {"limits": {"memory": "512Mi"}}}, {"name": "proxy", "cpu": 0.5, "resources": {"limits": {"memory": "128Mi"}}}]}}' -n advanced-operators -p aggregate-checks
+
+# Should DENY: "web requests more than 4 CPUs in total", "2 containers run privileged; at most 1 may",
+# "container app exposes undeclared port 9229; container debug exposes undeclared port 6060",
+# "production container debug has no memory limit"
+garmr eval -d '{"kind": "test-aggregate", "metadata": {"name": "web", "labels": {"env": "prod"}}, "spec": {"declaredPorts": [8080], "containers": [{"name": "app", "cpu": 3, "securityContext": {"privileged": true}, "ports": [{"containerPort": 8080}, {"containerPort": 9229}], "resources": {"limits": {"memory": "512Mi"}}}, {"name": "debug", "cpu": 2, "securityContext": {"privileged": true}, "ports": [{"containerPort": 6060}]}]}}' -n advanced-operators -p aggregate-checks
 ```
 
 ---
@@ -659,23 +617,15 @@ garmr eval -d '{"kind": "Pod", "spec": {"containers": [{"name": "app", "image": 
 
 Validates string or array length.
 
-**Policy:** `example-policies/advanced-operators/length.cue`
+**Policy:** `length-constraints` in
+`example-policies/advanced-operators/length.cue` (`action: warn`)
 
 ```cue
-expr: match: {
-    path: "metadata.name"
-    length: {greaterThanOrEqual: 3, lessThanOrEqual: 63}
-}
-
-expr: match: {
-    path: "tags"
-    length: {greaterThanOrEqual: 1}
-}
-
-expr: match: {
-    path: "description"
-    length: {lessThanOrEqual: 500}
-}
+{id: "LEN-001", expr: match: {path: "spec.containers", length: greaterThanOrEqual: 1}}
+{id: "LEN-002", expr: match: {path: "spec.containers", length: lessThanOrEqual: 5}}
+{id: "LEN-003", expr: match: {path: "spec.availabilityZones", length: equals: 3}}
+{id: "LEN-004", expr: match: {path: "metadata.name", length: greaterThan: 2}}
+{id: "LEN-005", expr: match: {path: "metadata.tags", length: greaterThan: 0}}
 ```
 
 **Operators:** `equals`, `greaterThan`, `greaterThanOrEqual`, `lessThan`, `lessThanOrEqual`
@@ -685,11 +635,11 @@ available to the rule's `message` as `{{.length}}`.
 
 **CLI:**
 ```bash
-# Name within limits, at least one tag - length rules pass
-garmr eval -d '{"kind": "test-length", "metadata": {"name": "web-api", "tags": ["prod"]}}' -n advanced-operators
+# Should ALLOW
+garmr eval -d '{"kind": "Pod", "metadata": {"name": "web-api", "tags": ["prod"]}, "spec": {"containers": [{"name": "app"}], "availabilityZones": ["a", "b", "c"]}}' -n advanced-operators -p length-constraints
 
-# Length violations (name too short, no tags)
-garmr eval -d '{"kind": "test-length", "metadata": {"name": "ab", "tags": []}}' -n advanced-operators
+# Should WARN (two zones, name too short, no tags; the policy only warns)
+garmr eval -d '{"kind": "Pod", "metadata": {"name": "ab", "tags": []}, "spec": {"containers": [{"name": "app"}], "availabilityZones": ["a", "b"]}}' -n advanced-operators -p length-constraints
 ```
 
 ---
@@ -698,42 +648,43 @@ garmr eval -d '{"kind": "test-length", "metadata": {"name": "ab", "tags": []}}' 
 
 Compares semantic versions.
 
-**Policy:** `example-policies/advanced-operators/semver.cue`
+**Policy:** `semver-constraints` in
+`example-policies/advanced-operators/semver.cue`
 
 ```cue
-expr: match: {
-    path: "version"
-    semver: {greaterThanOrEqual: "1.0.0"}
-}
-
-expr: match: {
-    path: "spec.apiVersion"
-    semver: {constraint: "^2.0.0"}  // 2.x compatible
-}
-
-expr: match: {
-    path: "version"
-    semver: {lessThan: "3.0.0"}
-}
+{id: "SV-001", expr: match: {path: "spec.version", semver: greaterThanOrEqual: "2.0.0"}}
+{id: "SV-002", expr: match: {path: "spec.version", semver: lessThan: "4.0.0"}}
+{id: "SV-003", expr: match: {path: "spec.dependencies.dbDriver", semver: equals: "1.5.2"}}
 ```
 
 **Operators:** `equals`, `greaterThan`, `greaterThanOrEqual`, `lessThan`, `lessThanOrEqual`, `constraint`
 
-**Constraints:**
-- `^2.0.0` - Same major version (2.x.x)
-- `~1.2.0` - Same minor version (1.2.x)
-- `>=1.0.0,<2.0.0` - Range
+**Versions.** A leading `v` is accepted, and minor and patch may be omitted
+(`1.2` is `1.2.0`). Prereleases order below their release and are compared
+by SemVer 2.0.0 precedence; build metadata (`+…`) is ignored. The version is
+available to the message as `{{.version}}`.
+
+**Constraints** are comma-separated conditions that must all hold:
+- `>=1.0.0`, `>1.0.0`, `<=2.0.0`, `<2.0.0`, `=1.2.3` (a bare version also
+  means `=`)
+- `^1.2.0` - same major version and at least `1.2.0` (`^0.2.0` accepts
+  `0.3.0`: the major-version rule applies to `0` too)
+- `~1.2.0` - same major and minor version and at least `1.2.0`
+- `>=1.0.0,<2.0.0` - range
 
 **CLI:**
 ```bash
-# Version 2.1.5 satisfies >= 2.0.0 - semver rules pass
-garmr eval -d '{"kind": "test-semver", "spec": {"version": "2.1.5"}}' -n advanced-operators
+# Should ALLOW (2.1.5 is in [2.0.0, 4.0.0); driver is exactly 1.5.2)
+garmr eval -d '{"kind": "App", "spec": {"version": "2.1.5", "dependencies": {"dbDriver": "1.5.2"}}}' -n advanced-operators -p semver-constraints
 
-# Version 0.9.0 fails >= 2.0.0 - semver rules fail
-garmr eval -d '{"kind": "test-semver", "spec": {"version": "0.9.0"}}' -n advanced-operators
+# Should DENY (1.9.0 fails SV-001)
+garmr eval -d '{"kind": "App", "spec": {"version": "1.9.0", "dependencies": {"dbDriver": "1.5.2"}}}' -n advanced-operators -p semver-constraints
 ```
 
-Invalid semver values fail the rule closed (with a diagnostic message) — a malformed version string never parses as `0.0.0`.
+An unparseable version in the input is an evaluation error and fails the
+rule closed ("Rule SV-001 could not be evaluated: 'spec.version' is not a
+valid semver: two") — a malformed version never parses as `0.0.0`. An
+unparseable version or constraint in the policy is a load error.
 
 ---
 
@@ -741,70 +692,75 @@ Invalid semver values fail the rule closed (with a diagnostic message) — a mal
 
 Validates dates and expiration.
 
-**Policy:** `example-policies/advanced-operators/datetime.cue`
+**Policy:** `datetime-constraints` in
+`example-policies/advanced-operators/datetime.cue`
 
 ```cue
-expr: match: {
-    path: "expiresAt"
-    datetime: {notExpired: true}
-}
-
-expr: match: {
-    path: "expiresAt"
-    datetime: {expiresAfterDays: 30}
-}
-
-expr: match: {
-    path: "createdAt"
-    datetime: {after: "2024-01-01T00:00:00Z"}
-}
+{id: "DT-001", expr: match: {path: "spec.certificate.notAfter", datetime: notExpired: true}}
+{id: "DT-002", expr: match: {path: "spec.certificate.notAfter", datetime: expiresAfterDays: 30}}
+{id: "DT-003", expr: match: {path: "spec.lastSecurityScan", datetime: withinDays: 7}}
+{id: "DT-004", expr: match: {path: "spec.buildTimestamp", datetime: withinHours: 24}}
 ```
 
 **Operators:**
-- `after`, `before`, `afterOrEqual`, `beforeOrEqual` - Compare to date
+- `after`, `before`, `afterOrEqual`, `beforeOrEqual` - Compare to a date
 - `withinDays`, `withinHours` - Within N days/hours of now, in either direction
-- `expiresAfterDays` - Must be valid for N days
-- `notExpired` - Must be in the future
+- `expiresAfterDays` - At least N days in the future
+- `notExpired` - `true`: in the future; `false`: in the past
 
-**Supported Formats:** RFC3339, ISO8601, date only (YYYY-MM-DD), `now`
+**Formats** (input values and operands): RFC3339 (with or without
+fractional seconds), `2006-01-02T15:04:05` (with or without a trailing
+`Z`), `2006-01-02 15:04:05`, `2006-01-02`, `01/02/2006`, `02-Jan-2006`, and
+`now`. Values without a zone are UTC. The parsed time is available to the
+message as `{{.datetime}}`, normalized to RFC3339.
 
-Invalid datetime values fail the rule closed with a diagnostic message.
+An unparseable datetime in the input is an evaluation error; an
+unparseable operand in the policy is a load error.
 
 **CLI:**
 ```bash
-# Certificate not yet expired - datetime rules pass
-garmr eval -d '{"kind": "test-datetime", "spec": {"certificate": {"notAfter": "2030-01-01T00:00:00Z"}}}' -n advanced-operators
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-# Certificate expired - datetime rules fail
-garmr eval -d '{"kind": "test-datetime", "spec": {"certificate": {"notAfter": "2024-01-01T00:00:00Z"}}}' -n advanced-operators
+# Should ALLOW (certificate valid for years; scan and build are fresh)
+garmr eval -d '{"kind": "Service", "spec": {"certificate": {"notAfter": "2030-01-01T00:00:00Z"}, "lastSecurityScan": "'"$NOW"'", "buildTimestamp": "'"$NOW"'"}}' -n advanced-operators -p datetime-constraints
+
+# Should DENY (certificate expired: DT-001 and DT-002)
+garmr eval -d '{"kind": "Service", "spec": {"certificate": {"notAfter": "2024-01-01T00:00:00Z"}, "lastSecurityScan": "'"$NOW"'", "buildTimestamp": "'"$NOW"'"}}' -n advanced-operators -p datetime-constraints
 ```
 
 ---
 
 ### compare (Cross-Field)
 
-Compares two fields from the input.
+Compares two values: input fields, literals, or builtin results.
 
-**Policy:** `example-policies/advanced-operators/compare.cue`
+**Policies:** `compare-cross-field`, `compare-literal`, `compare-with-func`
+and `compare-env` in `example-policies/advanced-operators/compare.cue`
 
 ```cue
-expr: compare: {
-    left: path:  "spec.minReplicas"
-    op:          "<="
-    right: path: "spec.maxReplicas"
-}
-
-expr: compare: {
-    left: path:  "spec.resources.requests.memory"
-    op:          "<="
-    right: path: "spec.resources.limits.memory"
-}
-
-expr: compare: {
-    left: path:  "schedule.startDate"
-    op:          "before"
-    right: path: "schedule.endDate"
-}
+// compare-cross-field
+{id: "CMP-101", expr: compare: {
+    left: {path: "spec.autoscaling.maxReplicas"}
+    op: ">"
+    right: {path: "spec.autoscaling.minReplicas"}
+}}
+{id: "CMP-102", expr: compare: {
+    left: {path: "spec.resources.memoryLimit"}
+    op: ">="
+    right: {path: "spec.resources.memoryRequest"}
+}}
+// compare-literal
+{id: "CMP-104", expr: compare: {
+    left: {path: "spec.image.tag"}
+    op: "matches"
+    right: {literal: "^v?[0-9]+\\.[0-9]+\\.[0-9]+$"}
+}}
+// compare-with-func
+{id: "CMP-105", expr: compare: {
+    left: {func: {name: "len", args: [{path: "spec.containers"}]}}
+    op: "<="
+    right: {literal: 5}
+}}
 ```
 
 Each side is a value: exactly one of `path` (an input field; a missing
@@ -822,27 +778,29 @@ field resolves to null), `literal`, or `func` (a builtin call, see below).
 - Semver: `semverGt`, `semverGte`, `semverLt`, `semverLte`, `semverEq`
 - Datetime: `after`, `before`, `afterOrEqual`, `beforeOrEqual`
 
-Operands of the wrong type for an operator are an evaluation error. An
-unknown operator is rejected when the policy loads.
+Operands of the wrong type for an operator are an evaluation error. That
+includes two missing fields: both sides resolve to null, and `>` on two
+nulls is an error, not a failure. An unknown operator is rejected when the
+policy loads.
 
 **Test Data:**
-- Fail: `testdata/advanced-operators/compare-fail.yaml` (minReplicas > maxReplicas)
+- Fail: `testdata/advanced-operators/compare-fail.yaml` (minReplicas > maxReplicas, memoryRequest > memoryLimit)
 
 **CLI:**
 ```bash
-# maxReplicas > minReplicas - compare rule CMP-101 passes
-garmr eval -d '{"kind": "test-compare", "spec": {"autoscaling": {"minReplicas": 2, "maxReplicas": 10}}}' -n advanced-operators
+# Should ALLOW (maxReplicas > minReplicas, limit >= request)
+garmr eval -d '{"kind": "Deployment", "spec": {"autoscaling": {"minReplicas": 2, "maxReplicas": 10}, "resources": {"memoryRequest": 256, "memoryLimit": 512}}}' -n advanced-operators -p compare-cross-field
 
-# Failing input from the repo test data
-garmr eval --input testdata/advanced-operators/compare-fail.yaml -n advanced-operators
+# Should DENY (CMP-101 and CMP-102 fail)
+garmr eval --input testdata/advanced-operators/compare-fail.yaml -n advanced-operators -p compare-cross-field
 ```
 
 **curl:**
 ```bash
-# Should DENY with violation
+# Should DENY (maxReplicas 5 is not greater than minReplicas 10)
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
-  -d '{"input": {"kind": "test-compare", "spec": {"minReplicas": 10, "maxReplicas": 5}}, "namespace": "advanced-operators"}'
+  -d '{"input": {"kind": "Deployment", "spec": {"autoscaling": {"minReplicas": 10, "maxReplicas": 5}, "resources": {"memoryRequest": 256, "memoryLimit": 512}}}, "namespace": "advanced-operators", "policies": ["compare-cross-field"]}'
 ```
 
 #### Joins
@@ -863,8 +821,18 @@ expr: forEach: {
 message: "service {{s.metadata.name}} does not select the pods of deployment {{d.metadata.name}}"
 ```
 
-**Policy:** `example-policies/advanced-operators/aggregate.cue` (with the
-projection, counting and message examples).
+**Policy:** `service-selectors` in
+`example-policies/advanced-operators/aggregate.cue` (targets `kind:
+"test-bundle"`).
+
+**CLI:**
+```bash
+# Should ALLOW (the web Service selects app=web, which the web Deployment's pods carry)
+garmr eval -d '{"kind": "test-bundle", "services": [{"metadata": {"name": "web"}, "spec": {"selector": {"app": "web"}}}], "deployments": [{"metadata": {"name": "web"}, "spec": {"template": {"metadata": {"labels": {"app": "web", "tier": "frontend"}}}}}]}' -n advanced-operators -p service-selectors
+
+# Should DENY: "service web does not select the pods of deployment web"
+garmr eval -d '{"kind": "test-bundle", "services": [{"metadata": {"name": "web"}, "spec": {"selector": {"app": "website"}}}], "deployments": [{"metadata": {"name": "web"}, "spec": {"template": {"metadata": {"labels": {"app": "web", "tier": "frontend"}}}}}]}' -n advanced-operators -p service-selectors
+```
 
 ---
 
@@ -875,29 +843,70 @@ Calls a builtin. Arguments are values, like `compare` operands. Without
 null); with `expect`, it must equal it. `bind` names the result for the
 rule's `message` template.
 
-**Policy:** `example-policies/builtins/func-calls.cue`
+**Policies:** `builtin-cidr`, `builtin-k8s-units` (`action: warn`) and
+`builtin-type-check` in `example-policies/builtins/func-calls.cue`
 
 ```cue
-expr: "func": {
+// builtin-cidr
+{id: "FN-001", expr: "func": {
     name: "cidrContains"
     args: [{literal: "10.244.0.0/16"}, {path: "spec.podIP"}]
     expect: true
-}
+}}
+{id: "FN-002", expr: "func": {name: "ipVersion", args: [{path: "spec.serviceIP"}], expect: 4}}
 
-expr: compare: {
+// builtin-k8s-units
+{id: "FN-003", expr: compare: {
     left: {func: {name: "unitsParse", args: [{path: "spec.resources.requests.cpu"}]}}
     op:    ">="
     right: {func: {name: "unitsParse", args: [{literal: "100m"}]}}
-}
+}}
 ```
 
-**Builtins:** `len`, `sum`, `min`, `max`, `avg`, `lower`, `upper`, `trim`,
-`trimPrefix`, `trimSuffix`, `split`, `join`, `matches` (string, pattern),
-`format`, `base64Decode`, `base64Encode`, `now`, `duration`, `parseTime`,
-`typeOf`, `isType`, `hasKey`, `keys`, `values`, `lookup`, `cidrContains`,
-`cidrOverlap`, `ipVersion`, `unitsParse`, `flatten`, `unique`, `sort`,
-`filter`. An unknown name is rejected when the policy loads; a builtin that
-returns an error is an evaluation error.
+**CLI:**
+```bash
+# Should ALLOW (pod IP inside 10.244.0.0/16, IPv4 service IP)
+garmr eval -d '{"kind": "Pod", "spec": {"podIP": "10.244.3.17", "serviceIP": "10.96.0.10"}}' -n builtins -p builtin-cidr
+
+# Should DENY (pod IP outside the CIDR, IPv6 service IP)
+garmr eval -d '{"kind": "Pod", "spec": {"podIP": "192.168.1.5", "serviceIP": "fd00::10"}}' -n builtins -p builtin-cidr
+```
+
+#### Builtin reference
+
+An unknown name is rejected when the policy loads. A builtin called with the
+wrong number or types of arguments returns an error, which is an
+evaluation error for the rule.
+
+| Builtin | Arguments | Returns |
+|---------|-----------|---------|
+| `len` | string, list or object | Characters, elements or keys |
+| `sum`, `min`, `max`, `avg` | list of numbers | Number. Numeric strings (`"2"`) are converted; any other element (including `null`) is an error. `sum` of an empty list is `0`; `min`, `max`, `avg` of an empty list are errors |
+| `lower`, `upper` | string | String |
+| `trim` | string, optional cutset | String with whitespace (or the cutset characters) removed from both ends |
+| `trimPrefix`, `trimSuffix` | string, string | String |
+| `split` | string, separator | List of strings |
+| `join` | list, separator | String; elements are formatted with Go's `%v` |
+| `matches` | string, RE2 pattern | Boolean; patterns are capped at 512 bytes |
+| `format` | Go format string, values… | String (`fmt.Sprintf`) |
+| `base64Encode` | string | Standard base64 |
+| `base64Decode` | string | String; standard alphabet first, then URL-safe |
+| `now` | none | The current UTC time as RFC3339 |
+| `duration` | Go duration (`"90s"`, `"1h30m"`) | Seconds as a number |
+| `parseTime` | string, optional Go layout (default RFC3339) | Unix seconds |
+| `typeOf` | any | `"string"`, `"number"`, `"boolean"`, `"array"`, `"object"` or `"null"` |
+| `isType` | any, type name | Boolean (`typeOf(value) == name`) |
+| `hasKey` | object, key | Boolean; `false` when the first argument is not an object |
+| `keys`, `values` | object | List, in sorted key order |
+| `lookup` | object, dot-separated path | The value, or `null` when absent (plain keys only: no quoting or indexes) |
+| `cidrContains` | CIDR, IP | Boolean |
+| `cidrOverlap` | CIDR, CIDR | Boolean |
+| `ipVersion` | IP | `4` or `6` |
+| `unitsParse` | Kubernetes quantity | Number: `"500m"` → `0.5`, `"2k"` → `2000`, `"1Gi"` → `1073741824` |
+| `flatten` | list | List with nested lists flattened recursively |
+| `unique` | list | List without duplicates (strict equality), first occurrence kept |
+| `sort` | list | Ascending copy; numbers and strings sort among themselves, mixed kinds are grouped by kind |
+| `filter` | list, value | The elements equal to the value |
 
 ---
 
@@ -945,11 +954,15 @@ element** and the renderings are joined, so
 message: "container {{c.name}} exposes undeclared port {{p.containerPort}}"
 ```
 
-reports `container debug exposes undeclared port 9229; container debug
-exposes undeclared port 6060`. Elements visited inside a branch that
-ultimately passed (an `any` or `not`) are not reported. A placeholder that
-does not resolve is left as written. A malformed placeholder is a load
-error.
+reports `container app exposes undeclared port 9229; container debug
+exposes undeclared port 6060`. Identical renderings are reported once.
+Elements visited inside a branch that ultimately passed (an `any` or `not`)
+are not reported. A placeholder that does not resolve is left as written. A
+malformed placeholder is a load error.
+
+Bindings render the value the check used: `{{.datetime}}` is the parsed
+time normalized to RFC3339 (not the input as written), `{{.version}}` the
+version string, `{{.length}}` and `{{.count}}` numbers.
 
 ---
 
@@ -962,14 +975,17 @@ report it):
 - The document does not unify with the schema (unknown fields, wrong types).
 - An expression sets no operator, or more than one.
 - An operand cannot be compiled: a malformed path, an invalid regular
-  expression, semver or datetime literal, an unknown builtin or compare
-  operator, or a malformed message placeholder.
-- A `forEach` sets `count` together with `mode` or `allowEmpty`.
+  expression (or one over 512 bytes), semver, semver constraint or datetime
+  literal, an unknown builtin or compare operator, or a malformed message
+  placeholder.
+- A `forEach` has no `condition`, an `as` that is not an identifier, or
+  `count` together with `mode` or `allowEmpty`.
 - Two rules in the policy share an `id`.
 - An exception `match` selects everything (it would disable the policy), or
   its `expiry` is not an RFC3339 timestamp.
 - `evaluation.timeout` is not a positive Go duration (`"250ms"`, `"30s"`).
 - Two policy documents declare the same `namespace/name`.
+- A policy uses the reserved namespace `__system__`.
 
 ---
 
@@ -1003,32 +1019,108 @@ myPolicy: {
                 id:          "RULE-001"
                 description: "Rule description"
                 severity:    "high"  // critical, high, medium, low, info
-                when: {
-                    // optional: the rule applies only when this holds
-                }
-                expr: {
-                    // condition expression
-                }
-                message: "Failure message"
+                priority:    10      // optional; lower is evaluated first
+                // optional: the rule applies only when this holds
+                when: match: {path: "metadata.labels.env", equals: "prod"}
+                // the check: exactly one operator per expression
+                expr: match: {path: "spec.replicas", greaterThanOrEqual: 2}
+                message:     "{{metadata.name}} needs at least 2 replicas"
+                remediation: "Set spec.replicas to 2 or more"
+                url:         "https://wiki.example.com/policies/RULE-001"
+                category:    "availability"
+                tags: ["ha", "production"]
             }
         ]
         enforcement: {
             action: "deny"  // deny, warn, audit
+            dryRun: false   // true: report, but lower deny to warn
             exceptions: [{
                 name:   "legacy-batch"
                 reason: "migrating in Q3"
                 match: {names: ["batch-*"]}
-                expiry: "2026-12-31T00:00:00Z"
+                expiry:     "2027-06-30T00:00:00Z"
+                approvedBy: ["platform-lead"]
+                ticket:     "PLAT-1234"
             }]
         }
         evaluation: {
             order:    "priority"  // priority, severity, definition, priority-then-severity
             failFast: false
             timeout:  "250ms"
+            // optional rule filters and cap
+            excludeTags: ["experimental"]
+            maxRules:    0  // 0 = unlimited
         }
     }
 }
 ```
+
+---
+
+## Field Reference
+
+### Identifiers
+
+| Field | Format |
+|-------|--------|
+| `metadata.name` | `^[a-z][a-z0-9-]{0,62}$`: lowercase, digits and hyphens, starting with a letter |
+| `metadata.namespace` | `^[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}$`; defaults to `"default"`. `__system__` is reserved |
+| Rule `id` | `^[A-Za-z][A-Za-z0-9_-]{0,63}$`; unique within the policy |
+| `forEach` `as` | `^[A-Za-z][A-Za-z0-9_]*$` |
+
+`metadata` also takes `labels` and `annotations` (string maps) and any
+other fields you want to carry along.
+
+### Rule fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `id` | yes | Identifier, reported as `rule_id` |
+| `description` | yes | What the rule checks |
+| `severity` | yes | `critical`, `high`, `medium`, `low` or `info` |
+| `expr` | yes | The check |
+| `when` | no | The rule applies only when this holds ([above](#rule-applicability-when)) |
+| `priority` | no | 0–9999; lower is evaluated first under the `priority` orders |
+| `message` | no | Violation message template ([Messages](#messages)) |
+| `remediation` | no | How to fix a violation; returned with the result |
+| `url` | no | Documentation link |
+| `category` | no | A grouping such as `security`; used by the category filters below |
+| `tags` | no | A list of strings; used by the tag filters below |
+
+### `spec.evaluation`
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `order` | `priority` | `priority` (rules without a priority last), `severity` (critical first), `definition`, or `priority-then-severity`. Ties keep definition order |
+| `failFast` | `false` | Stop at this policy's first failing rule and evaluate no further policies for the request |
+| `timeout` | none | Deadline for the request, as a Go duration; the smallest among the matched policies applies. A policy that runs out of time denies |
+| `includeCategories` / `excludeCategories` | none | Evaluate only rules whose `category` is listed / skip rules whose `category` is listed |
+| `includeTags` / `excludeTags` | none | Evaluate only rules with at least one listed tag / skip rules with any listed tag |
+| `maxRules` | `0` | Evaluate at most this many rules of the policy, in evaluation order (`0` = unlimited) |
+
+The filters are part of the policy, not the request: a filtered-out rule is
+not evaluated and does not appear in the results.
+
+### `spec.enforcement`
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `action` | — | `deny`, `warn` or `audit` ([Enforcement Actions](#enforcement-actions)) |
+| `dryRun` | `false` | Report violations but lower this policy's `deny` to `warn` |
+| `exceptions` | none | Inputs the whole policy skips (below) |
+
+An exception skips the **whole policy** for inputs its `match` selector
+matches; the selector has the same fields as a target selector and must
+narrow something.
+
+| Exception field | Required | Description |
+|-----------------|----------|-------------|
+| `name` | yes | Identifier |
+| `reason` | yes | Why the exception exists |
+| `match` | yes | Resource selector: `kind`, `apiGroup`, `names`, `namespaces`, `labels`, `annotations` |
+| `expiry` | no | RFC3339 timestamp; after it the exception no longer applies |
+| `approvedBy` | no | List of approvers, for the record |
+| `ticket` | no | Issue tracker reference, for the record |
 
 ---
 

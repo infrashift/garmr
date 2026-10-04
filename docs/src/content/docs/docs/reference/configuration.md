@@ -8,7 +8,16 @@ sidebar:
 
 Garmr is configured via a YAML configuration file. Copy the example configuration to `config.yaml` and customize it for your environment.
 
-Every setting can also be provided as an environment variable with the `GARMR_` prefix, replacing dots with underscores — for example `GARMR_HTTP_ADDR`, `GARMR_POLICY_DIR`, `GARMR_AUDIT_ENABLED`, `GARMR_AUDIT_PATH`, `GARMR_LOG_LEVEL`.
+`garmr-server` reads the file named by `--config`. Without that flag it looks
+for `config.yaml` in `/etc/garmr`, then `$HOME/.garmr`, then the working
+directory, and starts on defaults if none exists.
+
+Settings resolve in this order, highest first: command-line flag,
+environment variable, config file, built-in default. Every setting can be
+provided as an environment variable with the `GARMR_` prefix, replacing dots
+with underscores — for example `GARMR_HTTP_ADDR`, `GARMR_POLICY_DIR`,
+`GARMR_AUDIT_ENABLED`, `GARMR_AUDIT_PATH`, `GARMR_LOG_LEVEL`. Each setting's
+flag is listed in [Command-Line Flags](#command-line-flags).
 
 ## Server Address
 
@@ -61,13 +70,15 @@ evaluation:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `evaluation.timeout` | `10s` | Max time for one `/v1/evaluate` or `/v1/validate`. For `/v1/validate` this **includes** time spent waiting for a validation slot. |
+| `evaluation.timeout` | `10s` | Max time for one `/v1/evaluate` request. For `/v1/validate` it bounds only the wait for a validation slot, not the compilation itself. |
 
-This is the only limit that actually stops work. `write_timeout` expires the
-connection without cancelling the handler, and a policy's own
-`spec.evaluation.timeout` is optional and unset by default — so without this,
-a request that had already lost its client went on running and holding
-its decoded input.
+For evaluation, this is the only limit that actually stops work.
+`write_timeout` expires the connection without cancelling the handler, and a
+policy's own `spec.evaluation.timeout` is optional and unset by default — so
+without this, a request that had already lost its client went on running and
+holding its decoded input. Validation is different: once a request holds a
+slot, compiling its source is not interruptible, which is why
+`max_validate_size` caps the source instead.
 
 Evaluations have no pool and no queue: every request runs immediately, in
 parallel, against the loaded policy set. A request whose budget expires
@@ -92,7 +103,12 @@ policy_dir: "/etc/garmr/policies"
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `policy_dir` | _(none)_ | Root directory for CUE policy files |
+| `policy_dir` | _(none)_ | Root directory for CUE policy files. Ignored when `storage.type` is set. |
+
+With neither `policy_dir` nor `storage.type` set, there is no policy
+source: the server starts with zero policies (so, under the default
+`require_match: true`, it denies every evaluation) and
+`POST /v1/policies/reload` returns `400 No policy source configured`.
 
 ## Transport Security
 
@@ -100,18 +116,38 @@ Garmr serves plain HTTP only — there are no TLS settings. Transport security, 
 
 ## Authentication
 
-Optional API-key authentication for the REST API. When `auth.api_key` is set, all requests (except health endpoints and `/metrics`) must present the key in the configured header or as `Authorization: Bearer <key>`.
+Optional API-key authentication for the REST API. When `auth.api_key` is set, every request must present the key in the configured header or as `Authorization: Bearer <key>`, except the probe endpoints (`/health`, `/ready`, `/healthz`, `/readyz`, `/livez`) and `/metrics`. `/health/deep` and `/openapi.json` are **not** exempt.
 
 ```yaml
 auth:
   api_key: ""              # empty = authentication disabled
   api_key_header: "X-API-Key"
+  identity_header: "X-Forwarded-Client-Cert"
 ```
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `auth.api_key` | _(empty — auth disabled)_ | API key clients must present |
 | `auth.api_key_header` | `X-API-Key` | Header name used to read the API key |
+| `auth.identity_header` | `X-Forwarded-Client-Cert` | Header carrying the mesh-verified caller identity (XFCC format). Its URI (SPIFFE ID) becomes the audit record's `principal` and the key for `rate_limit.client_identifier: identity`. Only trustworthy when a sidecar sets it. |
+
+## CORS
+
+```yaml
+cors:
+  allowed_origins: []   # empty = Access-Control-Allow-Origin: *
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `cors.allowed_origins` | _(empty)_ | Origins echoed back in `Access-Control-Allow-Origin`. Empty allows every origin (`*`); an entry of `*` allows any origin that sends an `Origin` header. |
+
+Every response carries `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS`
+and `Access-Control-Allow-Headers: Content-Type, Authorization, X-Request-Id, X-API-Key`.
+`OPTIONS` preflights are answered `200` before authentication runs, so they
+never need the API key. Browser clients using a custom `api_key_header` should
+send `Authorization: Bearer <key>` instead, since only `X-API-Key` is in the
+allowed-headers list.
 
 ## Logging
 
@@ -153,7 +189,16 @@ policy over opting out.
 
 ## Audit Logging
 
-When enabled, Garmr writes an audit log of all policy evaluation requests and their results. This is useful for compliance, debugging, and security monitoring.
+When enabled, Garmr writes one JSON record per audited operation: every
+evaluation decision (`decision`), every `/v1/validate` call (`validate`),
+every `DELETE /v1/policies` (`policy_delete`), and every reload, successful
+or not (`policy_reload`). Each record carries the request ID, source IP,
+mesh `principal` and trace ID; see the [REST API audit
+section](/garmr/docs/guides/rest-api/#audit-logging) for the record shape.
+Caller-controlled fields (request ID, user agent, principal, input kind and
+name, policy name and namespace) are truncated to 256 bytes with a
+`…[truncated]` marker, so one oversized header can't push a record past the
+size at which a pipe write stays atomic.
 
 ```yaml
 audit:
@@ -167,6 +212,11 @@ audit:
 | `audit.path` | `/var/log/garmr/audit.log` | File path for the audit log, or the literal `stdout`/`stderr` to stream records for platform-shipped logging |
 | `audit.max_size` / `max_backups` / `max_age` | `100` MB / `10` / `30` days | Rotation (file mode only) |
 
+In file mode the server creates the parent directory at startup and refuses
+to start if it can't. The default `/var/log/garmr` is usually not writable by
+a non-root user, so for local runs either point `audit.path` somewhere
+writable, use `stdout`, or set `audit.enabled: false`.
+
 **In a mesh deployment, prefer `audit.path: stdout`.** The audit trail is
 the only record of the mesh-verified `principal`, and a file on local disk
 dies with the allocation. Streaming to stdout hands shipping to the
@@ -176,8 +226,8 @@ logs go to stderr, so the streams stay separable.
 
 ## Storage Backend
 
-Garmr reads policies from disk. The filesystem backend is selected
-automatically by `policy_dir`, or configured explicitly:
+Garmr reads policies from disk. Setting `policy_dir` alone selects the
+filesystem backend rooted there; `storage` configures it explicitly:
 
 ```yaml
 storage:
@@ -187,11 +237,13 @@ storage:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `storage.type` | `filesystem` | Backend type (the only implemented backend) |
-| `storage.root` | _(from policy_dir)_ | Root directory |
+| `storage.type` | _(empty)_ | Backend type. `filesystem` is the only implemented backend. When set, `policy_dir` is ignored. |
+| `storage.root` | `/policies` | Root directory. Applies only when `storage.type` is set — it does **not** fall back to `policy_dir`. |
 
-A misconfigured storage backend is fatal at startup: the server refuses to
-start rather than silently running without policies.
+A misconfigured storage backend (unknown type, missing root directory, a
+policy set that fails to load) is fatal at startup: the server refuses to
+start rather than silently running without policies. Configuring no source
+at all is not an error; see [Policy Configuration](#policy-configuration).
 
 To serve policies from object storage, sync them onto the pod first — an init
 container running `mc mirror` / `aws s3 sync`, or a CSI volume — and point
@@ -238,9 +290,27 @@ callers it is spoofable, which would let them mint fresh buckets at will.
 When the header is absent, `identity` mode falls back to the client IP,
 which fails safe (a shared bucket) rather than open.
 
+On Consul, Envoy only injects XFCC when the service's protocol is `http`.
+Without a `service-defaults` entry setting `Protocol = "http"` the header
+never arrives, every caller shares the sidecar's bucket, and the audit log has
+no principal (see `deploy/nomad/garmr-service-defaults.hcl`).
+
+Other behavior worth knowing:
+
+- An unrecognized `client_identifier` is fatal at startup rather than
+  silently falling back to `ip`.
+- Probe endpoints (`/health`, `/ready`, `/healthz`, `/readyz`, `/livez`) and
+  `/metrics` are never rate limited: a `429` on a probe reads as an unhealthy
+  instance and gets it pulled from the mesh.
+- Rejected requests get `429` and increment
+  `garmr_rate_limit_hits_total`.
+
 ## Development Mode
 
-Enable development mode for colored console output and relaxed security settings. This should never be enabled in production.
+Development mode switches the application logger to zap's development
+configuration (human-readable, colored levels). It changes nothing else — no
+security setting is relaxed — but its output is meant for terminals, not log
+pipelines.
 
 ```yaml
 # dev: true
@@ -266,6 +336,7 @@ shutdown_timeout: "30s"
 
 # HTTP limits (defaults shown; reconcile timeouts with the sidecar proxy)
 # max_recv_size: 16777216
+# max_validate_size: 1048576
 # read_timeout: "30s"
 # write_timeout: "60s"
 # idle_timeout: "120s"
@@ -287,6 +358,7 @@ shutdown_timeout: "30s"
 #   burst: 200
 #   per_client: true
 #   client_identifier: "ip"   # ip | header | identity
+#   header_name: "X-Client-ID"
 #   client_rps: 1000
 #   client_burst: 100
 #   max_clients: 10000
@@ -297,11 +369,12 @@ log:
   level: "info"
   format: "json"
 
-# Evaluation posture
+# Evaluation posture and budget
 evaluation:
   require_match: true
+  timeout: "10s"
 
-# Audit logging
+# Audit logging ("stdout" / "stderr" stream records instead of a file)
 audit:
   enabled: true
   path: "/var/log/garmr/audit.log"
@@ -309,7 +382,7 @@ audit:
   # max_backups: 10
   # max_age: 30        # days
 
-# Storage backend configuration
+# Storage backend configuration (when set, policy_dir is ignored)
 # storage:
 #   type: "filesystem"
 #   root: "/etc/garmr/policies"
@@ -317,3 +390,59 @@ audit:
 # Development mode (optional)
 # dev: true
 ```
+
+## Command-Line Flags
+
+Every `garmr-server` flag maps to a configuration key, and a flag that is
+passed overrides both the environment variable and the config file.
+
+| Flag | Config key | Default |
+|------|------------|---------|
+| `--config` | — | _(search path above)_ |
+| `--http-addr` | `http_addr` | `:8080` |
+| `--policy-dir` | `policy_dir` | _(none)_ |
+| `--storage-type` | `storage.type` | _(empty)_ |
+| `--storage-root` | `storage.root` | _(empty → `/policies`)_ |
+| `--log-level` | `log.level` | `info` |
+| `--log-format` | `log.format` | `json` |
+| `--dev` | `dev` | `false` |
+| `--shutdown-timeout` | `shutdown_timeout` | `30s` |
+| `--max-recv-size` | `max_recv_size` | `16777216` |
+| `--max-validate-size` | `max_validate_size` | `1048576` |
+| `--read-timeout` | `read_timeout` | `30s` |
+| `--write-timeout` | `write_timeout` | `60s` |
+| `--idle-timeout` | `idle_timeout` | `120s` |
+| `--evaluation-timeout` | `evaluation.timeout` | `10s` |
+| `--require-match` | `evaluation.require_match` | `true` |
+| `--audit` | `audit.enabled` | `true` |
+| `--audit-path` | `audit.path` | `/var/log/garmr/audit.log` |
+| `--audit-max-size` | `audit.max_size` | `100` (MB) |
+| `--audit-max-backups` | `audit.max_backups` | `10` |
+| `--audit-max-age` | `audit.max_age` | `30` (days) |
+| `--api-key` | `auth.api_key` | _(empty)_ |
+| `--api-key-header` | `auth.api_key_header` | `X-API-Key` |
+| `--identity-header` | `auth.identity_header` | `X-Forwarded-Client-Cert` |
+| `--cors-origins` | `cors.allowed_origins` | _(empty)_ |
+| `--rate-limit` | `rate_limit.enabled` | `false` |
+| `--rate-limit-rps` | `rate_limit.rps` | `100` |
+| `--rate-limit-burst` | `rate_limit.burst` | `200` |
+| `--rate-limit-per-client` | `rate_limit.per_client` | `true` |
+| `--rate-limit-identifier` | `rate_limit.client_identifier` | `ip` |
+| `--rate-limit-header` | `rate_limit.header_name` | `X-Client-ID` |
+| `--rate-limit-client-rps` | `rate_limit.client_rps` | `1000` |
+| `--rate-limit-client-burst` | `rate_limit.client_burst` | `100` |
+| `--rate-limit-max-clients` | `rate_limit.max_clients` | `10000` |
+| `--rate-limit-trusted-proxies` | `rate_limit.trusted_proxies` | _(none)_ |
+
+Boolean flags take `--flag=false` to turn off (`--audit=false`,
+`--require-match=false`). List flags take comma-separated values
+(`--cors-origins https://a.example,https://b.example`).
+
+## Tracing
+
+OpenTelemetry tracing is configured only through the standard OTel
+environment variables, not the config file. It stays off unless
+`OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) is set.
+`OTEL_EXPORTER_OTLP_PROTOCOL` selects `grpc` (default) or `http/protobuf`, and
+`OTEL_SERVICE_NAME` overrides the default service name `garmr-server`. The
+trace ID of each request is recorded in its audit record as `trace_id`.

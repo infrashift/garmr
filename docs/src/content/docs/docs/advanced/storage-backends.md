@@ -35,9 +35,13 @@ storage:
 
 | Setting | Env var | Default | Description |
 |---------|---------|---------|-------------|
-| `storage.type` | `GARMR_STORAGE_TYPE` | `filesystem` | Backend type |
-| `storage.root` | `GARMR_STORAGE_ROOT` | — | Root directory |
-| `policy_dir` | `GARMR_POLICY_DIR` | — | Shorthand: selects the filesystem backend rooted here |
+| `storage.type` | `GARMR_STORAGE_TYPE` | _(empty)_ | Backend type; `filesystem` is the only one |
+| `storage.root` | `GARMR_STORAGE_ROOT` | `/policies` | Root directory, used only when `storage.type` is set |
+| `policy_dir` | `GARMR_POLICY_DIR` | — | Shorthand: selects the filesystem backend rooted here. Ignored when `storage.type` is set. |
+
+Use one form or the other. Once `storage.type` is set, `policy_dir` is not
+consulted at all: the root is `storage.root`, and if that is empty it is
+`/policies` — not `policy_dir`.
 
 The backend's include/exclude patterns (`**/*.cue`, minus `**/*_test.cue`
 and `**/testdata/**`) apply to its `List` operation — which serves the
@@ -46,10 +50,16 @@ the filesystem backend: the engine's CUE loader reads the directory tree
 directly, and `*_test.cue` fixtures are skipped because CUE's package
 loading excludes test files, not because of these patterns.
 
-A backend that cannot be initialised, or a policy set that cannot be loaded,
-**fails startup**. Running with zero policies is not a safe default: under
-`require_match` (the default) it denies everything, and without it, allows
-everything.
+A backend that cannot be initialised (an unknown type, a root directory that
+doesn't exist), or a policy set that cannot be loaded, **fails startup**.
+Running with zero policies is not a safe default: under `require_match` (the
+default) it denies everything, and without it, allows everything.
+
+The one exception is configuring **no source at all** — neither `policy_dir`
+nor `storage.type`. That is not treated as an error: the server starts with
+zero policies (denying every evaluation under `require_match`), `/readyz`
+reports not-ready, and `POST /v1/policies/reload` returns `400 No policy
+source configured`.
 
 ## The Backend interface
 
@@ -128,6 +138,24 @@ curl -X POST http://localhost:8080/v1/policies/reload
 The reload compiles a complete new policy set and swaps it in atomically, so
 in-flight evaluations finish against the old set and never observe a partial
 one. If the new set fails to compile, the old one stays live.
+
+A reload call reaches **one** instance. With several instances behind a
+Service or mesh upstream, reload all of them and verify they converged on the
+checkout's digest:
+
+```bash
+garmr policy reload \
+  --servers http://10.0.0.11:8080,http://10.0.0.12:8080 \
+  --expect-digest "$(garmr policy digest policies/)"
+
+# Only one load-balancing address? Repeat until N instances acknowledge:
+garmr policy reload --converge --instances 2 \
+  --expect-digest "$(garmr policy digest policies/)"
+```
+
+See [`garmr policy reload`](/garmr/docs/guides/cli/#garmr-policy-reload) and,
+for Nomad, the in-mesh reload job in
+[Deploying Garmr](/garmr/docs/operations/deploying/#updating-policies).
 
 In Kubernetes you generally do not need to call it: the Helm chart stamps a
 `checksum/config` annotation onto the Deployment, so changing the ConfigMap

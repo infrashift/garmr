@@ -110,15 +110,15 @@ job "garmr" {
       }
 
       env {
-        # Bounds the evaluation replica count: the engine builds
-        # K = min(GOMAXPROCS, 8) CUE contexts, each holding a full compiled
-        # copy of the policy set, and a reload holds the old and new sets at
-        # once (up to 2K copies at peak).
+        # Bounds CPU parallelism. Evaluations run lock-free against one
+        # immutable policy snapshot, so GOMAXPROCS no longer multiplies
+        # memory; it caps how many evaluations (and GC workers) run at once.
         #
         # This must be set explicitly. Nomad's docker driver applies CPU
-        # *shares*, not a cpuset, so GOMAXPROCS defaults to the host's core
-        # count — on a 16-core client that is 8 compiled copies against the
-        # memory cap below, sized for far fewer.
+        # *shares*, not a cpuset or quota, so GOMAXPROCS otherwise defaults
+        # to the host's core count — on a 16-core client the runtime sizes
+        # its scheduler and GC for 16 cores against the `cpu` reservation
+        # below.
         GOMAXPROCS = "2"
       }
 
@@ -132,10 +132,12 @@ job "garmr" {
 
       resources {
         cpu = 500
-        # Sized for GOMAXPROCS=2 (2 compiled policy-set copies, 4 at reload
-        # peak) plus request buffers. Raise this together with GOMAXPROCS or
-        # with a substantially larger policy tree — the failure mode is an
-        # OOM kill during reload, not a graceful error.
+        # Sized for one compiled policy snapshot, two at reload peak (the
+        # old set stays live until in-flight evaluations release it, while
+        # CUE loads and compiles the new one), plus request buffers for
+        # GOMAXPROCS=2 worth of concurrent work. Raise this with a
+        # substantially larger policy tree or a higher GOMAXPROCS — the
+        # failure mode is an OOM kill during reload, not a graceful error.
         memory = 512
       }
     }

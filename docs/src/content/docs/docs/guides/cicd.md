@@ -29,11 +29,19 @@ garmr eval --input deployment.json
 
 # Exit codes:
 # 0 = ALLOW or WARN (nothing blocked the evaluation)
-# 1 = DENY (a deny-enforced policy failed)
+# 1 = DENY (a deny-enforced policy failed) -- OR the command failed:
+#     server unreachable, an HTTP error, unreadable input
 #
 # If you need warnings to gate CI, set enforcement.action to "deny"
 # in the policy — the decision belongs in code review, not a CLI flag.
 ```
+
+Exit code `1` fails the job either way, which is the safe outcome. When a
+pipeline needs to tell a deny from an outage — to print violations, or to
+retry only outages — use `-o json` and read `.decision`: a deny always prints
+a decision, while a failed call prints its error on stderr and nothing on
+stdout. Every example below treats a missing decision as a failure, never as
+a pass.
 
 ### Request ID for Audit Correlation
 
@@ -50,10 +58,11 @@ garmr eval --input deployment.json --request-id "${CI_JOB_ID}"
 # Machine-readable output
 garmr eval --input deployment.json -o json
 
-# Parse with jq
-RESULT=$(garmr eval --input deployment.json -o json)
-DECISION=$(echo "$RESULT" | jq -r '.decision')
-VIOLATIONS=$(echo "$RESULT" | jq -r '.results | length')
+# Parse with jq (|| true: a deny exits 1 but still prints the JSON)
+RESULT=$(garmr eval --input deployment.json -o json) || true
+DECISION=$(echo "$RESULT" | jq -r '.decision // empty')
+[ -n "$DECISION" ] || { echo "evaluation failed: no decision"; exit 2; }
+VIOLATIONS=$(echo "$RESULT" | jq '[.results[] | select(.passed == false)] | length')
 ```
 
 ### Namespace Filtering
@@ -100,11 +109,18 @@ jobs:
         run: |
           for file in k8s/*.yaml; do
             echo "Checking $file..."
+            # A deny exits 1 but still writes the JSON; read the decision
             garmr eval --input "$file" \
               --request-id "gh-${{ github.run_id }}-${{ github.run_attempt }}" \
-              -o json | tee result.json
+              -o json > result.json || true
+            cat result.json
 
-            if [ "$(jq -r '.decision' result.json)" = "deny" ]; then
+            decision=$(jq -r '.decision // empty' result.json)
+            if [ -z "$decision" ]; then
+              echo "::error::Policy evaluation failed for $file (no decision)"
+              exit 2
+            fi
+            if [ "$decision" = "deny" ]; then
               echo "::error::Policy violation in $file"
               jq -r '.results[] | select(.passed == false) | "- \(.rule_id): \(.message)"' result.json
               exit 1
@@ -128,29 +144,22 @@ stages:
 
 policy-check:
   stage: validate
-  image: infrashift/garmr:latest
+  # The published image's entrypoint is garmr-server; clear it so GitLab can
+  # run the script. The image is Alpine without jq, so this job gates on the
+  # exit code: 1 means a deny or a failed call, and both should fail the job.
+  image:
+    name: ghcr.io/infrashift/garmr:latest
+    entrypoint: [""]
   script:
     - |
+      status=0
       for file in k8s/*.yaml; do
         echo "Evaluating $file..."
         garmr eval --input "$file" \
           --request-id "gl-${CI_PIPELINE_ID}-${CI_JOB_ID}" \
-          --server "${GARMR_SERVER_URL}" \
-          -o json > result.json
-
-        DECISION=$(jq -r '.decision' result.json)
-        if [ "$DECISION" = "deny" ]; then
-          echo "Policy violations found:"
-          jq -r '.results[] | select(.passed == false) | "\(.severity): \(.rule_id) - \(.message)"' result.json
-          exit 1
-        fi
+          --server "${GARMR_SERVER_URL}" || status=1
       done
-  artifacts:
-    reports:
-      dotenv: policy-results.env
-    paths:
-      - result.json
-    when: always
+      exit $status
 
 deploy:
   stage: deploy
@@ -180,17 +189,20 @@ pipeline {
                     files.each { file ->
                         echo "Evaluating ${file.name}..."
 
-                        def result = sh(
-                            script: """
-                                garmr eval --input ${file.path} \
-                                    --request-id "${REQUEST_ID}" \
-                                    --server "${GARMR_SERVER}" \
-                                    -o json
-                            """,
-                            returnStdout: true
-                        ).trim()
+                        // A deny exits 1 but still writes the JSON, so don't
+                        // let sh() throw; a failed call writes nothing.
+                        sh """
+                            garmr eval --input ${file.path} \
+                                --request-id "${REQUEST_ID}" \
+                                --server "${GARMR_SERVER}" \
+                                -o json > result.json || true
+                        """
 
-                        def json = readJSON(text: result)
+                        def text = readFile('result.json').trim()
+                        if (!text) {
+                            error("Policy evaluation failed for ${file.name} (no decision)")
+                        }
+                        def json = readJSON(text: text)
 
                         if (json.decision == 'deny') {
                             failed = true
@@ -270,9 +282,14 @@ stages:
                   garmr eval --input "$file" \
                     --request-id "$REQUEST_ID" \
                     --server "$(GARMR_SERVER)" \
-                    -o json | tee result.json
+                    -o json > result.json || true
+                  cat result.json
 
-                  DECISION=$(jq -r '.decision' result.json)
+                  DECISION=$(jq -r '.decision // empty' result.json)
+                  if [ -z "$DECISION" ]; then
+                    echo "##vso[task.logissue type=error]Policy evaluation failed for $file"
+                    exit 2
+                  fi
                   if [ "$DECISION" = "deny" ]; then
                     echo "##vso[task.logissue type=error]Policy violation in $file"
                     jq -r '.results[] | select(.passed == false) | "##vso[task.logissue type=error]\(.rule_id): \(.message)"' result.json
@@ -315,9 +332,15 @@ jobs:
               garmr eval --input "$file" \
                 --request-id "$REQUEST_ID" \
                 --server "${GARMR_SERVER_URL}" \
-                -o json | tee result.json
+                -o json > result.json || true
+              cat result.json
 
-              if [ "$(jq -r '.decision' result.json)" = "deny" ]; then
+              decision=$(jq -r '.decision // empty' result.json)
+              if [ -z "$decision" ]; then
+                echo "Policy evaluation failed for $file (no decision)"
+                exit 2
+              fi
+              if [ "$decision" = "deny" ]; then
                 echo "Policy violations in $file:"
                 jq -r '.results[] | select(.passed == false) | "  \(.severity) \(.rule_id): \(.message)"' result.json
                 exit 1
@@ -371,6 +394,9 @@ EOF
 
 ### Response Format
 
+An abridged response (the [REST API reference](/garmr/docs/guides/rest-api/#post-v1evaluate)
+documents every field, including `summary` and `evaluation_mode`):
+
 ```json
 {
   "decision": "deny",
@@ -380,19 +406,24 @@ EOF
       "policy_name": "container-security",
       "policy_namespace": "security",
       "rule_id": "SEC-001",
-      "description": "Containers must not run as root",
-      "severity": "high",
+      "description": "Containers must assert runAsNonRoot",
+      "severity": "critical",
       "passed": false,
-      "message": "Container is running as root"
+      "message": "containers must set securityContext.runAsNonRoot: true",
+      "remediation": "Set securityContext.runAsNonRoot: true and specify a non-root runAsUser"
     }
   ],
+  "summary": {"total_rules": 6, "passed": 5, "failed": 1, "skipped": 0},
   "metrics": {
-    "evaluation_time_ns": 1234567,
-    "policies_evaluated": 2,
-    "rules_evaluated": 8
+    "evaluation_time_ns": 59524,
+    "policies_evaluated": 1,
+    "rules_evaluated": 6
   }
 }
 ```
+
+Only `200` responses carry a decision. Treat any other status — or a body
+without `decision` — as a failed evaluation, never as a pass.
 
 ### Python Example
 
@@ -491,8 +522,17 @@ func evaluate(server, requestID string, input map[string]interface{}) (*Evaluate
     }
     defer resp.Body.Close()
 
+    // Anything but 200 is a failed evaluation, not an empty (passing) one.
+    if resp.StatusCode != http.StatusOK {
+        return nil, fmt.Errorf("garmr returned %s", resp.Status)
+    }
     var result EvaluateResponse
-    json.NewDecoder(resp.Body).Decode(&result)
+    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+        return nil, err
+    }
+    if result.Decision == "" {
+        return nil, fmt.Errorf("garmr response carried no decision")
+    }
     return &result, nil
 }
 
@@ -534,13 +574,14 @@ func main() {
 ### Workflow Overview
 
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│  Policy Repo    │────▶│   CI Pipeline   │────▶│  Garmr Server   │
-│  (Git)          │     │  (Validate)     │     │  (Hot Reload)   │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
+┌─────────────────┐     ┌─────────────────┐     ┌──────────────────┐
+│  Policy Repo    │────▶│   CI Pipeline   │────▶│  Garmr Instances │
+│  (Git)          │     │  (Validate)     │     │  (Reload + verify│
+│                 │     │                 │     │   digest)        │
+└─────────────────┘     └─────────────────┘     └──────────────────┘
         │                       │                       │
-        │  1. PR with           │  2. Validate          │  3. Deploy
-        │     policy change     │     policies          │     & reload
+        │  1. PR with           │  2. Validate,         │  3. Deploy, reload
+        │     policy change     │     test, digest      │     every instance
         ▼                       ▼                       ▼
 ```
 
@@ -590,8 +631,17 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.digest.outputs.value }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Garmr CLI
+        run: |
+          docker create --name garmr-cli ghcr.io/infrashift/garmr:latest
+          docker cp garmr-cli:/usr/local/bin/garmr ./garmr
+          docker rm garmr-cli
+          sudo mv garmr /usr/local/bin/
 
       - name: Validate lock files
         run: garmr policy validate-lock policies/
@@ -615,24 +665,44 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Garmr CLI
+        run: |
+          docker create --name garmr-cli ghcr.io/infrashift/garmr:latest
+          docker cp garmr-cli:/usr/local/bin/garmr ./garmr
+          docker rm garmr-cli
+          sudo mv garmr /usr/local/bin/
+
       # Land the files on the volume the server's --policy-dir points at.
       # How depends on your platform: a Nomad artifact stanza fetching the
       # git ref, an init container syncing object storage, a CSI/host
-      # volume writer, or a ConfigMap rollout on Kubernetes. Then either
-      # restart the instances (each loads at startup and fails closed on a
-      # bad set) or call the reload endpoint per instance:
-      - name: Trigger reload
-        run: |
-          curl -fsS -X POST https://${{ secrets.GARMR_SERVER }}/v1/policies/reload
-          # Reload fails closed: a broken or empty policy tree returns 500
-          # and the previously loaded set keeps serving.
+      # volume writer, or a ConfigMap rollout on Kubernetes.
 
-      - name: Verify convergence
+      # Then reload EVERY instance and require the digest CI computed. One
+      # POST /v1/policies/reload reaches one instance only; behind a load
+      # balancer it would pass while the rest of the fleet stays stale.
+      # The command exits 1 if any instance fails to reload (a broken tree
+      # returns 500 and keeps the old set serving), reports a different
+      # digest, or the instances diverge.
+      - name: Reload and verify convergence
+        env:
+          # Comma-separated instance URLs, e.g.
+          # http://10.0.0.11:8080,http://10.0.0.12:8080
+          GARMR_INSTANCES: ${{ vars.GARMR_INSTANCES }}
         run: |
-          EXPECTED=$(garmr policy digest policies/)
-          ACTUAL=$(curl -s https://${{ secrets.GARMR_SERVER }}/v1/policies | jq -r '.digest')
-          test "$EXPECTED" = "$ACTUAL" || { echo "server did not converge on the shipped policies"; exit 1; }
+          garmr policy reload \
+            --servers "$GARMR_INSTANCES" \
+            --expect-digest "${{ needs.validate.outputs.digest }}"
 ```
+
+If the instances sit behind a single load-balancing address you can't
+bypass (a mesh upstream), use
+`garmr policy reload --server <addr> --converge --instances <N> --expect-digest <digest>`
+instead, run from somewhere that can reach that address. On Nomad with
+Consul Connect, CI dispatches the in-mesh reload job, which does exactly
+this: `nomad job dispatch -meta digest="$DIGEST" garmr-reload` (see
+[Deploying Garmr](/garmr/docs/operations/deploying/#updating-policies)).
+Restarting or rolling the instances also works: each one loads at startup
+and fails closed on a bad set.
 
 ### Rollback Strategy
 
@@ -666,39 +736,55 @@ Use consistent, meaningful request IDs:
 
 ### Error Handling
 
+`garmr eval` exits `1` for a deny and for a failed call alike. Tell them
+apart by whether a decision came back — keep stdout and stderr separate so
+an error message never lands in the JSON:
+
 ```bash
-# Capture both stdout and exit code
 set +e
-RESULT=$(garmr eval --input resource.json -o json 2>&1)
-EXIT_CODE=$?
+RESULT=$(garmr eval --input resource.json -o json 2>eval.err)
 set -e
 
-if [ $EXIT_CODE -eq 1 ]; then
+DECISION=$(echo "$RESULT" | jq -r '.decision // empty' 2>/dev/null)
+case "$DECISION" in
+  allow|warn)
+    echo "Policy check passed ($DECISION)" ;;
+  deny)
     echo "Policy violation detected"
     echo "$RESULT" | jq '.results[] | select(.passed == false)'
-    # Optionally fail or continue based on severity
-fi
+    exit 1 ;;
+  *)
+    echo "Policy evaluation failed:"; cat eval.err
+    exit 2 ;;
+esac
 ```
 
 ### Retry Logic
+
+Retry only failed calls. A deny is a verdict, and evaluating the same input
+again returns the same deny:
 
 ```bash
 MAX_RETRIES=3
 RETRY_DELAY=5
 
 for i in $(seq 1 $MAX_RETRIES); do
-    if garmr eval --input resource.json -o json; then
-        break
+    RESULT=$(garmr eval --input resource.json -o json) || true
+    DECISION=$(echo "$RESULT" | jq -r '.decision // empty' 2>/dev/null)
+    if [ -n "$DECISION" ]; then
+        break   # got a verdict (allow, warn, or deny): stop retrying
     fi
 
     if [ $i -eq $MAX_RETRIES ]; then
-        echo "Failed after $MAX_RETRIES attempts"
-        exit 1
+        echo "Evaluation failed after $MAX_RETRIES attempts"
+        exit 2
     fi
 
     echo "Retry $i/$MAX_RETRIES in ${RETRY_DELAY}s..."
     sleep $RETRY_DELAY
 done
+
+[ "$DECISION" != "deny" ] || { echo "Policy violation"; exit 1; }
 ```
 
 ---
@@ -733,6 +819,21 @@ curl -v -X POST http://garmr-server:8080/v1/evaluate \
   -H "Content-Type: application/json" \
   -d '{"input": {}}'
 
-# Check audit log
+# Check audit log (file mode; with audit.path: stdout, search the platform's
+# log pipeline instead, e.g. `nomad alloc logs <alloc>`)
 tail -f /var/log/garmr/audit.log | jq 'select(.request_id == "test-123")'
 ```
+
+**Reload succeeded but a server still serves old policies**
+
+A reload call reaches one instance. Compare each instance's digest with the
+checkout's:
+
+```bash
+garmr policy digest policies/
+for s in http://10.0.0.11:8080 http://10.0.0.12:8080; do
+  curl -s "$s/v1/policies" | jq -r '"\(.instance_id) \(.digest)"'
+done
+```
+
+Then reload them all with `garmr policy reload --servers ... --expect-digest ...`.

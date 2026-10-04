@@ -14,9 +14,10 @@ var (
 	ErrInvalidInput   = errors.New("invalid input")
 
 	// ErrEvaluationUnavailable means the evaluation never started: the
-	// caller's context ended while queueing for a replica. It is
-	// backpressure, not a failed decision — callers should surface it as
-	// "retry later" (503), never as a policy outcome.
+	// caller's context had already ended (deadline passed or client gone)
+	// when Evaluate was called. It is backpressure, not a failed decision —
+	// callers should surface it as "retry later" (503), never as a policy
+	// outcome.
 	ErrEvaluationUnavailable = errors.New("evaluation unavailable")
 )
 

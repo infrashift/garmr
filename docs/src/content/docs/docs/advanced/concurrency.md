@@ -83,7 +83,7 @@ Patterns written as literals in a policy are compiled at load. Patterns known on
 
 ## Performance Characteristics
 
-The engine benchmarks (`internal/engine/bench_test.go`) run the same scenarios as an OPA v1.21.1 `rego.PreparedEvalQuery` harness in `scripts/bench-opa`. Both are in-process, with the policy compiled up front. Measured on an i7-9700K:
+The engine benchmarks (`internal/engine/bench_test.go`, plus `BenchmarkForEach_LargeInput` in `internal/engine/expr_test.go` for the `forEach` row) run the same scenarios as an OPA v1.21.1 `rego.PreparedEvalQuery` harness in `scripts/bench-opa`. Both are in-process, with the policy compiled up front. Measured on an i7-9700K:
 
 | Scenario | Garmr | OPA |
 |----------|-------|-----|

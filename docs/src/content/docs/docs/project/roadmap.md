@@ -12,10 +12,11 @@ This document describes what Garmr can do today and where it's headed.
 
 ### Core Engine
 
-- CUE-based policy engine with 20+ condition operators and built-in functions
-- Three-outcome decisions: pass, fail, warn
-- Fail-fast evaluation, category/tag filtering, exception handling
-- Timeout enforcement and dry-run mode
+- Policies written in CUE, with 20+ condition operators and 30+ built-in functions
+- Three decisions: `allow`, `deny`, `warn`; each rule passes, fails, or fails with an evaluation error (an error never turns into a pass under `not` or `any`)
+- Fail-fast evaluation, per-policy category/tag filtering and `maxRules`, policy-level exceptions with expiry
+- Evaluation deadline (checked on every `forEach` element) and dry-run mode
+- Load-time rejection of anything that would otherwise fail silently: unknown or multiple operators per expression, uncompilable regexes/semvers/datetimes, duplicate rule ids, duplicate `namespace/name`, exceptions that match everything
 - Policies compiled once at load (CUE is used only at load) into Go evaluation trees; evaluation is lock-free and fully parallel against an immutable policy snapshot
 - Regexes, semver/datetime literals, and literal sets precompiled at load; bounded LRU cache for runtime regex patterns
 
@@ -29,6 +30,10 @@ This document describes what Garmr can do today and where it's headed.
 - **Set:** `in`, `notIn`
 - **Lists:** `containsAll`, `containsAny`, `subsetOf`, `unique`, `uniqueBy`, `sorted`
 - **Advanced:** `length`, `semver`, `datetime`
+- **Rule applicability:** rule `when`; `forEach` `where` filters and `count` ("at most one container may…")
+- **Paths:** `[N]` indexes, `[*]` projections (`spec.containers[*].cpu`), quoted keys
+- **Cross-field:** `compare` with equality, ordering, membership, string, `subsetOf`, semver and datetime operators; joins via nested `forEach`
+- **Messages:** templates naming the failing element (`container {{c.name}} …`) and the value checked (`{{.count}}`, `{{.length}}`)
 
 ### Built-in Functions (30+)
 
@@ -60,7 +65,7 @@ This document describes what Garmr can do today and where it's headed.
 - API key authentication
 - Service-mesh caller identity: SPIFFE URI parsed from `X-Forwarded-Client-Cert` (XFCC) and recorded as `principal` on every audit entry
 - Configurable CORS
-- Rate limiting (per-second + burst)
+- Rate limiting: global and per-client buckets (per-second + burst), keyed on the mesh identity, client IP, or a header; probes and `/metrics` exempt
 - Request body size limits
 - Panic recovery middleware (returns 500 + structured log instead of dropping the connection)
 
@@ -68,7 +73,8 @@ This document describes what Garmr can do today and where it's headed.
 
 - Target-based policy filtering (kind, apiGroup, names, labels, annotations, namespaces)
 - Namespace-based policy organization
-- Explicit policy reload via `POST /v1/policies/reload`
+- Explicit, atomic, fail-closed policy reload via `POST /v1/policies/reload`
+- Fleet reload with `garmr policy reload --servers … --expect-digest …`, which fails unless every instance converges on the expected policy-set digest
 - Lock file support for GitOps workflows
 
 ### Storage Backends
@@ -78,8 +84,9 @@ This document describes what Garmr can do today and where it's headed.
 
 ### Observability
 
-- JSON audit logging with request correlation, file rotation, and SPIFFE
-  `principal` + W3C `trace_id` on every entry
+- JSON audit logging to a rotated file or to stdout/stderr (for the
+  platform's log pipeline), with request correlation and SPIFFE `principal`
+  + W3C `trace_id` on every entry
 - Prometheus metrics endpoint (evaluations, latency histograms, violations,
   policies loaded, reloads, rate limits, recovered panics, Go runtime) served from `/metrics`
 - OpenTelemetry tracing via `otelhttp`:
@@ -121,6 +128,25 @@ This document describes what Garmr can do today and where it's headed.
 
 ---
 
+### Policy Language (deferred OPA parity)
+
+Reviewed 2026-10-03 and recorded in `TODO.md`; deliberately not done yet:
+
+- **Per-rule exceptions and actions** -- exempt specific rules from an
+  exception, and override `enforcement.action` per rule (one policy cannot
+  mix deny and warn today)
+- **`spec.inputSchema`** -- a CUE definition the input must satisfy,
+  reported as a distinct invalid-input verdict
+- **More builtins** -- x509 parsing, `jwt.decode`, `sha256`, `glob.match`,
+  `replace`, JSON/YAML parse
+- **Tooling** -- rule coverage in `garmr test`, a `garmr bench` wrapper
+- **Embedding** -- a small public `pkg/garmr` (`Compile`, `Evaluate`)
+
+Not pursued: runtime external data (`http.send`), bundle signing, partial
+evaluation, WASM, Envoy ext_authz.
+
+---
+
 ### Policy Development
 
 **Policy Linting**
@@ -139,9 +165,9 @@ This document describes what Garmr can do today and where it's headed.
 ### Performance Optimizations
 
 **Parallel Rule Evaluation**
-- Concurrent rule evaluation within a policy
-- Worker pool management
-- Context cancellation support
+- Concurrent rule evaluation within a policy (requests already evaluate fully
+  in parallel against a lock-free snapshot, and evaluation is cancelled at
+  its deadline)
 
 **Result Caching**
 - LRU result cache with TTL

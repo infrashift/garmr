@@ -322,8 +322,7 @@ func TestEvaluate_ForEach(t *testing.T) {
 
 // TestEvaluate_ForEach_AliasCollision covers inputs that already carry a
 // top-level field with the same name as the forEach alias: the element
-// binding must shadow the input's own field (the FillPath fast path cannot
-// do this, so this exercises the rebuild fallback).
+// binding must shadow the input's own field.
 func TestEvaluate_ForEach_AliasCollision(t *testing.T) {
 	source := makePolicy("foreach-collision", "default", "alias collision",
 		`{
@@ -417,10 +416,12 @@ func TestEvaluate_ForEach_Nested(t *testing.T) {
 	}
 }
 
-// BenchmarkForEach_LargeInput measures forEach cost on a large input. The
-// "fastpath" case grafts elements via FillPath; the "fallback" case forces
-// the decode/re-encode rebuild (the pre-optimization behavior) via an alias
-// collision, so the two cases directly compare the old and new paths.
+// BenchmarkForEach_LargeInput measures forEach cost on a large input (200
+// padding objects, 50 iterated elements). Both cases bind each element to the
+// alias in a scope frame. "fallback" adds a top-level input key with the
+// alias's name; the alias shadows it, so the two cases should cost the same.
+// (The names date from the CUE evaluator, where the collision forced a slow
+// rebuild of the input.)
 func BenchmarkForEach_LargeInput(b *testing.B) {
 	source := makePolicy("foreach-bench", "default", "bench",
 		`{

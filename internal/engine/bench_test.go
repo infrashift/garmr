@@ -79,7 +79,8 @@ func BenchmarkEvaluate_Simple(b *testing.B) {
 }
 
 // BenchmarkEvaluate_SimpleParallel shows how evaluation throughput scales with
-// cores. With a bounded replica pool it flattens at the pool size.
+// cores. Evaluations read an immutable snapshot without locks, so it should
+// scale with GOMAXPROCS rather than flatten.
 func BenchmarkEvaluate_SimpleParallel(b *testing.B) {
 	eng := newBenchEngine(b, map[string]string{
 		"simple": makePolicy("simple", "default", "bench", benchSimpleRules, "deny", ""),

@@ -16,12 +16,13 @@ http://localhost:8080
 
 ## OpenAPI Specification
 
-The OpenAPI 3.0 specification is embedded in the server binary (source: `internal/server/openapi.json`) and served at `/openapi.json`.
+The OpenAPI 3.0 specification is embedded in the server binary (source: `internal/server/openapi.json`) and served at `/openapi.json`. It is not auth-exempt: when `auth.api_key` is set, fetching it requires the key like any other API call.
 
 There is deliberately no bundled Swagger UI page: the server serves machine callers inside an egress-restricted mesh, and the old page loaded its JavaScript from a CDN, which silently broke there. To browse the API interactively, point any local OpenAPI viewer at the spec:
 
 ```bash
-# Run Swagger UI locally against a running server
+# Run Swagger UI locally against a running server (without auth.api_key;
+# with a key set, save the spec with curl first and point SWAGGER_JSON at it)
 docker run --rm -p 8081:8080 -e SWAGGER_JSON_URL=http://localhost:8080/openapi.json swaggerapi/swagger-ui
 
 # Or render the committed spec straight from the repo
@@ -46,7 +47,15 @@ When an API key is configured, clients must send it on every request, either:
   curl -H "Authorization: Bearer $GARMR_API_KEY" http://localhost:8080/v1/policies
   ```
 
-Requests with a missing or invalid key receive `401 Unauthorized`. Health endpoints (`/health`, `/ready`, `/healthz`, `/readyz`, `/livez`) and `/metrics` are exempt from authentication so probes and scrapers keep working.
+Requests with a missing or invalid key receive `401 Unauthorized`. Health endpoints (`/health`, `/ready`, `/healthz`, `/readyz`, `/livez`) and `/metrics` are exempt from authentication so probes and scrapers keep working. `/health/deep` and `/openapi.json` are not exempt.
+
+## CORS
+
+Every response carries CORS headers. With `cors.allowed_origins` empty (the
+default) the server answers `Access-Control-Allow-Origin: *`; otherwise it
+echoes the request's `Origin` when it is on the list. `OPTIONS` preflight
+requests are answered `200` with the allow headers before authentication
+runs. See [Configuration → CORS](/garmr/docs/reference/configuration/#cors).
 
 Note: the `garmr` CLI does not yet support sending an API key — use the REST API directly against authenticated servers.
 
@@ -58,12 +67,16 @@ Note: the `garmr` CLI does not yet support sending an API key — use the REST A
 
 #### GET /healthz and GET /livez
 
-Cheap liveness probes (cached status, no dependency checks). Use these for Kubernetes liveness probes.
+Cheap liveness probes (no dependency checks). Use these for liveness probes.
 
-**Response:**
+**Response:** always `200 OK` while the process can answer HTTP. Liveness
+status is never changed after startup, so these endpoints report "the process
+is up", not "the process is healthy" — use `/readyz` for whether the
+instance should get traffic.
 
-- `200 OK` - Server process is live
-- `503 Service Unavailable` - Server is unhealthy
+```json
+{"status": "healthy", "timestamp": "2026-10-04T14:23:04.877Z", "version": "1.2.0"}
+```
 
 ```bash
 curl http://localhost:8080/healthz
@@ -163,7 +176,7 @@ Evaluate input against loaded policies.
 
 | Header | Description | Required |
 |--------|-------------|----------|
-| `Content-Type` | Must be `application/json` | Yes |
+| `Content-Type` | `application/json` or a YAML type (`application/yaml`, `application/x-yaml`, `text/yaml`); anything else, or none, is auto-detected from the body | No |
 | `X-Request-Id` | Request ID for audit correlation | No |
 
 **Request Body:**
@@ -181,7 +194,7 @@ Evaluate input against loaded policies.
     }
   },
   "namespace": "security",
-  "policies": ["security/container-security"],
+  "policies": ["container-security"],
   "include_passed": false
 }
 ```
@@ -190,7 +203,7 @@ Evaluate input against loaded policies.
 |-------|------|-------------|---------|
 | `input` | object | Resource to evaluate (required) | |
 | `namespace` | string | Policy namespace filter | (all) |
-| `policies` | []string | Specific policies to evaluate | (all matching) |
+| `policies` | []string | Specific policies to evaluate, by **bare** `metadata.name`. Names resolve inside `namespace` (or `default` when `namespace` is empty), so `"security/container-security"` does not match anything. A named policy is still skipped if its target doesn't match the input. | (all matching) |
 | `include_passed` | bool | Include passed rules | `false` |
 
 **Response:**
@@ -204,32 +217,32 @@ Evaluate input against loaded policies.
       "policy_name": "container-security",
       "policy_namespace": "security",
       "rule_id": "SEC-001",
-      "description": "Containers must not run as root",
-      "severity": "high",
+      "description": "Containers must assert runAsNonRoot",
+      "severity": "critical",
       "passed": false,
-      "message": "Container is running as root",
-      "remediation": "Set securityContext.runAsNonRoot: true"
+      "message": "containers must set securityContext.runAsNonRoot: true",
+      "remediation": "Set securityContext.runAsNonRoot: true and specify a non-root runAsUser"
     }
   ],
   "summary": {
-    "total_rules": 8,
-    "passed": 7,
+    "total_rules": 6,
+    "passed": 5,
     "failed": 1,
     "skipped": 0
   },
   "evaluation_mode": {
-    "dry_run": false,
     "fail_fast": false,
     "short_circuited": false,
-    "total_rules_in_scope": 8,
-    "rules_evaluated": 8,
-    "rules_skipped": 0
+    "total_rules_in_scope": 6,
+    "rules_evaluated": 6,
+    "rules_skipped": 0,
+    "dry_run": false
   },
   "terminated_early": false,
   "metrics": {
-    "evaluation_time_ns": 5234567,
-    "policies_evaluated": 2,
-    "rules_evaluated": 8
+    "evaluation_time_ns": 59524,
+    "policies_evaluated": 1,
+    "rules_evaluated": 6
   }
 }
 ```
@@ -308,12 +321,13 @@ curl -X POST http://localhost:8080/v1/evaluate \
     "include_passed": true
   }'
 
-# Evaluate specific policies
+# Evaluate specific policies (bare names, resolved in "namespace")
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
   -d '{
     "input": {"kind": "Pod", "metadata": {"name": "web"}},
-    "policies": ["security/container-security"]
+    "namespace": "security",
+    "policies": ["container-security"]
   }'
 ```
 
@@ -372,14 +386,29 @@ curl http://localhost:8080/v1/policies?namespace=security
 
 #### DELETE /v1/policies
 
-Delete a loaded policy by name and namespace.
+Remove a loaded policy from the answering instance's memory.
+
+:::caution
+This mutates **one** instance — whichever one receives the request — and is
+undone by that instance's next reload or restart, which reads the policy back
+from storage. To remove a policy for real, delete it from the policy source
+(git) and deploy. Use this endpoint only as an emergency, single-instance
+override.
+:::
 
 **Query Parameters:**
 
 | Parameter | Description |
 |-----------|-------------|
-| `name` | Policy name (required) |
-| `namespace` | Policy namespace |
+| `name` | Policy name |
+| `namespace` | Policy namespace (empty means `default`) |
+
+**Response:** always `200 OK`, with whether a policy was actually removed.
+A missing or unknown `name` is not an error; it just reports `false`.
+
+```json
+{"deleted": true}
+```
 
 **Example:**
 
@@ -391,7 +420,10 @@ curl -X DELETE "http://localhost:8080/v1/policies?name=container-security&namesp
 
 #### POST /v1/policies/reload
 
-Reload policies from disk (hot reload).
+Reload policies from the configured policy source. The new set is compiled
+in full and swapped in atomically; if anything fails to load, the reload
+returns `500` and the previous set keeps serving. If the server was started
+with no policy source, it returns `400`.
 
 **Response:**
 
@@ -407,9 +439,11 @@ Reload policies from disk (hot reload).
 ```
 
 Reload mutates the one instance that receives the request. `digest` and
-`instance_id` are what make a fleet-wide reload verifiable — see
-`garmr policy reload --converge` for reloading through a mesh upstream that
-load-balances.
+`instance_id` are what make a fleet-wide reload verifiable. Use
+`garmr policy reload --servers <a>,<b> --expect-digest <d>` to reload every
+addressable instance, or `garmr policy reload --converge --instances <n>` to
+reload through a mesh upstream that load-balances (see the
+[CLI reference](/garmr/docs/guides/cli/#garmr-policy-reload)).
 
 **Example:**
 
@@ -438,7 +472,8 @@ Validate a policy without loading it.
 ```json
 {
   "valid": true,
-  "warnings": []
+  "errors": null,
+  "warnings": null
 }
 ```
 
@@ -449,13 +484,16 @@ Validate a policy without loading it.
   "valid": false,
   "errors": [
     {
-      "message": "undefined field: spec.rulz",
+      "message": "no Policy documents found (expected kind: \"Policy\")",
       "code": "SCHEMA_ERROR"
     }
   ],
-  "warnings": []
+  "warnings": null
 }
 ```
+
+Both outcomes return `200 OK`; check `valid`. `warnings` is reserved and is
+currently always `null`.
 
 Error objects carry `message` and `code`, plus `line`, `column`, and
 `filename` when position information is available. `code` is `PARSE_ERROR`
@@ -464,6 +502,11 @@ Error objects carry `message` and `code`, plus `line`, `column`, and
 an invalid regex or semver literal, duplicate rule ids, an exception that
 matches everything). Validation applies exactly the checks the server runs
 when it loads policies.
+
+The request body is capped by `max_validate_size` (default 1 MiB, and never
+more than `max_recv_size`); larger bodies get `413`. Concurrent validations
+are limited to `min(GOMAXPROCS, 8)`; a request that can't get a slot within
+`evaluation.timeout` gets `503`.
 
 **Example:**
 
@@ -493,12 +536,13 @@ shape:
 | Code | Meaning |
 |------|---------|
 | 200 | Success |
-| 400 | Bad Request (malformed body, missing `input`, no policy source configured) |
+| 400 | Bad Request (malformed body, missing `input`, invalid input, reload with no policy source configured) |
 | 401 | Unauthorized (API key configured but missing or wrong) |
 | 405 | Method Not Allowed |
-| 413 | Request Entity Too Large (body exceeds the server's receive limit) |
-| 429 | Too Many Requests (rate limited; `Retry-After` and `X-RateLimit-*` headers are set) |
+| 413 | Request Entity Too Large (body exceeds `max_recv_size`, or `max_validate_size` on `/v1/validate`) |
+| 429 | Too Many Requests (rate limited; `Retry-After` and `X-RateLimit-*` headers are set). Probe endpoints and `/metrics` are never rate limited. |
 | 500 | Internal Server Error (including a reload that failed — the previous policy set keeps serving) |
+| 503 | Service Unavailable: an evaluation that could not start before its budget ran out, or a validation that waited `evaluation.timeout` for a slot (both retryable); also not-ready / unhealthy probe responses |
 
 ---
 
@@ -542,15 +586,21 @@ set -e
 GARMR_SERVER="${GARMR_SERVER:-http://localhost:8080}"
 REQUEST_ID="${CI_JOB_ID:-local-$(date +%s)}"
 
-result=$(curl -s -X POST "$GARMR_SERVER/v1/evaluate" \
+# -f: an HTTP error fails the script instead of yielding an empty "decision"
+result=$(curl -sf -X POST "$GARMR_SERVER/v1/evaluate" \
   -H "Content-Type: application/json" \
   -H "X-Request-Id: $REQUEST_ID" \
   -d "{\"input\": $(cat $1), \"namespace\": \"$2\"}")
 
-decision=$(echo "$result" | jq -r '.decision')
+decision=$(echo "$result" | jq -r '.decision // empty')
 
 echo "Decision: $decision"
 echo "Request ID: $REQUEST_ID"
+
+if [ -z "$decision" ]; then
+  echo "No decision returned"
+  exit 2
+fi
 
 if [ "$decision" = "deny" ]; then
   echo "Violations:"
@@ -643,42 +693,78 @@ func main() {
     }
     defer resp.Body.Close()
 
+    // Anything but 200 is a failed evaluation, not a pass.
+    if resp.StatusCode != http.StatusOK {
+        fmt.Fprintf(os.Stderr, "Error: garmr returned %s\n", resp.Status)
+        os.Exit(2)
+    }
+
     var result map[string]interface{}
-    json.NewDecoder(resp.Body).Decode(&result)
+    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+        os.Exit(2)
+    }
 
     fmt.Printf("Decision: %s\n", result["decision"])
 
-    if result["decision"] == "deny" {
+    switch result["decision"] {
+    case "allow", "warn":
+    case "deny":
         os.Exit(1)
+    default:
+        fmt.Fprintln(os.Stderr, "Error: no decision in response")
+        os.Exit(2)
     }
 }
 ```
 
 ---
 
-## Audit Log Correlation
+## Audit Logging
 
-Every request is logged to the audit log with:
+With audit logging enabled (the default), the server writes one JSON line
+per audited operation. `msg` names the event: `decision` (every
+`/v1/evaluate`), `validate`, `policy_delete`, and `policy_reload`. Health,
+metrics, policy-list and OpenAPI requests are not audited.
+
+A decision record:
 
 ```json
 {
+  "time": "2026-10-04T09:23:16.821633873-05:00",
+  "level": "INFO",
+  "msg": "decision",
   "request_id": "pipeline-12345",
-  "timestamp": "2024-12-07T06:00:00Z",
+  "timestamp": "2026-10-04T14:23:16.821629478Z",
   "decision": "deny",
   "namespace": "security",
-  "policies_evaluated": 2,
-  "rules_evaluated": 8,
-  "violations": 3,
-  "duration_ms": 5,
+  "policies_evaluated": 1,
+  "rules_evaluated": 6,
+  "violations": 6,
+  "duration_ms": 0,
   "source_ip": "10.0.0.1:54321",
-  "user_agent": "curl/7.68.0",
+  "principal": "spiffe://dc1.consul/ns/default/dc/dc1/svc/deployer",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "user_agent": "curl/8.5.0",
   "input_kind": "Pod",
-  "input_name": "web-app"
+  "input_name": "web"
 }
 ```
+
+`principal` is the URI from the mesh identity header (`auth.identity_header`)
+and is empty when no sidecar sets it. `trace_id` is empty when the request
+carries no trace context. Every event carries `request_id`, `timestamp`,
+`source_ip`, `principal`, and `trace_id`; the other events add their own
+fields (`valid`/`error_count` for `validate`, `policy_name`/`deleted` for
+`policy_delete`, `success`/`policies_loaded`/`error` for `policy_reload`).
+
+Caller-controlled fields (`request_id`, `user_agent`, `principal`,
+`input_kind`, `input_name`, `policy_name`, `policy_namespace`) are cut to 256
+bytes and marked `…[truncated]`, keeping each record small enough to be
+written atomically when `audit.path` is `stdout`.
 
 Query audit logs by request ID:
 
 ```bash
-cat /var/log/garmr/audit.log | jq 'select(.request_id == "pipeline-12345")'
+jq 'select(.request_id == "pipeline-12345")' /var/log/garmr/audit.log
 ```

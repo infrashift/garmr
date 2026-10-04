@@ -12,7 +12,7 @@ const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
 	<meta charset="utf-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1" />
 	<title>Garmr — Policy as Code, Powered by CUE</title>
-	<meta name="description" content="Garmr is a type-safe policy evaluation engine built on CUE. Define, evaluate, and enforce policies with three-outcome decisions, 25+ operators, and blazing-fast performance." />
+	<meta name="description" content="Garmr is a type-safe policy evaluation engine built on CUE. Define, evaluate, and enforce policies with allow/deny/warn decisions, 25+ operators, and fast compiled evaluation." />
 	<link rel="icon" type="image/jpeg" href={`${base}favicon.jpg`} />
 </head>
 <body>
@@ -63,7 +63,7 @@ const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
 		<div class="feature-card">
 			<div class="icon">&#9989;</div>
 			<h3>Three-Outcome Decisions</h3>
-			<p>Pass, fail, or warn. Not just binary gates — give teams actionable signals without blocking deploys unnecessarily.</p>
+			<p>Allow, deny, or warn. Not just binary gates — give teams actionable signals without blocking deploys unnecessarily.</p>
 		</div>
 		<div class="feature-card">
 			<div class="icon">&#128640;</div>
@@ -73,12 +73,12 @@ const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
 		<div class="feature-card">
 			<div class="icon">&#9889;</div>
 			<h3>Blazing Fast</h3>
-			<p>Concurrent policy evaluation with CUE context pooling. Sub-millisecond per-rule evaluation. Benchmark-proven against OPA.</p>
+			<p>CUE validates policies at load; evaluation runs a compiled Go tree with no locks and no pool. About 3&nbsp;µs for a 3-rule policy in process. Benchmarked end to end against OPA.</p>
 		</div>
 		<div class="feature-card">
 			<div class="icon">&#128260;</div>
 			<h3>Zero-Downtime Reload</h3>
-			<p>Hot-reload policies via REST API or filesystem watcher. No restarts, no downtime, no missed evaluations.</p>
+			<p>Explicit, atomic, fail-closed reload: a bad policy set is rejected and the old one keeps serving. <code>garmr policy reload</code> fans out across instances and checks they converged on one digest.</p>
 		</div>
 	</div>
 </section>
@@ -86,35 +86,44 @@ const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
 <!-- Code example -->
 <section class="code-section">
 	<h2>Policies That Read Like Intent</h2>
-	<p class="subtitle">CUE gives you types, constraints, and logic — in a format your team can review in a PR.</p>
+	<p class="subtitle">CUE checks the policy's structure when it loads; each rule's <code>expr</code> says what must hold — in a format your team can review in a PR.</p>
 	<div class="code-block">
 		<div class="code-header">container-security.cue</div>
 		<pre><code set:html={`package policies
 
-policy: {
-    name:        "container-security"
-    description: "Enforce container image and resource policies"
-    category:    "security"
-    severity:    "high"
-
-    rules: [{
-        name: "no-latest-tag"
-        description: "Container images must use explicit tags"
-        match: {
-            operator: "not_contains"
-            value:    ":latest"
-        }
-        message: "Image '%s' uses :latest tag — pin to a digest or semver tag"
-    }, {
-        name: "memory-limit-required"
-        description: "All containers must declare memory limits"
-        match: {
-            operator:  "greater_than"
-            field:     "resources.limits.memory"
-            value:     "0"
-        }
-        message: "Container has no memory limit set"
-    }]
+containerSecurity: {
+    apiVersion: "policy.garmr.io/v1"
+    kind:       "Policy"
+    metadata: {
+        name:      "container-security"
+        namespace: "security"
+    }
+    spec: {
+        description: "Enforce container image and resource policies"
+        target: resources: [{kind: "Pod"}]
+        rules: [{
+            id:          "no-latest-tag"
+            description: "Container images must use explicit tags"
+            severity:    "high"
+            expr: forEach: {
+                path: "spec.containers"
+                as:   "c"
+                condition: not: match: {path: "c.image", hasSuffix: ":latest"}
+            }
+            message:     "container {{c.name}} uses :latest — pin a digest or semver tag"
+        }, {
+            id:          "memory-limit-required"
+            description: "All containers must declare memory limits"
+            severity:    "high"
+            expr: forEach: {
+                path: "spec.containers"
+                as:   "c"
+                condition: match: {path: "c.resources.limits.memory", exists: true}
+            }
+            message:     "container {{c.name}} has no memory limit"
+        }]
+        enforcement: action: "deny"
+    }
 }`} /></pre>
 	</div>
 </section>

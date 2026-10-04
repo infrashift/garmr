@@ -16,7 +16,8 @@ Both engines were called through their in-process Go APIs with each policy
 compiled once up front:
 
 - **Garmr:** `Engine.Evaluate` against a loaded policy set
-  (`internal/engine/bench_test.go`).
+  (`internal/engine/bench_test.go`; the `forEach` case is
+  `BenchmarkForEach_LargeInput` in `internal/engine/expr_test.go`).
 - **OPA v1.21.1:** `rego.PreparedEvalQuery.Eval` with `rego.EvalInput`
   (`scripts/bench-opa/`, a separate Go module so OPA never becomes a Garmr
   dependency).
@@ -65,6 +66,10 @@ load (`scripts/bench-e2e/`).
 **CPU/req** is the server process's user+system CPU time divided by the
 requests it served, so it includes the kernel's loopback networking.
 
+These runs were taken on 2026-10-03 against a build of the compiled
+evaluator made just before it was committed (53fbd62), so they aren't tied
+to a tagged revision. Run `make bench-e2e` to measure a specific build.
+
 ### One request at a time
 
 One connection, 2,000 sequential requests.
@@ -92,22 +97,30 @@ many applicable rules, iteration, and large inputs.
 The closed-loop runs keep 1–256 connections busy back to back, using a 2 s
 warmup and then a 10 s window, and report the median of 3 runs. Max req/s is
 the best result across connection counts; input-size runs used 8
-connections.
+connections. CPU/req is the range across 4–256 connections (the single
+8-connection value for input-size runs).
 
 | Scenario | Garmr max req/s | OPA max req/s | Garmr ÷ OPA | Garmr CPU/req | OPA CPU/req |
 |---|--:|--:|--:|--:|--:|
 | Simple | **54.1k** | 36.0k | 1.5× | **66–70 µs** | 103–107 µs |
 | 500 policies, matched by kind | **55.8k** | 34.5k | 1.6× | **67–71 µs** | 108–114 µs |
-| 500 policies, all apply | **3.7k** | 1.0k | 3.6× | **1.07 ms** | 3.90 ms |
-| `forEach` over 50 elements | **10.5k** | 4.1k | 2.6× | **365 µs** | 964 µs |
+| 500 policies, all apply | **3.7k** | 1.0k | 3.6× | **1.06–1.11 ms** | 3.85–3.93 ms |
+| `forEach` over 50 elements | **10.5k** | 4.1k | 2.6× | **365–416 µs** | 0.96–1.06 ms |
 | Input 1 KB | **34.0k** | 19.1k | 1.8× | **99 µs** | 192 µs |
 | Input 10 KB | **8.1k** | 3.6k | 2.2× | **417 µs** | 1.03 ms |
 | Input 100 KB | **1.2k** | 474 | 2.6× | **3.1 ms** | 8.3 ms |
 | Input 1 MB | **114** | 46 | 2.5× | **35 ms** | 86 ms |
 | Input 4 MB | **23** | 11 | 2.1× | **172 ms** | 373 ms |
 
-Both servers get within 5% of their maximum by 16 connections. More
-connections only add queueing. At 256 connections on the simple policy:
+A single connection costs more CPU per request on both servers: 96 µs
+(Garmr) and 148 µs (OPA) on the simple policy, 480 µs and 1.10 ms on
+`forEach`.
+
+On the small-policy scenarios, both servers are within 5% of their maximum
+by 16 connections, and more connections only add queueing. Heavier
+evaluations keep gaining a little: at 16 connections `forEach` is at 81%
+(Garmr) and 88% (OPA) of its 256-connection peak, and Garmr's 500
+policies, all apply, is at about 95%. At 256 connections on the simple policy:
 
 | | Garmr | OPA |
 |---|--:|--:|
@@ -234,8 +247,8 @@ it, up to 229 ms. Only the policy API was measured, not bundle activation.
 **OPA, and where Garmr's edges are:**
 - **Startup and reload time.** Garmr compiles CUE when policies load. At
   100–500 policies it is 3.4× slower to start, and at 500 policies it is
-  1.9× slower to reload. It is slower to start from 10 policies up. This matters for cold starts, autoscaling and frequent
-  reloads.
+  1.9× slower to reload. It is slower to start from 10 policies up. This
+  matters for cold starts, autoscaling and frequent reloads.
 - **Memory per policy.** Above about 500 policies, Garmr uses more RSS: 1.7×
   OPA's at 5,000 policies.
 - **Response size.** Garmr's response is richer, and it costs time when

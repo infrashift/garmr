@@ -91,7 +91,7 @@ typeCheckPolicy: {
 		namespace: "builtins"
 	}
 	spec: {
-		description: "Uses typeOf and isType builtins to validate field types"
+		description: "Uses the isType builtin to validate field types"
 		target: resources: [{kind: "*"}]
 		rules: [
 			{

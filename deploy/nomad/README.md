@@ -147,9 +147,9 @@ so that contract holds: a deny is a verdict, and Nomad's default batch restart
 policy would otherwise read the nonzero exit as a crash and re-run the
 evaluation three more times.
 
-It also sets `GOMAXPROCS=2` because startup compiles the policy set once per
-internal replica (K = min(GOMAXPROCS, 8)); a one-shot evaluator wants a small
-K for fast cold starts, not evaluation parallelism.
+It also sets `GOMAXPROCS=2`: a one-shot evaluator serves one request and
+needs no evaluation parallelism, and without it the Go runtime sizes itself
+for every core on the host (see [Sizing](#sizing)).
 
 ## Shutdown behavior
 
@@ -166,14 +166,19 @@ If you change one, keep drain budget < kill_timeout.
 
 ## Sizing
 
-`GOMAXPROCS` governs memory, not just CPU: the engine builds
-K = min(GOMAXPROCS, 8) CUE contexts, each holding a full compiled copy of the
-policy set, and a reload holds the old and new sets at once (up to 2K copies
-at peak). Nomad's docker driver applies CPU *shares* rather than a cpuset, so
-without an explicit `GOMAXPROCS` a 16-core client gives you 8 copies against
-whatever `memory` you set. Both job specs set it explicitly; raise `memory`
-alongside it, and again for a substantially larger policy tree. The failure
-mode is an OOM kill mid-reload, not a graceful error.
+Memory follows the policy tree, not the core count. The server holds one
+compiled, immutable snapshot of the policy set; evaluations read it without
+locks. A reload holds two at peak: the old set stays live until in-flight
+evaluations release it, while CUE loads and compiles the new one. Size
+`memory` for that peak plus request buffers (up to `max_recv_size` per
+in-flight request), and raise it for a substantially larger policy tree.
+The failure mode is an OOM kill mid-reload, not a graceful error.
+
+`GOMAXPROCS` caps CPU parallelism: how many evaluations, and how many GC
+workers, run at once. Nomad's docker driver applies CPU *shares* rather than
+a cpuset or quota, so without an explicit `GOMAXPROCS` the Go runtime sizes
+itself for every core on a 16-core client regardless of the `cpu`
+reservation. Both job specs set it explicitly; raise it together with `cpu`.
 
 ## Health checks
 

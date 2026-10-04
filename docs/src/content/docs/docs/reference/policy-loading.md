@@ -87,6 +87,20 @@ it in atomically: in-flight evaluations finish against the old set, and if the
 new set fails to compile or validate the old one stays live. A reload never leaves the
 server serving a partially-loaded policy set.
 
+A reload changes only the instance that receives the request. Behind a load
+balancer or mesh VIP, reload every instance and confirm they converged on
+the digest of what you deployed:
+
+```bash
+garmr policy reload \
+  --servers http://garmr-1:8080,http://garmr-2:8080 \
+  --expect-digest "$(garmr policy digest policies/)"
+```
+
+The command exits non-zero if any instance fails to reload, reports a
+different digest, or the instances disagree. See the
+[CLI reference](/garmr/docs/guides/cli/).
+
 ### In Kubernetes
 
 You usually do not need to call the endpoint. The Helm chart stamps a
@@ -100,12 +114,25 @@ pod start — so a rollout is also the reload mechanism. See
 ### Startup behaviour
 
 A policy set that cannot be loaded **fails startup**. Besides CUE syntax and
-schema errors (an unknown field or a misspelled operator), the loader rejects
-an expression that does not set exactly one operator, a duplicate rule id
-within a policy, an exception whose `match` narrows nothing, an exception
-`expiry` that is not RFC3339, a `spec.evaluation.timeout` that is not a Go
-duration, and the same `namespace/name` declared twice. `garmr validate` and
-`/v1/validate` apply exactly these checks. A server with zero
+schema errors (an unknown field or a misspelled operator), the loader
+rejects:
+
+- an expression that does not set exactly one operator;
+- an operand that does not compile: a malformed path, an invalid regular
+  expression (or one over 512 bytes), an invalid semver, semver constraint
+  or datetime literal, an unknown builtin or compare operator, or a
+  malformed message placeholder;
+- a `forEach` without a `condition`, with an `as` that is not an
+  identifier, or with `count` alongside `mode` or `allowEmpty`;
+- a duplicate rule id within a policy;
+- an exception whose `match` narrows nothing, or whose `expiry` is not
+  RFC3339;
+- a `spec.evaluation.timeout` that is not a positive Go duration;
+- the reserved namespace `__system__`, and the same `namespace/name`
+  declared twice.
+
+`garmr validate` and `/v1/validate` apply exactly these checks. See
+[Load-Time Validation](/garmr/docs/reference/policy-schema/#load-time-validation). A server with zero
 policies loaded reports `503` on `/readyz` and `/ready`. Running with no
 policies is not a safe default: under `require_match` (the default) it denies
 everything, and without it, allows everything.
@@ -176,7 +203,7 @@ spec:
             - name: policies
               mountPath: /policies
               readOnly: true
-            - name: config
+            - name: config            # its config.yaml sets policy_dir: /policies
               mountPath: /etc/garmr
               readOnly: true
           livenessProbe:

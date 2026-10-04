@@ -63,7 +63,7 @@ spec: {
         resources: [
             {
                 kind: "deployment"
-                apiGroup: "apps/v1"
+                apiGroup: "apps"   // the group of apiVersion "apps/v1"
                 namespaces: ["production", "staging"]
                 labels: {
                     "app.kubernetes.io/managed-by": "helm"
@@ -86,7 +86,7 @@ spec: {
 | Field | Type | Description |
 |-------|------|-------------|
 | `kind` | string | Resource kind (supports wildcards) |
-| `apiGroup` | string | API group (matched against the input's `apiVersion`, supports wildcards) |
+| `apiGroup` | string | API group, matched against the group part of the input's `apiVersion` (`"apps"` for `apps/v1`; `""` is the core group of `v1`). Defaults to `"*"`, any group. Supports wildcards |
 | `names` | []string | Resource name (`metadata.name`) must match one entry (supports wildcards) |
 | `namespaces` | []string | Resource namespace (`metadata.namespace`) must match one entry (supports wildcards) |
 | `labels` | map | All specified labels must be present on `metadata.labels`; values support wildcards |
@@ -113,7 +113,8 @@ target: {
 
 ### No Target (Default)
 
-If no target is specified, the policy applies to **all resources**:
+If no target is specified (or `resources` is empty), the policy applies to
+**all resources**:
 
 ```cue
 spec: {
@@ -180,6 +181,25 @@ curl -X POST http://localhost:8080/v1/evaluate \
 curl -X POST http://localhost:8080/v1/evaluate \
   -d '{"input": {...}, "namespace": "security"}'
 ```
+
+### Selecting Specific Policies
+
+To evaluate named policies only, list their names (`metadata.name`) with
+`-p`/`--policy` (repeatable or comma-separated) or `"policies"` in the
+request body. Names are looked up in the namespace given with `-n` /
+`"namespace"` (`default` when omitted), and a named policy still runs only
+if its target matches the input:
+
+```bash
+garmr eval --input pod.json -n security -p container-security,network-policy
+
+curl -X POST http://localhost:8080/v1/evaluate \
+  -d '{"input": {...}, "namespace": "security", "policies": ["container-security"]}'
+```
+
+If a named policy does not exist, or none of the named policies targets the
+input, the request is denied (under the default `require_match`) with a
+result explaining which.
 
 ---
 
@@ -300,7 +320,8 @@ garmr eval --input artifact.json -n release
 
 ### Strategy 4: Resource-Type Targeting
 
-Use target filtering for resource-specific policies:
+Use target filtering for resource-specific policies (excerpts: `apiVersion`,
+`kind`, rules and `enforcement` omitted):
 
 ```cue
 // policies/k8s/workloads.cue
@@ -396,7 +417,7 @@ Create a README in your policies directory:
 garmr policy list
 
 # Check what namespace a policy is in
-garmr policy list -o json | jq '.[] | {name, namespace}'
+garmr policy list -o json | jq '.policies[] | {name, namespace}'
 
 # Evaluate without namespace filter to see all matches
 garmr eval --input resource.json -o json | jq '.results[].policy_namespace'

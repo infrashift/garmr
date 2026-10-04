@@ -6,7 +6,7 @@ sidebar:
   label: "vs OPA: Features"
 ---
 
-> **Last updated:** 2026-02-14
+> **Last updated:** 2026-10-04
 
 ## Overview
 
@@ -40,9 +40,9 @@ This document compares their feature sets side-by-side and highlights capabiliti
 |---|---|---|---|
 | Decision outcomes | **allow / deny / warn** | allow / deny (boolean) | **Garmr advantage** — see [Three-Outcome Decisions](#1-three-outcome-decisions-allow--deny--warn) |
 | Decision structure | Structured response with per-rule results | Arbitrary JSON document | **Garmr advantage** — consistent, machine-readable format |
-| CI/CD exit codes | 0=allow/warn, 1=deny | User must implement | **Garmr advantage** — native pipeline integration |
+| CI/CD exit codes | 0=allow/warn, 1=deny (or any error) | User must implement | **Garmr advantage** — native pipeline integration |
 | Dry-run mode | Built-in (deny -> warn, `[DRY RUN]` prefix) | User must implement in Rego | **Garmr advantage** |
-| Fail-fast evaluation | Built-in (stop on first critical failure) | User must implement in Rego | **Garmr advantage** |
+| Fail-fast evaluation | Built-in (`evaluation.failFast`: stop the policy at its first failing rule) | User must implement in Rego | **Garmr advantage** |
 
 ### Rule Metadata & Organization
 
@@ -54,8 +54,8 @@ This document compares their feature sets side-by-side and highlights capabiliti
 | Rule categories | Built-in field per rule | Not built-in | **Garmr advantage** |
 | Rule tags | Built-in tag arrays per rule | Not built-in | **Garmr advantage** |
 | Remediation guidance | Built-in `remediation` field per rule | Not built-in | **Garmr advantage** |
-| Category/tag filtering | Policy-level include/exclude | Not built-in | **Garmr advantage** |
-| Policy namespaces | Built-in namespace hierarchy | Package system | Both provide organization |
+| Category/tag filtering | Policy-level include/exclude (`evaluation.includeCategories`, `excludeTags`, …) | Not built-in | **Garmr advantage** |
+| Policy namespaces | Flat namespaces from `metadata.namespace`; requests can select one exactly | Package system | Both provide organization |
 
 ### Target Matching & Exceptions
 
@@ -78,14 +78,14 @@ This document compares their feature sets side-by-side and highlights capabiliti
 | TLS | Not built-in (mesh/proxy terminates TLS) | Configurable cert/key | OPA terminates TLS itself; Garmr delegates to the mesh |
 | Health checks | K8s probes (/healthz, /readyz, /livez) + legacy | /health with bundle awareness | Both provide health checks |
 | OpenAPI / Swagger | Built-in spec served at /openapi.json | Not built-in | Garmr advantage |
-| Audit logging | Structured JSON with request ID correlation | Decision logs (remote push) | OPA's remote push is more mature |
+| Audit logging | Structured JSON with request ID and mesh principal; to a rotated file or stdout/stderr for the platform's log shipper | Decision logs (remote push) | OPA's remote push is more mature |
 
 ### Policy Management
 
 | Feature | Garmr | OPA | Notes |
 |---|---|---|---|
 | Policy loading | Filesystem directory | Filesystem, REST API, bundles | OPA is more flexible |
-| Hot reload | `/v1/policies/reload` endpoint | Bundle polling, REST API | Both support hot reload |
+| Reload | Explicit, atomic, fail-closed `/v1/policies/reload` per instance; `garmr policy reload --servers … --expect-digest` fans out and checks convergence | Bundle polling, REST API | OPA polls automatically; Garmr reloads only when told |
 | Policy bundles | Not implemented | Full bundle system with signing | **OPA advantage** |
 | Bundle discovery | Not implemented | Discovery service | **OPA advantage** |
 | Lock files | Built-in (`garmr policy lock`) for GitOps | Not built-in | **Garmr advantage** — see [GitOps Lock Files](#5-gitops-lock-files) |
@@ -98,11 +98,11 @@ This document compares their feature sets side-by-side and highlights capabiliti
 |---|---|---|---|
 | CLI eval | `garmr eval --input file.json` | `opa eval -d policy.rego -i input.json` | Both provide CLI eval |
 | Client-server model | CLI -> HTTP API -> Server | Embedded or REST API | **Garmr advantage** — see [CI/CD-Native CLI](#6-cicd-native-cli) |
-| Exit codes | Semantic (0=allow/warn, 1=deny) | User-defined | **Garmr advantage** |
+| Exit codes | Semantic (0=allow/warn, 1=deny or error) | User-defined | **Garmr advantage** |
 | Output formats | Table, JSON, YAML | JSON, pretty, raw | Both support multiple formats |
 | Policy testing | `garmr test` with CUE test suites | `opa test` with Rego tests | Both provide testing frameworks |
 | Test coverage | Not yet implemented | `opa test --coverage` | OPA advantage |
-| Benchmarking | Load test suite included | `opa bench` | Both provide benchmarking |
+| Benchmarking | Repo benchmark harnesses (`make bench`, `make bench-e2e`); no `garmr bench` command | `opa bench` | OPA ships benchmarking in its CLI |
 
 ### Observability & Operations
 
@@ -110,7 +110,7 @@ This document compares their feature sets side-by-side and highlights capabiliti
 |---|---|---|---|
 | Metrics | Built-in Prometheus endpoint (`/metrics`) | Built-in Prometheus endpoint | On par |
 | Tracing | OpenTelemetry hooks (no-op by default) | Not built-in | Similar — both require external wiring |
-| Decision logging | File-based structured JSON | Remote push to HTTP server | OPA's remote push is more production-ready |
+| Decision logging | Structured JSON to a file or stdout/stderr (shipped by the platform's log pipeline) | Remote push to HTTP server | OPA's built-in remote push needs no log pipeline |
 | Status reporting | Health checks | Status API with bundle info | OPA provides more detail |
 
 ### Deployment & Integration
@@ -145,7 +145,7 @@ Garmr has three first-class decision outcomes:
 
 - **Gradual rollout of new policies.** Deploy a new security policy with `enforcement: action: "warn"` first. Teams see violations in CI output but builds don't break. Once teams have addressed violations, flip to `enforcement: action: "deny"`.
 - **Severity-appropriate responses.** A missing `description` label is a warning. A privileged container is a deny. Both are violations, but they should have different consequences.
-- **CI/CD exit code semantics.** `garmr eval` returns exit code 0 (allow or warn) or 1 (deny). CI pipelines use standard `$?` checking. If warnings need to gate CI, promote them to `enforcement: action: "deny"` in the policy — the decision belongs in code review, not in a CLI flag that can be flipped per pipeline.
+- **CI/CD exit code semantics.** `garmr eval` returns exit code 0 (allow or warn) or 1 (deny). Errors (server unreachable, bad input) also exit 1, so a pipeline that must tell a deny from an outage should read the decision from `-o json`. CI pipelines use standard `$?` checking. If warnings need to gate CI, promote them to `enforcement: action: "deny"` in the policy — the decision belongs in code review, not in a CLI flag that can be flipped per pipeline.
 - **Dry-run mode.** Setting `enforcement: dryRun: true` on a policy downgrades that policy's deny to warn and prefixes messages with `[DRY RUN]` — allowing policy authors to test deny policies in production without breaking anything. A dry-run policy never downgrades another policy's deny: the overall decision is the maximum across policies (allow < warn < deny).
 
 ```cue
@@ -172,8 +172,12 @@ rules: [{
     category:    "security"         // for filtering and reporting
     tags:        ["cis-benchmark", "pod-security"]
     remediation: "Set securityContext.runAsNonRoot: true"
-    expr: { ... }
-    message:     "Container %{name} runs as root"
+    expr: forEach: {
+        path: "spec.containers"
+        as:   "c"
+        condition: match: {path: "c.securityContext.runAsNonRoot", equals: true}
+    }
+    message:     "container {{c.name}} may run as root"
 }]
 ```
 
@@ -181,9 +185,9 @@ rules: [{
 
 - **Severity-based decisions.** The engine aggregates severity across all failed rules. A `critical` failure is qualitatively different from a `low` finding.
 - **Evaluation ordering.** Rules can be evaluated by priority, by severity (critical first), by definition order, or priority-then-severity. This controls which violations appear first and which trigger fail-fast.
-- **Category/tag filtering.** At evaluation time, you can include or exclude rules by category or tag — at both the policy level and the request level. For example, run only `cis-benchmark` tagged rules, or exclude `experimental` rules.
-- **Remediation guidance.** When a rule fails, the response includes actionable remediation text. Developers don't just see "FAIL" — they see what to fix.
-- **Structured reporting.** The engine's evaluation summary breaks down pass/fail counts by severity, category, and namespace, so tooling built on the engine can aggregate results without custom parsing.
+- **Category/tag filtering.** A policy's `evaluation` block can include or exclude its rules by category or tag (`includeCategories`, `excludeCategories`, `includeTags`, `excludeTags`) — for example, run only `cis-benchmark` tagged rules, or exclude `experimental` ones. Filtering is set in the policy, not per request.
+- **Remediation guidance.** When a rule fails, the response includes actionable remediation text. Developers don't just see "FAIL" — they see what to fix, and message templates (`{{c.name}}`) name the exact element that failed.
+- **Structured reporting.** Every response carries a summary (total, passed, failed, skipped) and per-rule results that each name the policy, namespace, severity and rule id, so tooling can aggregate results without custom parsing.
 
 In OPA, none of this is built-in. You must design your own metadata schema, embed it in Rego rules, and write helper rules to aggregate it. Every OPA deployment reinvents this differently.
 
@@ -194,7 +198,7 @@ Garmr policies declare which resources they apply to using structured selectors:
 ```cue
 target: resources: [{
     kind:       "Deployment"
-    apiGroup:   "apps/v1"
+    apiGroup:   "apps"     // the group part of apiVersion "apps/v1"
     namespaces: ["production", "staging"]
     labels: {
         "team": "platform"
@@ -202,7 +206,7 @@ target: resources: [{
 }]
 ```
 
-The engine automatically matches input resources against these selectors, supporting wildcards (`*`), glob patterns, and label matching. If the input doesn't match any target selector, the policy is skipped entirely.
+The engine automatically matches input resources against these selectors: patterns are case-insensitive and `*` matches any run of characters, in kinds, names, namespaces, labels and annotations alike. If the input doesn't match any target selector, the policy is skipped entirely.
 
 **Why this matters:**
 
@@ -227,7 +231,9 @@ enforcement: {
             names: ["legacy-api"]
             namespaces: ["production"]
         }
-        expiry: "2026-06-30T00:00:00Z"
+        expiry:     "2027-06-30T00:00:00Z"
+        approvedBy: ["security-team"]
+        ticket:     "SEC-1234"
     }]
 }
 ```
@@ -235,8 +241,8 @@ enforcement: {
 **Why this matters:**
 
 - **Time-bounded exceptions.** Exceptions automatically expire. No more "temporary" exemptions that last forever.
-- **Documented rationale.** Each exception requires a `name` and `reason`, creating an audit trail.
-- **Selector-scoped.** Exceptions apply only to matching resources, not globally.
+- **Documented rationale.** Each exception requires a `name` and `reason`, and can record `approvedBy` and a `ticket`, creating an audit trail.
+- **Selector-scoped.** Exceptions apply only to matching resources, not globally. An exception whose selector matches everything is a load error, so it can't silently disable a policy.
 - **No policy modification needed.** Adding an exception doesn't require editing rule logic — it's a sibling of the enforcement block.
 
 In OPA, exceptions must be coded as Rego rules or managed as data documents. There's no standard pattern for expiring exceptions, documenting reasons, or scoping them to specific resources.
@@ -290,7 +296,7 @@ garmr eval --input deployment.yaml -n security -o json
 
 # Exit code tells the pipeline what to do:
 #   0 = allow or warn -> pipeline continues
-#   1 = deny          -> pipeline fails
+#   1 = deny or error -> pipeline fails
 #
 # If warnings should block CI, change enforcement.action to "deny" in
 # the policy — the gating decision belongs in code review, not a flag.
@@ -308,7 +314,7 @@ garmr health --wait --timeout 30s
 **Why this matters:**
 
 - **Client-server architecture.** The CLI calls the API. Policies live on the server. CI jobs don't need local policy files — they send input to a central policy server and get decisions back. This means one source of truth for policies across all pipelines.
-- **Semantic exit codes.** Standard CI tools (GitHub Actions, GitLab CI, Jenkins) use exit codes to determine step success/failure. Garmr's 0/1/2 exit codes map directly to allow/deny/warn without wrapper scripts.
+- **Semantic exit codes.** Standard CI tools (GitHub Actions, GitLab CI, Jenkins) use exit codes to determine step success/failure. Garmr exits 0 for allow and warn and 1 for deny, without wrapper scripts. Errors also exit 1, so check the JSON decision when a deny and an outage need different handling.
 - **Multiple output formats.** `--output json` for machine parsing, `--output table` for human readability, `--output yaml` for compatibility.
 - **Request ID correlation.** `--request-id $CI_JOB_ID` links policy decisions back to the CI job that triggered them, enabling end-to-end audit trails.
 

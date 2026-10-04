@@ -66,7 +66,7 @@ Source: `example-policies/builtins/`
 | `builtin-encoding` | 2 | Uses encoding and string builtins for data validation |
 | `builtin-k8s-units` | 1 | Uses unitsParse to validate Kubernetes resource quantities |
 | `builtin-map-ops` | 1 | Uses map-related builtins for structured data validation |
-| `builtin-type-check` | 2 | Uses typeOf and isType builtins to validate field types |
+| `builtin-type-check` | 2 | Uses the isType builtin to validate field types |
 
 
 ## `cloud-governance`
@@ -159,4 +159,4 @@ Source: `example-policies/real-world/`
 
 ---
 
-43 policies across 8 namespaces.
+45 policies across 8 namespaces.

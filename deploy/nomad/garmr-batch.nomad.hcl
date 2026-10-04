@@ -110,10 +110,10 @@ job "garmr-eval" {
       }
 
       env {
-        # Each internal policy replica compiles the full set at startup
-        # (K = min(GOMAXPROCS, 8) CUE contexts). A one-shot evaluator does
-        # not need evaluation parallelism — keeping K small cuts cold-start
-        # compile time roughly proportionally.
+        # A one-shot evaluator serves a single request, so it needs no
+        # evaluation parallelism. Nomad's docker driver applies CPU shares,
+        # not a quota, so without this the Go runtime sizes its scheduler
+        # and GC for every core on the host instead of the `cpu` below.
         GOMAXPROCS = "2"
       }
 

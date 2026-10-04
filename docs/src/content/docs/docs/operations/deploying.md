@@ -1,25 +1,101 @@
 ---
 title: "Deploying Garmr"
-description: "Deployment models, Helm chart, Consul service mesh, and configuration essentials"
+description: "Deployment models: Nomad with Consul Connect, the Helm chart, service-mesh identity, and fleet-wide policy reload"
 sidebar:
   order: 1
 ---
 
-Garmr is a stateless HTTP service. Every replica compiles the same policy
-directory at startup, so you can run as many pods as you like behind a service
-or a mesh. This page covers the deployment models you'll hit in practice.
+Garmr is a stateless HTTP service. Every instance compiles the same policy
+directory at startup, so you can run as many as you like behind a service
+or a mesh. This page covers the two deployment targets the repository ships —
+**Nomad with Consul Connect** (`deploy/nomad/`) and **Kubernetes via Helm**
+(`deploy/helm/garmr/`) — and what they have in common.
 
 ## Minimum configuration
 
 Whatever you deploy onto, Garmr needs:
 
-1. **A policy directory** mounted into the pod — from a ConfigMap, a PVC, a
-   CSI volume, or an init container that syncs from object storage. See
-   [Policy Storage](../advanced/storage-backends).
+1. **A policy directory** mounted into the instance — a Nomad host or CSI
+   volume, a ConfigMap, a PVC, or an init container that syncs from object
+   storage. See [Policy Storage](/garmr/docs/advanced/storage-backends/).
 2. **An HTTP listen address.** Defaults to `:8080`.
-3. **An audit-log path.** Defaults to `/var/log/garmr/audit.log`.
+3. **A writable audit destination.** Defaults to the file
+   `/var/log/garmr/audit.log`, and the server refuses to start if it can't
+   create that directory. In a mesh, prefer `--audit-path stdout` (see
+   [Backup & restore](#backup--restore)).
 
 That's it — everything else (metrics, tracing, auth) is opt-in.
+
+## Nomad with Consul Connect
+
+The production target. `deploy/nomad/` holds:
+
+| File | Purpose |
+|------|---------|
+| `garmr-service-defaults.hcl` | Consul config entry declaring `Protocol = "http"`. **Apply first.** |
+| `garmr-service.nomad.hcl` | Long-lived service instances (`count = 2`) behind Connect sidecars |
+| `garmr-reload.nomad.hcl` | Parameterized batch job that reloads every instance from inside the mesh and verifies the digest |
+| `garmr-batch.nomad.hcl` | Parameterized batch job for one-shot, just-in-time evaluation |
+
+```bash
+consul config write deploy/nomad/garmr-service-defaults.hcl
+nomad job run deploy/nomad/garmr-service.nomad.hcl
+nomad job run deploy/nomad/garmr-reload.nomad.hcl   # register the reload job
+```
+
+What the specs set, and why:
+
+- **`Protocol = "http"` in service-defaults.** Consul proxies a service at L4
+  unless it declares an application protocol, and Envoy only injects
+  `X-Forwarded-Client-Cert` from an HTTP connection manager. Without it the
+  header never arrives: every audit record has `"principal": ""` and
+  identity-keyed rate limiting collapses into one shared bucket. Neither
+  failure is loud.
+- **Policies on a shared, read-only volume** (host volume `garmr-policies`,
+  mounted at `/etc/garmr/policies`). CI/CD syncs the reviewed git checkout
+  onto it; nothing edits it in place.
+- **`--audit-path stdout`**, so Nomad's alloc log capture ships audit records
+  and application logs stay on stderr.
+- **`GOMAXPROCS`** set explicitly. Nomad's docker driver applies CPU shares,
+  not a quota, so the Go runtime would otherwise size itself for every core
+  on the client.
+- **Shutdown ordering:** `--shutdown-timeout 20s` < `kill_timeout = "30s"`,
+  with `shutdown_delay = "5s"` after Consul deregistration.
+- **`/readyz` check through an Envoy expose path**, so the mesh pulls an
+  instance with no policies loaded or one that has started draining.
+- **`update { auto_revert = true }`**: a policy tree that fails to load fails
+  the new alloc's startup, the deployment fails, and Nomad reverts.
+
+If you enable rate limiting, also pass `--rate-limit-identifier identity`
+(see [Running behind a service mesh](#running-behind-a-service-mesh)).
+
+### Updating policies
+
+After CI has synced a new checkout onto the policy volume, pick one path:
+
+```bash
+EXPECTED_DIGEST=$(garmr policy digest policies/)
+
+# (a) Rollout: each new alloc loads at startup; a broken tree fails the
+#     deployment and auto_revert restores the previous version.
+nomad job run deploy/nomad/garmr-service.nomad.hcl
+
+# (b) Reload in place: dispatch the reload job, which runs inside the mesh
+#     and converges every alloc on the expected digest.
+nomad job dispatch -meta digest="$EXPECTED_DIGEST" garmr-reload
+```
+
+The reload is a job, not a `curl` from CI, because the `/v1` API is reachable
+only from inside the mesh. The job declares Garmr as a Connect upstream,
+which load-balances across allocs, so it runs
+`garmr policy reload --converge --instances N --expect-digest <digest>`:
+it repeats the reload until it has seen `N` distinct allocs (by
+`instance_id`, which is the Nomad alloc ID) all report the expected digest,
+and exits nonzero on timeout, mismatch, or divergence. Keep the job's
+`instances` variable equal to the service job's `count`.
+
+See `deploy/nomad/README.md` for the full pipeline, sizing, and the batch
+evaluation job.
 
 ## Helm chart
 
@@ -81,9 +157,19 @@ records *which service* made the call — not just an IP.
 - **API key authentication should stay off** (`config.auth.api_key: ""`).
   The mesh already authenticated the caller.
 - **Authorization** is enforced by mesh intentions / AuthorizationPolicies —
-  Garmr does not re-check who may call it.
-- **Audit principal** lands automatically; no extra config required as long
-  as the XFCC header reaches Garmr.
+  Garmr does not re-check who may call it. Intentions are service-level, so
+  any service allowed to evaluate can also reach the management endpoints
+  (reload, delete); keep the allow list tight.
+- **Audit principal** is recorded only if the XFCC header actually reaches
+  Garmr. On Consul that requires the service's protocol to be `http`
+  (service-defaults on Nomad, a `ServiceDefaults` resource on Kubernetes —
+  see below). Check a live record: an empty `principal` means the header is
+  missing.
+- **Rate limiting must key on identity.** Behind the sidecar every caller's
+  address is the local Envoy, so the default `client_identifier: ip` puts
+  all callers in one bucket. Set `rate_limit.client_identifier: identity`
+  (`--rate-limit-identifier identity`). The Helm chart's `config.rate_limit`
+  doesn't set it, so add it to your values when you enable rate limiting.
 
 ### Consul Connect
 
@@ -94,6 +180,18 @@ short version:
 helm upgrade --install garmr deploy/helm/garmr \
   --namespace garmr --create-namespace \
   --set mesh.consulConnect.enabled=true
+```
+
+The chart doesn't create a `ServiceDefaults` resource. Apply one so Envoy
+speaks HTTP to Garmr and injects XFCC:
+
+```yaml
+apiVersion: consul.hashicorp.com/v1alpha1
+kind: ServiceDefaults
+metadata:
+  name: garmr
+spec:
+  protocol: http
 ```
 
 Then apply ServiceIntentions to gate callers:
@@ -152,8 +250,8 @@ tracing:
 
 ### Health probes
 
-- `/healthz` and `/livez` — liveness (cheap, cached; both serve the same
-  check). Return 200 while the process is live.
+- `/healthz` and `/livez` — liveness (cheap; both serve the same check).
+  Always return 200 while the process can answer HTTP.
 - `/readyz` — readiness. Returns 503 until policies are loaded. Runs only
   cheap in-process checks: the storage backend is *not* contacted, so a
   kubelet polling this endpoint does not generate backend traffic.
@@ -163,11 +261,12 @@ tracing:
   unlike the probe endpoints — requires the API key when one is set,
   because every call performs storage I/O.
 
-The Helm chart wires these probes automatically.
+The Helm chart wires these probes automatically; the Nomad service job
+checks `/readyz` through Consul.
 
 ## High availability
 
-Garmr replicas are fully stateless. Each replica:
+Garmr instances are fully stateless. Each instance:
 
 - Loads policies from the configured storage backend at startup, and fails
   to start if that load fails.
@@ -180,9 +279,31 @@ Garmr replicas are fully stateless. Each replica:
 
 This means:
 
-- **Multiple replicas stay in sync** via the shared backend, not leader
-  election. There is no cross-replica coordination to fail.
-- **Expect a convergence window** when policies change: replicas pick up the
+- **Multiple instances stay in sync** via the shared backend, not leader
+  election. There is no cross-instance coordination to fail — and nothing
+  propagates a reload either.
+- **`POST /v1/policies/reload` reaches one instance.** Behind a Service or a
+  mesh upstream, a single call reloads whichever instance answered and leaves
+  the rest serving the old set. Reload the fleet with the CLI:
+
+  ```bash
+  # Instances you can address directly (pod IPs, Nomad alloc addresses)
+  garmr policy reload \
+    --servers http://10.0.0.11:8080,http://10.0.0.12:8080 \
+    --expect-digest "$(garmr policy digest policies/)"
+
+  # Through one load-balancing address (a mesh upstream)
+  garmr policy reload --server http://localhost:8080 \
+    --converge --instances 2 \
+    --expect-digest "$(garmr policy digest policies/)"
+  ```
+
+  Both exit nonzero unless every instance reloaded and reports the expected
+  digest. To check without reloading, read `digest` and `instance_id` from
+  `GET /v1/policies` on each instance.
+- **`DELETE /v1/policies` is also single-instance**, and is undone by the next
+  reload or restart. Remove policies from git and deploy instead.
+- **Expect a convergence window** when policies change: instances pick up the
   new set when they are reloaded or rolled. The chart's `checksum/config`
   annotation rolls pods automatically when the ConfigMap changes, so the
   window is the rollout.
@@ -195,7 +316,8 @@ This means:
 Garmr traps SIGTERM, immediately flips `/readyz` to 503 so no new traffic
 routes to the instance, and drains in-flight requests for up to
 `shutdown_timeout` (default **30 seconds**, `--shutdown-timeout`).
-Kubernetes sends SIGTERM at pod deletion and waits for
+The Nomad service job uses `--shutdown-timeout 20s` under a 30s
+`kill_timeout`. Kubernetes sends SIGTERM at pod deletion and waits for
 `terminationGracePeriodSeconds` (default 30). Because the drain budget and
 the default grace period are the same length, either lower
 `--shutdown-timeout` or raise `terminationGracePeriodSeconds` so a drain

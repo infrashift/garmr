@@ -39,14 +39,14 @@ env:  "testing"  // Error: not one of "dev", "staging", "prod"
 
 Most configuration and policy languages fall into one of two camps: too simple (YAML, JSON) or too powerful (general-purpose scripting). CUE occupies a deliberate middle ground.
 
-CUE is **intentionally not Turing-complete**. There are no loops, no mutable variables, no unbounded recursion, and no side effects. This might sound like a limitation, but it is CUE's greatest strength:
+CUE is **intentionally not Turing-complete**. There are no general loops (comprehensions iterate only over finite values), no mutable variables, no unbounded recursion, and no side effects. This might sound like a limitation, but it is CUE's greatest strength:
 
 - **Guaranteed termination** -- every CUE evaluation finishes. There is no possibility of infinite loops, runaway recursion, or resource exhaustion. When you load a policy, you know it will complete.
 - **Total analyzability** -- because CUE programs always terminate, tooling can fully reason about what a configuration does. Linters, formatters, and validators can make strong guarantees that are impossible in Turing-complete languages.
 - **Safe composition** -- CUE values form a lattice where any two configurations can be merged without ambiguity. Order doesn't matter. There are no override surprises. If two constraints conflict, CUE reports an error rather than silently picking a winner.
-- **Hermetic evaluation** -- the same CUE input always produces the same output, regardless of environment, execution order, or platform. Policies behave identically in CI, staging, and production.
+- **Hermetic evaluation** -- the same CUE input always produces the same output, regardless of environment, execution order, or platform. A Garmr policy loads to the same compiled rules (and the same digest) in CI, staging, and production.
 
-This matters enormously for policy. OPA's Rego is Turing-complete, which means a policy *could* loop forever or produce different results depending on evaluation order. With CUE, that class of bugs simply cannot exist.
+This matters enormously for policy. OPA's Rego is Turing-complete, which means a policy *could* loop forever or produce different results depending on evaluation order. Garmr keeps the same guarantee at evaluation time: CUE describes the policy, and the engine evaluates a compiled expression tree whose only iteration is `forEach` over the input's lists, checked against a deadline. The one input from outside the request is the clock -- `datetime` checks such as `notExpired` and `withinDays`, and the `now` builtin, depend on when they run.
 
 ## Why Garmr Chose CUE
 
@@ -64,7 +64,7 @@ We evaluated several languages for Garmr's policy engine -- Rego (OPA), CEL, Jso
 
 ### Types Are Constraints
 
-In most policy languages, you write rules that check data after the fact. In CUE, the schema *is* the rule. If a policy field expects a severity of `"low" | "medium" | "high" | "critical"`, CUE rejects anything else the moment you write it -- no evaluation needed.
+In most policy languages, you write rules that check data after the fact. In CUE, the schema *is* the rule. If a policy field expects a severity of `"info" | "low" | "medium" | "high" | "critical"`, CUE rejects anything else the moment you write it -- no evaluation needed.
 
 ### Schema and Data Unification
 

@@ -19,15 +19,27 @@ make build
 
 ## Running the Server
 
+Audit logging is on by default and writes to `/var/log/garmr/audit.log`.
+The server creates that directory at startup and **refuses to start** if it
+can't, which is the normal case for a non-root user. Every local example
+below therefore sets `--audit-path` (to `stdout`, or a writable file).
+
 ### Option 1: Development Mode (easiest)
 
 ```bash
-# Start server with example policies
-./bin/garmr-server --dev --policy-dir ./example-policies --log-format console
+# Build and start the server with the example policies
+make dev
+
+# ...which runs:
+./bin/garmr-server --dev --policy-dir ./example-policies \
+  --audit-path /tmp/garmr-audit/audit.log --log-format console
 
 # Server listens on:
 # - HTTP: localhost:8080
 ```
+
+To watch decisions as they happen, use `--audit-path stdout` instead: audit
+records go to stdout and application logs to stderr.
 
 ### Option 2: With Config File
 
@@ -39,12 +51,18 @@ cp config.example.yaml config.yaml
 ./bin/garmr-server --config config.yaml
 ```
 
+`config.example.yaml` is written for a deployed server: it points
+`policy_dir` at `/etc/garmr/policies` and the audit log at
+`/var/log/garmr/audit.log`. For a local run, change `policy_dir` to
+`./example-policies` and `audit.path` to `stdout` (or a writable path).
+
 ### Option 3: Environment Variables
 
 ```bash
 export GARMR_POLICY_DIR=./example-policies
 export GARMR_HTTP_ADDR=:8080
 export GARMR_LOG_LEVEL=debug
+export GARMR_AUDIT_PATH=stdout
 
 ./bin/garmr-server
 ```
@@ -59,12 +77,14 @@ The HTTP API is the simplest way to evaluate policies:
 # Health check
 curl http://localhost:8080/health
 
-# Evaluate a file
+# Evaluate a file against every loaded policy that targets it. With the
+# example policies this is a DENY: many example policies target every kind
+# ("*") and check fields a release doesn't have.
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
   -d '{"input": '"$(cat testdata/real-world/release-pass.json)"'}'
 
-# Evaluate with namespace filter
+# Evaluate with namespace filter: only the release policies run (ALLOW)
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
   -d '{"input": '"$(cat testdata/real-world/release-pass.json)"', "namespace": "release"}'
@@ -72,7 +92,7 @@ curl -X POST http://localhost:8080/v1/evaluate \
 # Pretty print with jq
 curl -s -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
-  -d '{"input": '"$(cat testdata/real-world/release-pass.json)"'}' | jq .
+  -d '{"input": '"$(cat testdata/real-world/release-pass.json)"', "namespace": "release"}' | jq .
 ```
 
 ### Using the CLI
@@ -141,7 +161,8 @@ violation is reported (no short-circuit), and decisions aggregate:
 ### Example: Passing Input
 
 Use `--verbose` (or `-v`) to see every rule result, not just failures.
-Rules within each policy evaluate in priority order:
+Policies are reported in name order, and rules within each policy in
+priority order:
 
 ```bash
 ./bin/garmr eval --verbose \
@@ -153,13 +174,15 @@ Rules within each policy evaluate in priority order:
 #
 # SEVERITY     POLICY/RULE                    RESULT     ID       MESSAGE
 # ----------------------------------------------------------------------------------------------------
+# HIGH         release/release-advisory       PASS       REL-006
+# HIGH         release/release-advisory       PASS       REL-003
+# HIGH         release/release-advisory       PASS       REL-005
 # CRITICAL     release/release-gate           PASS       REL-001
 # CRITICAL     release/release-gate           PASS       REL-002
 # CRITICAL     release/release-gate           PASS       REL-004
 # CRITICAL     release/release-gate           PASS       REL-007
-# HIGH         release/release-advisory       PASS       REL-006
-# HIGH         release/release-advisory       PASS       REL-003
-# HIGH         release/release-advisory       PASS       REL-005
+#
+# Evaluated 2 policies, 7 rules in 44.293µs
 ```
 
 ### Example: Advisory-only failure → WARN
@@ -173,7 +196,10 @@ Coverage below 80% is a quality signal, not a blocker. The input at
 # Decision: ⚠ WARN
 #
 # HIGH         release/release-advisory       FAIL       REL-003  code coverage must be >= 80%
+#                                                                  ↳ Add tests to increase coverage above the 80% threshold
 ```
+
+WARN exits `0`; only DENY (or an error) exits `1`.
 
 ### Example: Critical failure → DENY (all violations reported)
 
@@ -182,9 +208,11 @@ Coverage below 80% is a quality signal, not a blocker. The input at
 
 # Decision: ✗ DENY
 #
-# CRITICAL     release/release-gate           FAIL       REL-004  release must have zero critical a...
 # HIGH         release/release-advisory       FAIL       REL-003  code coverage must be >= 80%
-# HIGH         release/release-advisory       FAIL       REL-005  release must have signed provenan...
+#                                                                  ↳ Add tests to increase coverage above the 80% threshold
+# HIGH         release/release-advisory       FAIL       REL-005  release must have signed provenance w...
+# CRITICAL     release/release-gate           FAIL       REL-004  release must have zero critical and h...
+#                                                                  ↳ Remediate all critical and high vulnerabilities before release
 ```
 
 ## HTTP API
@@ -239,8 +267,13 @@ For more details, see the [CI/CD Integration guide](/garmr/docs/guides/cicd/).
 ```yaml
 - name: Policy Check
   run: |
-    ./bin/garmr eval --input deployment.json -o json > result.json
-    if [ "$(jq -r '.decision' result.json)" = "deny" ]; then
+    # garmr exits 1 on deny *and* on errors; read the decision from the JSON
+    ./bin/garmr eval --input deployment.json -o json > result.json || true
+    decision=$(jq -r '.decision // empty' result.json)
+    if [ -z "$decision" ]; then
+      echo "Policy evaluation failed (no decision returned)"; exit 2
+    fi
+    if [ "$decision" = "deny" ]; then
       echo "Policy violations found:"
       jq -r '.results[] | select(.passed == false) | "  - [\(.severity)] \(.rule_id): \(.message)"' result.json
       exit 1
@@ -253,7 +286,8 @@ For more details, see the [CI/CD Integration guide](/garmr/docs/guides/cicd/).
 ```yaml
 policy-check:
   script:
-    - ./bin/garmr eval --input deployment.json || exit 1
+    # Exits 1 on DENY or on any error (e.g. server unreachable)
+    - ./bin/garmr eval --input deployment.json
   allow_failure: false
 ```
 
@@ -315,7 +349,7 @@ Generate markdown documentation from policies (runs locally, no server needed):
 # Server settings
 http_addr: ":8080"
 
-# Policy loading
+# Policy loading (selects the filesystem backend rooted here)
 policy_dir: "/policies"
 
 # Transport security: Garmr serves plain HTTP only. TLS/mTLS is the
@@ -326,10 +360,18 @@ log:
   level: "info"    # debug, info, warn, error
   format: "json"   # json, console
 
-# Storage backend (optional)
-storage:
-  type: "filesystem"  # the only implemented backend
+# Audit trail: "stdout"/"stderr" stream it, anything else is a file path
+audit:
+  path: "stdout"
+
+# Storage backend (optional). When storage.type is set, policy_dir is
+# ignored and the root comes from storage.root (default "/policies"):
+# storage:
+#   type: "filesystem"   # the only implemented backend
+#   root: "/policies"
 ```
+
+See [Server Configuration](/garmr/docs/reference/configuration/) for every setting.
 
 ## Troubleshooting
 
@@ -340,7 +382,11 @@ storage:
 lsof -i :8080
 
 # Use a different port
-./bin/garmr-server --http-addr :8081
+./bin/garmr-server --http-addr :8081 --policy-dir ./example-policies --audit-path stdout
+
+# "creating audit log directory: mkdir /var/log/garmr: permission denied"
+# means the default audit path isn't writable: pass --audit-path stdout
+# (or a writable file), or --audit=false
 ```
 
 ### Policies not loading
@@ -350,8 +396,13 @@ lsof -i :8080
 ./bin/garmr validate ./example-policies
 
 # Enable debug logging
-./bin/garmr-server --log-level debug --log-format console
+./bin/garmr-server --policy-dir ./example-policies --audit-path stdout \
+  --log-level debug --log-format console
 ```
+
+A policy set that fails to load is fatal at startup: the error names the
+file and the failing check. A server started with no `policy_dir` (and no
+`storage.type`) starts with zero policies and denies every evaluation.
 
 ### Connection refused
 

@@ -1,6 +1,7 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import starlightLinksValidator from 'starlight-links-validator';
 
 // https://astro.build/config
 export default defineConfig({
@@ -11,6 +12,9 @@ export default defineConfig({
 			title: 'Garmr',
 			favicon: '/favicon.jpg',
 			customCss: ['./src/styles/custom.css'],
+			// Fails the build on a broken internal link: a relative link
+			// that resolved outside the base path shipped unnoticed.
+			plugins: [starlightLinksValidator()],
 			social: [
 				{
 					icon: 'github',

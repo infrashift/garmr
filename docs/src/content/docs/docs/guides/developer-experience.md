@@ -186,8 +186,9 @@ garmr eval --input testdata/real-world/k8s-pod-security-context-pass.json -n sec
 garmr eval --input testdata/real-world/k8s-pod-security-context-pass.json -n security -o json | jq
 ```
 
-To check one policy in isolation, name it with `-p` (with its namespace in
-`-n`): `garmr eval --input pod.json -n security -p container-security`.
+To check one policy in isolation, name it with `-p`:
+`garmr eval --input pod.json -p security/container-security` (or the bare
+name with its namespace: `-n security -p container-security`).
 
 ---
 

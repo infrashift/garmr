@@ -14,6 +14,7 @@
 package server
 
 import (
+	"fmt"
 	"os"
 	"sync"
 
@@ -26,24 +27,38 @@ var (
 )
 
 // InstanceID returns a stable identifier for this process.
-//
-// Prefers the orchestrator's own allocation identity, which is what an
-// operator correlates against logs and `nomad alloc status`; falls back to the
-// hostname (the container ID under most runtimes) and finally to a random
-// UUID, so the value is never empty.
 func InstanceID() string {
 	instanceIDOnce.Do(func() {
-		for _, env := range []string{"NOMAD_ALLOC_ID", "NOMAD_SHORT_ALLOC_ID", "HOSTNAME"} {
-			if v := os.Getenv(env); v != "" {
-				instanceID = v
-				return
-			}
-		}
-		if host, err := os.Hostname(); err == nil && host != "" {
-			instanceID = host
-			return
-		}
-		instanceID = uuid.New().String()
+		instanceID = resolveInstanceID(os.Getenv, os.Hostname, os.Getpid())
 	})
 	return instanceID
+}
+
+// resolveInstanceID prefers the orchestrator's own allocation identity, which
+// is what an operator correlates against logs and `nomad alloc status`.
+// Without one it falls back to the hostname (the container ID under most
+// runtimes) qualified by the PID, and finally to a random UUID, so the value
+// is never empty.
+//
+// The PID matters: a hostname alone names a machine, not a process, and two
+// instances on one host (systemd units, a raw_exec job without alloc
+// variables, a laptop) would report the same ID, so --converge would count
+// them as one instance and wait for a second that never appears, or worse,
+// accept one instance's acknowledgement for both.
+func resolveInstanceID(getenv func(string) string, hostname func() (string, error), pid int) string {
+	for _, env := range []string{"NOMAD_ALLOC_ID", "NOMAD_SHORT_ALLOC_ID"} {
+		if v := getenv(env); v != "" {
+			return v
+		}
+	}
+	host := getenv("HOSTNAME")
+	if host == "" {
+		if h, err := hostname(); err == nil {
+			host = h
+		}
+	}
+	if host != "" {
+		return fmt.Sprintf("%s:%d", host, pid)
+	}
+	return uuid.New().String()
 }

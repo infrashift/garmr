@@ -55,7 +55,9 @@ Every response carries CORS headers. With `cors.allowed_origins` empty (the
 default) the server answers `Access-Control-Allow-Origin: *`; otherwise it
 echoes the request's `Origin` when it is on the list. `OPTIONS` preflight
 requests are answered `200` with the allow headers before authentication
-runs. See [Configuration → CORS](/garmr/docs/reference/configuration/#cors).
+runs. `Access-Control-Allow-Headers` lists `Content-Type`, `Authorization`,
+`X-Request-Id`, the configured `auth.api_key_header` (default `X-API-Key`),
+and `rate_limit.header_name` (default `X-Client-ID`). See [Configuration → CORS](/garmr/docs/reference/configuration/#cors).
 
 Note: the `garmr` CLI does not yet support sending an API key — use the REST API directly against authenticated servers.
 
@@ -69,10 +71,11 @@ Note: the `garmr` CLI does not yet support sending an API key — use the REST A
 
 Cheap liveness probes (no dependency checks). Use these for liveness probes.
 
-**Response:** always `200 OK` while the process can answer HTTP. Liveness
-status is never changed after startup, so these endpoints report "the process
-is up", not "the process is healthy" — use `/readyz` for whether the
-instance should get traffic.
+**Response:** always `200 OK` while the process can answer HTTP. Liveness is
+constant by design: failing it would restart the process, which fixes none
+of the problems the checks detect (a bad policy set or an unreachable backend
+survives a restart). These endpoints report "the process is up"; use
+`/readyz` for whether the instance should get traffic.
 
 ```json
 {"status": "healthy", "timestamp": "2026-10-04T14:23:04.877Z", "version": "1.2.0"}
@@ -203,7 +206,7 @@ Evaluate input against loaded policies.
 |-------|------|-------------|---------|
 | `input` | object | Resource to evaluate (required) | |
 | `namespace` | string | Policy namespace filter | (all) |
-| `policies` | []string | Specific policies to evaluate, by **bare** `metadata.name`. Names resolve inside `namespace` (or `default` when `namespace` is empty), so `"security/container-security"` does not match anything. A named policy is still skipped if its target doesn't match the input. | (all matching) |
+| `policies` | []string | Specific policies to evaluate: `"namespace/name"`, or a bare `metadata.name` resolved inside `namespace` (`default` when `namespace` is empty). A qualified name ignores `namespace`. A named policy is still skipped if its target doesn't match the input. | (all matching) |
 | `include_passed` | bool | Include passed rules | `false` |
 
 **Response:**
@@ -321,13 +324,13 @@ curl -X POST http://localhost:8080/v1/evaluate \
     "include_passed": true
   }'
 
-# Evaluate specific policies (bare names, resolved in "namespace")
+# Evaluate specific policies (namespace/name, or bare names resolved in
+# "namespace")
 curl -X POST http://localhost:8080/v1/evaluate \
   -H "Content-Type: application/json" \
   -d '{
     "input": {"kind": "Pod", "metadata": {"name": "web"}},
-    "namespace": "security",
-    "policies": ["container-security"]
+    "policies": ["security/container-security"]
   }'
 ```
 
@@ -367,7 +370,8 @@ it with `garmr policy digest <dir>` run on the git checkout to confirm the
 server converged on exactly the content that was shipped; `hash` is the
 per-policy equivalent.
 
-`instance_id` names the instance that answered. Behind a service-mesh
+`instance_id` names the instance that answered: the Nomad alloc ID when the
+server runs under Nomad, otherwise `<hostname>:<pid>`. Behind a service-mesh
 upstream every call load-balances across instances, so a single response
 describes one instance rather than the fleet — collect these across repeated
 calls (or use `garmr policy reload --converge`) to verify all of them agree.
@@ -505,8 +509,11 @@ when it loads policies.
 
 The request body is capped by `max_validate_size` (default 1 MiB, and never
 more than `max_recv_size`); larger bodies get `413`. Concurrent validations
-are limited to `min(GOMAXPROCS, 8)`; a request that can't get a slot within
-`evaluation.timeout` gets `503`.
+are limited to `min(GOMAXPROCS, 8)`. `evaluation.timeout` bounds the whole
+request: one that can't get a slot, or whose compilation hasn't finished,
+within the budget gets `503` (`"Validation exceeded the time budget"` for a
+slow compile). CUE compilation can't be interrupted, so an abandoned compile
+keeps its slot until it finishes; timed-out requests can't pile up CPU work.
 
 **Example:**
 
@@ -542,7 +549,7 @@ shape:
 | 413 | Request Entity Too Large (body exceeds `max_recv_size`, or `max_validate_size` on `/v1/validate`) |
 | 429 | Too Many Requests (rate limited; `Retry-After` and `X-RateLimit-*` headers are set). Probe endpoints and `/metrics` are never rate limited. |
 | 500 | Internal Server Error (including a reload that failed — the previous policy set keeps serving) |
-| 503 | Service Unavailable: an evaluation that could not start before its budget ran out, or a validation that waited `evaluation.timeout` for a slot (both retryable); also not-ready / unhealthy probe responses |
+| 503 | Service Unavailable: an evaluation that could not start before its budget ran out, or a validation that did not get a slot or finish compiling within `evaluation.timeout` (both retryable); also not-ready / unhealthy probe responses |
 
 ---
 
@@ -755,7 +762,8 @@ A decision record:
 and is empty when no sidecar sets it. `trace_id` is empty when the request
 carries no trace context. Every event carries `request_id`, `timestamp`,
 `source_ip`, `principal`, and `trace_id`; the other events add their own
-fields (`valid`/`error_count` for `validate`, `policy_name`/`deleted` for
+fields (`valid`/`error_count` for `validate`, plus `timed_out: true` when the
+compile outran `evaluation.timeout`; `policy_name`/`deleted` for
 `policy_delete`, `success`/`policies_loaded`/`error` for `policy_reload`).
 
 Caller-controlled fields (`request_id`, `user_agent`, `principal`,

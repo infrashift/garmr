@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -13,14 +14,12 @@ import (
 	"github.com/infrashift/garmr/internal/engine"
 )
 
-// A caller that has given up must not keep queueing for a replica.
+// A caller that has given up must not get work run on its behalf.
 //
-// The queue in front of the pool was unbounded and ignored the caller's
-// context, so every blocked request went on pinning its decoded input. A
-// burst of large bodies allocated until the container was OOM-killed instead
-// of shedding load. Evaluate now returns ErrEvaluationUnavailable, which the
-// handler surfaces as 503.
-func TestEvaluate_ShedsLoadWhenPoolIsSaturated(t *testing.T) {
+// Evaluate checks the caller's context before starting and returns
+// ErrEvaluationUnavailable once it has ended, which the handler surfaces as
+// 503: work the caller abandoned is shed rather than run.
+func TestEvaluate_ShedsWorkTheCallerAbandoned(t *testing.T) {
 	eng, err := engine.NewEngine(zap.NewNop())
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -29,8 +28,8 @@ func TestEvaluate_ShedsLoadWhenPoolIsSaturated(t *testing.T) {
 		t.Fatalf("LoadPolicy: %v", loadErr)
 	}
 
-	// An already-expired context stands in for "every replica is busy and
-	// this caller's budget ran out while it waited".
+	// An already-expired context stands in for a caller whose budget ran
+	// out before evaluation started.
 	ctx, cancel := context.WithTimeout(context.Background(), 0)
 	defer cancel()
 
@@ -103,8 +102,8 @@ func TestEvaluate_NonStringYAMLKeysAre400(t *testing.T) {
 	}
 }
 
-// /v1/validate compiles caller-supplied CUE and has no replica pool to push
-// back with, so its own source cap must be far below MaxRecvSize.
+// /v1/validate compiles caller-supplied CUE, whose cost grows with its
+// structure, so its own source cap must be far below MaxRecvSize.
 func TestValidate_CapsSourceIndependentlyOfMaxRecvSize(t *testing.T) {
 	ts := setupTestServer(t, Config{MaxRecvSize: 16 << 20, MaxValidateSize: 4096})
 	defer ts.Close()
@@ -186,5 +185,93 @@ func TestEvaluationTimeout_DefaultsAndOverrides(t *testing.T) {
 func TestValidateConcurrency_IsPositive(t *testing.T) {
 	if got := validateConcurrency(); got < 1 {
 		t.Errorf("validateConcurrency() = %d, want >= 1", got)
+	}
+}
+
+// newValidateTestServer serves srv's real handler chain with validate swapped
+// for fn, so the time bound can be exercised with a compile of known length.
+func newValidateTestServer(t *testing.T, cfg Config, fn func(string) ([]engine.ValidationError, []engine.ValidationError)) (*Server, *httptest.Server) {
+	t.Helper()
+	eng, err := engine.NewEngine(zap.NewNop())
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	srv, err := NewServer(cfg, eng, zap.NewNop())
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	srv.validate = fn
+	srv.mu.Lock()
+	srv.ready = true
+	srv.mu.Unlock()
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return srv, ts
+}
+
+// CUE compilation cannot be interrupted, so the evaluation budget has to bound
+// how long the caller waits. It used to bound only the wait for a slot: a
+// slow compile held the request open for as long as the compile took.
+func TestValidate_ResponseBoundedByEvaluationTimeout(t *testing.T) {
+	release := make(chan struct{})
+	compiled := make(chan struct{})
+	srv, ts := newValidateTestServer(t, Config{EvaluationTimeout: 100 * time.Millisecond},
+		func(string) ([]engine.ValidationError, []engine.ValidationError) {
+			<-release
+			close(compiled)
+			return nil, nil
+		})
+
+	start := time.Now()
+	resp, err := http.Post(ts.URL+"/v1/validate", "application/json", strings.NewReader(`{"policy":"x: 1"}`))
+	if err != nil {
+		t.Fatalf("POST /v1/validate: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status = %d for a compile past the budget, want 503", resp.StatusCode)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("request took %v; the budget is 100ms", elapsed)
+	}
+
+	// The abandoned compile still holds its slot, so timed-out requests
+	// cannot stack unbounded CPU work.
+	if got := len(srv.validateSem); got != 1 {
+		t.Errorf("slots held after timeout = %d, want 1 (the abandoned compile)", got)
+	}
+	close(release)
+	<-compiled
+	deadline := time.Now().Add(5 * time.Second)
+	for len(srv.validateSem) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the finished compile never released its slot")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The compile runs off the handler goroutine, beyond recoveryMiddleware's
+// reach; a panic there must still become a 500, not a crashed process.
+func TestValidate_CompilePanicIsA500(t *testing.T) {
+	srv, ts := newValidateTestServer(t, Config{},
+		func(string) ([]engine.ValidationError, []engine.ValidationError) {
+			panic("boom")
+		})
+
+	resp, err := http.Post(ts.URL+"/v1/validate", "application/json", strings.NewReader(`{"policy":"x: 1"}`))
+	if err != nil {
+		t.Fatalf("POST /v1/validate: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d after a compile panic, want 500", resp.StatusCode)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(srv.validateSem) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("a panicking compile never released its slot")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

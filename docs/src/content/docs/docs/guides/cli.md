@@ -22,6 +22,22 @@ The CLI has no authentication or TLS client options and cannot talk to an API-ke
 | `--quiet` | `-q` | Suppress non-essential output | `false` |
 | `--verbose` | `-v` | Verbose output (see per-command docs for exact effect) | unset |
 
+## Exit Codes
+
+Every command uses the same three codes, so CI can tell "the answer is no"
+from "there is no answer":
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success: allow or warn, valid, tests passed, healthy, reload converged |
+| 1 | A negative result: deny, an invalid policy, a failed test, a lock-file mismatch, an unhealthy server, a failed or unconverged reload |
+| 2 | The command could not run: bad flags or arguments, unreadable `eval` input, a policy or test suite that fails to load (`test`, `policy digest`), or a server that is unreachable or answers with an error (`eval`, `policy list/get/delete`) |
+
+Fail the build on `1`; retry or alert on `2`. Three commands report an
+unreachable server as `1`, because for them it is the answer: `health`
+(the server is not healthy), `policy reload` (that instance did not
+reload), and `validate --remote` (the file was not validated).
+
 ---
 
 ## Commands
@@ -41,7 +57,7 @@ garmr eval --input <file> [flags]
 | `--input` | `-i` | Input file (`-` for stdin). One of `--input` or `--data` is required. | |
 | `--data` | `-d` | Inline JSON/YAML data | |
 | `--format` | `-f` | Input format (json, yaml, auto) | `auto` |
-| `--policy` | `-p` | Specific policies to evaluate, by bare `metadata.name` (repeatable). Names resolve inside `--namespace`, or `default` when it is unset. | |
+| `--policy` | `-p` | Specific policies to evaluate (repeatable): `namespace/name`, or a bare `metadata.name` resolved inside `--namespace` (`default` when it is unset). A qualified name ignores `--namespace`. | |
 | `--namespace` | `-n` | Policy namespace to evaluate (single value) | |
 | `--request-id` | | Request ID for audit correlation | |
 | `--verbose` | `-v` | Show rule details. Default shows details on fail, hides on pass. `--verbose=false` always hides. | unset |
@@ -55,8 +71,8 @@ garmr eval --input deployment.json
 # Filter by namespace (single namespace per invocation)
 garmr eval --input deployment.json -n security
 
-# Evaluate one named policy: bare name plus its namespace
-# (-p security/container-security would look for that name in "default")
+# Evaluate one named policy: namespace/name, or a bare name plus -n
+garmr eval --input deployment.json -p security/container-security
 garmr eval --input deployment.json -n security -p container-security
 
 # JSON output for CI/CD
@@ -80,12 +96,11 @@ garmr eval --input deployment.json --verbose=false
 | Code | Meaning |
 |------|---------|
 | 0 | ALLOW or WARN - Nothing blocked the evaluation |
-| 1 | DENY - A deny-enforced policy failed, **or** the command itself failed (server unreachable, a `4xx`/`5xx` from the server, unreadable input) |
+| 1 | DENY - A deny-enforced policy failed |
+| 2 | The evaluation did not run: server unreachable, a `4xx`/`5xx` from the server, unreadable input, bad flags |
 
-Exit code `1` alone does not distinguish a deny from an outage. A CI step
-that must tell them apart should use `-o json` and read `.decision`: a
-deny prints a decision, while a failed call prints `Error: ...` on stderr
-and no JSON on stdout.
+A deny and an outage have different exit codes, so a CI step can fail the
+build on `1` and retry or alert on `2` without parsing the output.
 
 Warn is advisory by design, so `garmr eval` exits `0` on warn decisions.
 If a team needs warnings to gate CI, change the policy's
@@ -239,7 +254,7 @@ garmr policy digest <policy-dir|policy-file>
 
 Compare the result with the `digest` field of `GET /v1/policies`, or of a
 reload response, to verify that a server converged on exactly the content
-that was shipped. Exits `1` if the policies fail to load.
+that was shipped. Exits `2` if the policies fail to load.
 
 ```bash
 # Digest of the checkout
@@ -286,9 +301,8 @@ one address (combining it with several `--servers` is an error), and it
 fails if the server does not report an `instance_id`.
 
 `instance_id` is the server's `NOMAD_ALLOC_ID`, else `NOMAD_SHORT_ALLOC_ID`,
-else `HOSTNAME`, else the OS hostname. Instances that share one of those
-values (for example two processes on one host outside Nomad) look like one
-instance to `--converge`.
+else `<hostname>:<pid>` (the `HOSTNAME` variable, or the OS hostname, plus
+the process ID), so two processes on one host are distinct instances.
 
 **Examples:**
 
@@ -344,8 +358,9 @@ In the list, an entry has `result`, `error`, or both (a digest mismatch
 reports the result alongside the error). A single address whose call failed
 outright (connection refused, non-`200`) also uses the list shape. With a
 single address, an `--expect-digest` mismatch prints the bare response with
-no error field — rely on the exit code, not the JSON, for that case. The
-`--converge` report adds `"error"` when it fails.
+the mismatch in its `"error"` field; `"success"` stays `true` because the
+server did reload, just not to the expected digest, and the command exits 1.
+The `--converge` report adds `"error"` when it fails.
 
 #### garmr policy lock
 
@@ -381,7 +396,8 @@ garmr policy validate-lock <file-or-dir> [file-or-dir...]
 ```
 
 Exits `0` when every policy matches its lock file and `1` otherwise
-(including a missing lock file), so it can gate CI.
+(including a missing lock file), so it can gate CI. Exits `2` when the
+arguments contain no policy files at all.
 
 **Examples:**
 
@@ -439,7 +455,8 @@ garmr test <policy-file> [test-file] [flags]
 | `--format` | | Output format (text, json, tap) — deliberately not `-o`, which is the root output flag | `text` |
 | `--fail-fast` | | Stop on first failure | `false` |
 
-Exits `0` when every test passes and `1` when any test fails or a suite can't be loaded.
+Exits `0` when every test passes, `1` when any test fails, and `2` when no
+suite is found or a policy or suite can't be loaded.
 
 **Examples:**
 
@@ -546,9 +563,8 @@ garmr health [flags]
 
 Calls the server's `/health` endpoint. Exits `0` when the server answers
 healthy and `1` when it is unreachable or reports unhealthy (with
-`--wait`, `1` once `--timeout` passes without a healthy answer). With
-`-o json` the response is printed and an unhealthy answer still exits `0`
-— check `.healthy` in that case.
+`--wait`, `1` once `--timeout` passes without a healthy answer), whatever
+the output format. A malformed `--server` address exits `2`.
 
 **Examples:**
 

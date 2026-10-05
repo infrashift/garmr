@@ -49,9 +49,6 @@ type Handler struct {
 	// network dependency belongs here.
 	deepCheckers map[string]Checker
 	version      string
-
-	// Cached status for liveness (avoids expensive checks)
-	liveStatus Status
 }
 
 // NewHandler creates a new health handler.
@@ -60,7 +57,6 @@ func NewHandler(version string) *Handler {
 		checkers:     make(map[string]Checker),
 		deepCheckers: make(map[string]Checker),
 		version:      version,
-		liveStatus:   StatusHealthy,
 	}
 }
 
@@ -175,27 +171,22 @@ func runChecker(ctx context.Context, name string, checker Checker) (check *Check
 }
 
 // LivenessHandler returns the liveness probe handler.
-// This is a simple check that Garmr is running.
+//
+// Liveness means "the process is serving HTTP" and is deliberately constant:
+// failing it restarts the process, which fixes none of the failure modes the
+// checkers detect (a bad policy set or an unreachable backend survives a
+// restart). Those belong to readiness, which takes the instance out of
+// rotation instead.
 func (h *Handler) LivenessHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		h.mu.RLock()
-		status := h.liveStatus
-		h.mu.RUnlock()
-
 		resp := &Response{
-			Status:    status,
+			Status:    StatusHealthy,
 			Timestamp: time.Now().UTC(),
 			Version:   h.version,
 		}
 
-		// Headers must be set before WriteHeader or they are dropped
 		w.Header().Set("Content-Type", "application/json")
-		if status == StatusHealthy {
-			w.WriteHeader(http.StatusOK)
-		} else {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
-
+		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(resp)
 	}
 }

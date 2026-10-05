@@ -17,9 +17,6 @@ func TestNewHandler(t *testing.T) {
 	if h.version != "1.0.0" {
 		t.Errorf("expected version 1.0.0, got %s", h.version)
 	}
-	if h.liveStatus != StatusHealthy {
-		t.Errorf("expected initial live status healthy, got %s", h.liveStatus)
-	}
 }
 
 func TestRegister(t *testing.T) {
@@ -114,9 +111,8 @@ func TestLivenessHandler_Healthy(t *testing.T) {
 	}
 }
 
-// Liveness is deliberately constant: it means "the process is serving", and
-// nothing mutates it (the SetLive mutator was deleted as dead code). Failing
-// liveness restarts the process, which no current failure mode wants.
+// Liveness is deliberately constant: it means "the process is serving".
+// Failing liveness restarts the process, which no current failure mode wants.
 func TestLivenessHandler_AlwaysHealthy(t *testing.T) {
 	h := NewHandler("1.0.0")
 	h.Register("failing", func(ctx context.Context) *Check {

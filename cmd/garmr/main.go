@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -37,7 +38,14 @@ Examples:
   garmr policy list
 
   # Start the server
-  garmr-server --config config.yaml`,
+  garmr-server --config config.yaml
+
+Exit codes:
+  0  success (allow or warn, valid, tests passed, healthy)
+  1  a negative result (deny, invalid policy, failed test, a server that is
+     unhealthy or unreachable for garmr health, a failed or unconverged reload)
+  2  the command could not run (bad flags or input, server unreachable or
+     returned an error)`,
 	SilenceUsage: true,
 }
 
@@ -94,8 +102,33 @@ func initConfig() {
 	_ = viper.ReadInConfig()
 }
 
+// Exit codes. CI must be able to tell "the policy said no" from "the check
+// never ran": a pipeline that retries or alerts on an outage must not do the
+// same for a deny.
+const (
+	exitNegative = 1 // the command ran and its answer is no
+	exitError    = 2 // the command could not produce an answer
+)
+
+// resultError reports a negative result through the error path, for
+// commands that return their outcome rather than exiting directly.
+type resultError struct{ error }
+
+// exitCode maps the error returned by a command to the process exit code.
+func exitCode(err error) int {
+	var r resultError
+	switch {
+	case err == nil:
+		return 0
+	case errors.As(err, &r):
+		return exitNegative
+	default:
+		return exitError
+	}
+}
+
 func main() {
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+		osExit(exitCode(err))
 	}
 }

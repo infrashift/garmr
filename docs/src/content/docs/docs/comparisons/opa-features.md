@@ -6,7 +6,7 @@ sidebar:
   label: "vs OPA: Features"
 ---
 
-> **Last updated:** 2026-10-04
+> **Last updated:** 2026-10-05
 
 ## Overview
 
@@ -40,7 +40,7 @@ This document compares their feature sets side-by-side and highlights capabiliti
 |---|---|---|---|
 | Decision outcomes | **allow / deny / warn** | allow / deny (boolean) | **Garmr advantage** — see [Three-Outcome Decisions](#1-three-outcome-decisions-allow--deny--warn) |
 | Decision structure | Structured response with per-rule results | Arbitrary JSON document | **Garmr advantage** — consistent, machine-readable format |
-| CI/CD exit codes | 0=allow/warn, 1=deny (or any error) | User must implement | **Garmr advantage** — native pipeline integration |
+| CI/CD exit codes | 0=allow/warn, 1=deny, 2=evaluation did not run | User must implement | **Garmr advantage** — native pipeline integration |
 | Dry-run mode | Built-in (deny -> warn, `[DRY RUN]` prefix) | User must implement in Rego | **Garmr advantage** |
 | Fail-fast evaluation | Built-in (`evaluation.failFast`: stop the policy at its first failing rule) | User must implement in Rego | **Garmr advantage** |
 
@@ -145,7 +145,7 @@ Garmr has three first-class decision outcomes:
 
 - **Gradual rollout of new policies.** Deploy a new security policy with `enforcement: action: "warn"` first. Teams see violations in CI output but builds don't break. Once teams have addressed violations, flip to `enforcement: action: "deny"`.
 - **Severity-appropriate responses.** A missing `description` label is a warning. A privileged container is a deny. Both are violations, but they should have different consequences.
-- **CI/CD exit code semantics.** `garmr eval` returns exit code 0 (allow or warn) or 1 (deny). Errors (server unreachable, bad input) also exit 1, so a pipeline that must tell a deny from an outage should read the decision from `-o json`. CI pipelines use standard `$?` checking. If warnings need to gate CI, promote them to `enforcement: action: "deny"` in the policy — the decision belongs in code review, not in a CLI flag that can be flipped per pipeline.
+- **CI/CD exit code semantics.** `garmr eval` returns exit code 0 (allow or warn), 1 (deny), or 2 (the evaluation did not run: server unreachable, bad input). A pipeline can fail on a deny and retry an outage by checking `$?`, without parsing output. If warnings need to gate CI, promote them to `enforcement: action: "deny"` in the policy — the decision belongs in code review, not in a CLI flag that can be flipped per pipeline.
 - **Dry-run mode.** Setting `enforcement: dryRun: true` on a policy downgrades that policy's deny to warn and prefixes messages with `[DRY RUN]` — allowing policy authors to test deny policies in production without breaking anything. A dry-run policy never downgrades another policy's deny: the overall decision is the maximum across policies (allow < warn < deny).
 
 ```cue
@@ -314,7 +314,7 @@ garmr health --wait --timeout 30s
 **Why this matters:**
 
 - **Client-server architecture.** The CLI calls the API. Policies live on the server. CI jobs don't need local policy files — they send input to a central policy server and get decisions back. This means one source of truth for policies across all pipelines.
-- **Semantic exit codes.** Standard CI tools (GitHub Actions, GitLab CI, Jenkins) use exit codes to determine step success/failure. Garmr exits 0 for allow and warn and 1 for deny, without wrapper scripts. Errors also exit 1, so check the JSON decision when a deny and an outage need different handling.
+- **Semantic exit codes.** Standard CI tools (GitHub Actions, GitLab CI, Jenkins) use exit codes to determine step success/failure. Garmr exits 0 for allow and warn, 1 for deny, and 2 when the evaluation could not run, without wrapper scripts, so a deny and an outage can be handled differently.
 - **Multiple output formats.** `--output json` for machine parsing, `--output table` for human readability, `--output yaml` for compatibility.
 - **Request ID correlation.** `--request-id $CI_JOB_ID` links policy decisions back to the CI job that triggered them, enabling end-to-end audit trails.
 

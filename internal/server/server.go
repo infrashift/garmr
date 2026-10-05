@@ -140,6 +140,10 @@ type Server struct {
 	// caller-supplied CUE, so without this every concurrent request spun up
 	// its own CUE evaluator.
 	validateSem chan struct{}
+	// validate compiles a policy source; it is engine.Validate, swappable in
+	// tests so the time bound can be exercised without crafting CUE that is
+	// slow to compile.
+	validate func(source string) ([]engine.ValidationError, []engine.ValidationError)
 
 	mu       sync.RWMutex
 	ready    bool
@@ -163,6 +167,7 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 		checks:      make(map[string]bool),
 		obs:         obs,
 		validateSem: make(chan struct{}, validateConcurrency()),
+		validate:    eng.Validate,
 	}
 
 	// Wire observability into the engine
@@ -620,7 +625,7 @@ func (s *Server) buildHandler() http.Handler {
 	if s.rateLimiter != nil {
 		handler = s.rateLimiter.Middleware(handler)
 	}
-	handler = corsMiddleware(handler, s.config.CORSAllowedOrigins)
+	handler = corsMiddleware(handler, s.config.CORSAllowedOrigins, s.corsAllowHeaders())
 	handler = s.recoveryMiddleware(handler)
 	// otelhttp extracts `traceparent` from the incoming request and starts
 	// a server span covering the whole middleware chain.
@@ -1115,13 +1120,59 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	select {
 	case s.validateSem <- struct{}{}:
-		defer func() { <-s.validateSem }()
 	case <-ctx.Done():
 		s.writeError(w, http.StatusServiceUnavailable, "Server busy, retry later", ctx.Err())
 		return
 	}
 
-	errors, warnings := s.engine.Validate(req.Policy)
+	// CUE compilation cannot be interrupted, so the budget bounds how long
+	// the caller waits, not the compile itself. The compile keeps its slot
+	// until it really finishes: an abandoned compile still counts against
+	// the concurrency bound, so timed-out requests cannot pile up CPU work
+	// behind the caller's back.
+	type outcome struct {
+		errors, warnings []engine.ValidationError
+		panicked         any
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		defer func() {
+			// A panic here is outside recoveryMiddleware's goroutine and would
+			// kill the process; hand it back to the handler instead, and log it
+			// in case the handler has already given up waiting.
+			if p := recover(); p != nil {
+				s.logger.Error("validate compile panicked",
+					zap.String("request_id", requestID), zap.Any("panic", p))
+				done <- outcome{panicked: p}
+			}
+			<-s.validateSem
+		}()
+		errs, warns := s.validate(req.Policy)
+		done <- outcome{errors: errs, warnings: warns}
+	}()
+
+	var errors, warnings []engine.ValidationError
+	select {
+	case o := <-done:
+		if o.panicked != nil {
+			panic(o.panicked) // recoveryMiddleware turns it into a 500
+		}
+		errors, warnings = o.errors, o.warnings
+	case <-ctx.Done():
+		if s.auditLogger != nil {
+			s.auditLogger.Info("validate",
+				"request_id", auditField(requestID),
+				"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
+				"valid", false,
+				"timed_out", true,
+				"source_ip", r.RemoteAddr,
+				"principal", auditField(PrincipalFromContext(r.Context())),
+				"trace_id", observability.TraceIDFromContext(r.Context()),
+			)
+		}
+		s.writeError(w, http.StatusServiceUnavailable, "Validation exceeded the time budget", ctx.Err())
+		return
+	}
 
 	valid := len(errors) == 0
 
@@ -1374,8 +1425,25 @@ func (s *Server) recoveryMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// corsAllowHeaders lists the request headers a browser may send. The API key
+// and client-identity headers are configurable, so the list is built from
+// config: a hard-coded X-API-Key made every preflight for a custom
+// api_key_header fail, and the browser never sent the real request.
+func (s *Server) corsAllowHeaders() string {
+	headers := []string{"Content-Type", "Authorization", "X-Request-Id"}
+	apiKeyHeader := s.config.APIKeyHeader
+	if apiKeyHeader == "" {
+		apiKeyHeader = "X-API-Key"
+	}
+	headers = append(headers, apiKeyHeader)
+	if h := s.config.RateLimitHeaderName; h != "" && !strings.EqualFold(h, apiKeyHeader) {
+		headers = append(headers, h)
+	}
+	return strings.Join(headers, ", ")
+}
+
 // CORS middleware
-func corsMiddleware(h http.Handler, allowedOrigins []string) http.Handler {
+func corsMiddleware(h http.Handler, allowedOrigins []string, allowHeaders string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 
@@ -1398,7 +1466,7 @@ func corsMiddleware(h http.Handler, allowedOrigins []string) http.Handler {
 		}
 
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-Id, X-API-Key")
+		w.Header().Set("Access-Control-Allow-Headers", allowHeaders)
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)

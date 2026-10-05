@@ -70,7 +70,7 @@ func init() {
 	evalCmd.Flags().StringP("format", "f", "auto", "input format: json, yaml, auto (default: auto-detect)")
 
 	// Policy selection
-	evalCmd.Flags().StringSliceP("policy", "p", nil, "specific policies to evaluate (namespace/name)")
+	evalCmd.Flags().StringSliceP("policy", "p", nil, "specific policies to evaluate: namespace/name, or a bare name resolved in --namespace (default \"default\")")
 	evalCmd.Flags().StringP("namespace", "n", "", "policy namespace to evaluate")
 
 	// Request tracking
@@ -124,7 +124,7 @@ func runEval(cmd *cobra.Command, args []string) error {
 	// gate CI, the policy author should change enforcement.action to
 	// "deny" so the override lives in code review, not in a CLI flag.
 	if result.Decision == "deny" {
-		osExit(1)
+		osExit(exitNegative)
 	}
 
 	return nil

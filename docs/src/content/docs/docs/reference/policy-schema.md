@@ -155,8 +155,9 @@ Each section below quotes the rules of an example policy in
 Most example policies target every kind (`*`), so an evaluation against a
 whole namespace runs all of them and almost any input is denied by one or
 another. The examples therefore name the policies they exercise: `-p`
-(repeatable or comma-separated) on the CLI, `"policies"` in the REST body,
-both together with the namespace.
+(repeatable or comma-separated) on the CLI, `"policies"` in the REST body.
+A policy is named `namespace/name`, or by bare name together with the
+namespace (`-n` / `"namespace"`), which is the form used below.
 
 A `match` block may specify more than one operator alongside `path`; every specified operator must pass (AND semantics). The same holds inside the `length`, `semver`, and `datetime` blocks, so `datetime: {after: X, before: Y}` is a range check and `semver: {greaterThanOrEqual: "1.0.0", lessThan: "2.0.0"}` bounds a version. When several operators fail, the violation message reports each unmet check.
 

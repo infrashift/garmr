@@ -55,6 +55,10 @@ cp config.example.yaml config.yaml
 `policy_dir` at `/etc/garmr/policies` and the audit log at
 `/var/log/garmr/audit.log`. For a local run, change `policy_dir` to
 `./example-policies` and `audit.path` to `stdout` (or a writable path).
+`make run-server` does this without editing anything: it starts the server
+with `config.example.yaml` and overrides those two settings on the command
+line (`--policy-dir ./example-policies --audit-path stdout`), since flags
+take precedence over the config file.
 
 ### Option 3: Environment Variables
 
@@ -267,18 +271,17 @@ For more details, see the [CI/CD Integration guide](/garmr/docs/guides/cicd/).
 ```yaml
 - name: Policy Check
   run: |
-    # garmr exits 1 on deny *and* on errors; read the decision from the JSON
-    ./bin/garmr eval --input deployment.json -o json > result.json || true
-    decision=$(jq -r '.decision // empty' result.json)
-    if [ -z "$decision" ]; then
-      echo "Policy evaluation failed (no decision returned)"; exit 2
-    fi
-    if [ "$decision" = "deny" ]; then
-      echo "Policy violations found:"
-      jq -r '.results[] | select(.passed == false) | "  - [\(.severity)] \(.rule_id): \(.message)"' result.json
-      exit 1
-    fi
-    echo "All policies passed"
+    # Exit codes: 0 allow/warn, 1 deny, 2 the evaluation did not run
+    rc=0
+    ./bin/garmr eval --input deployment.json -o json > result.json || rc=$?
+    case $rc in
+      0) echo "All policies passed" ;;
+      1)
+        echo "Policy violations found:"
+        jq -r '.results[] | select(.passed == false) | "  - [\(.severity)] \(.rule_id): \(.message)"' result.json
+        exit 1 ;;
+      *) echo "Policy evaluation failed (exit $rc)"; exit 2 ;;
+    esac
 ```
 
 ### GitLab CI
@@ -286,7 +289,8 @@ For more details, see the [CI/CD Integration guide](/garmr/docs/guides/cicd/).
 ```yaml
 policy-check:
   script:
-    # Exits 1 on DENY or on any error (e.g. server unreachable)
+    # Exits 1 on DENY and 2 when the evaluation did not run (e.g. server
+    # unreachable); either fails the job
     - ./bin/garmr eval --input deployment.json
   allow_failure: false
 ```

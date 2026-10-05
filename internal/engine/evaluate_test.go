@@ -603,11 +603,11 @@ func (s *concurrentStats) compute() (min, max, mean, p50, p95, p99 time.Duration
 	return
 }
 
-// TestConcurrentCueContextPool_StressCorrectness fires 1000 concurrent requests
+// TestConcurrent_StressCorrectness fires 1000 concurrent requests
 // against a shared engine with multiple policies, verifying that each evaluation
 // returns the correct decision and that no data races or panics occur.
-// Run with: go test -v -race -run TestConcurrentCueContextPool_StressCorrectness ./internal/engine/
-func TestConcurrentCueContextPool_StressCorrectness(t *testing.T) {
+// Run with: go test -v -race -run TestConcurrent_StressCorrectness ./internal/engine/
+func TestConcurrent_StressCorrectness(t *testing.T) {
 	eng, err := NewEngine(zap.NewNop())
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -753,10 +753,10 @@ func TestConcurrentCueContextPool_StressCorrectness(t *testing.T) {
 	}
 }
 
-// TestConcurrentCueContextPool_MixedOperations stress-tests the pool with
-// concurrent evaluations, validations, and policy loads happening simultaneously
-// to verify the pool handles mixed operation types without corruption.
-func TestConcurrentCueContextPool_MixedOperations(t *testing.T) {
+// TestConcurrent_MixedOperations runs evaluations, validations, and policy
+// loads simultaneously to verify that copy-on-write loads and throwaway
+// validation contexts never corrupt in-flight evaluations.
+func TestConcurrent_MixedOperations(t *testing.T) {
 	eng, err := NewEngine(zap.NewNop())
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -892,11 +892,10 @@ spec: {
 	}
 }
 
-// TestConcurrentCueContextPool_PoolIsolation verifies that CUE contexts from
-// the pool are truly isolated — one goroutine's CUE compilation doesn't corrupt
-// another goroutine's evaluation. This uses deliberately different policy shapes
+// TestConcurrent_CompileIsolation verifies that one goroutine's CUE
+// compilation doesn't corrupt another goroutine's evaluation. This uses deliberately different policy shapes
 // to maximize the chance of detecting cross-context contamination.
-func TestConcurrentCueContextPool_PoolIsolation(t *testing.T) {
+func TestConcurrent_CompileIsolation(t *testing.T) {
 	eng, err := NewEngine(zap.NewNop())
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -1088,5 +1087,65 @@ func TestConcurrentCueContextPool_PoolIsolation(t *testing.T) {
 			t.Errorf("NON-DETERMINISTIC: policy %q isPass=%v produced multiple decisions: %v",
 				policies[key.pIdx].name, key.isPass, decisions)
 		}
+	}
+}
+
+// A selector names a policy as namespace/name or as a bare name resolved in
+// the request's namespace. The qualified form used to be looked up as
+// "<namespace>/<namespace>/<name>" and silently matched nothing.
+func TestEvaluate_PolicySelectorForms(t *testing.T) {
+	const ruleBody = `{id: "r1", description: "x is 1", severity: "low", expr: {match: {path: "x", equals: 1}}, message: "x must be 1"}`
+	eng := newTestEngine(t)
+	ctx := context.Background()
+	for _, ns := range []string{"default", "security"} {
+		if err := eng.LoadPolicy(ctx, "p", ns, makePolicy("p", ns, "p", ruleBody, "deny", "")); err != nil {
+			t.Fatalf("LoadPolicy %s: %v", ns, err)
+		}
+	}
+
+	cases := []struct {
+		name      string
+		namespace string
+		selectors []string
+		wantNS    []string // namespaces of the evaluated policies, in order
+	}{
+		{"bare name, default namespace", "", []string{"p"}, []string{"default"}},
+		{"bare name, request namespace", "security", []string{"p"}, []string{"security"}},
+		{"qualified name, no namespace", "", []string{"security/p"}, []string{"security"}},
+		{"qualified name wins over request namespace", "default", []string{"security/p"}, []string{"security"}},
+		{"both forms naming the same policy evaluate it once", "security", []string{"p", "security/p"}, []string{"security"}},
+		{"qualified names across namespaces", "", []string{"default/p", "security/p"}, []string{"default", "security"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := eng.Evaluate(ctx, &EvaluateRequest{
+				Input:     map[string]any{"kind": "Pod", "x": 1},
+				Namespace: tc.namespace,
+				Policies:  tc.selectors,
+				Options:   EvaluateOptions{IncludePassed: true},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, r := range resp.Results {
+				got = append(got, r.PolicyNamespace)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.wantNS, ",") {
+				t.Fatalf("evaluated namespaces = %v, want %v (decision %s)", got, tc.wantNS, resp.Decision)
+			}
+		})
+	}
+
+	resp, err := eng.Evaluate(ctx, &EvaluateRequest{
+		Input:    map[string]any{"kind": "Pod", "x": 1},
+		Policies: []string{"security/missing"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Decision != DecisionDeny || len(resp.Results) != 1 ||
+		!strings.Contains(resp.Results[0].Message, "security/missing not found") {
+		t.Fatalf("missing qualified policy: decision %s, results %+v", resp.Decision, resp.Results)
 	}
 }

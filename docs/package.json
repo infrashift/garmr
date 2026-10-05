@@ -16,5 +16,8 @@
   },
   "pnpm": {
     "onlyBuiltDependencies": ["esbuild", "sharp"]
+  },
+  "devDependencies": {
+    "starlight-links-validator": "~0.19.2"
   }
 }

@@ -17,7 +17,7 @@ import (
 
 // canonicalPolicyHash renders a schema-unified policy value to canonical CUE
 // syntax and hashes it. Identical policy content therefore produces the same
-// hash regardless of file layout, load path, or replica context — which is
+// hash regardless of file layout, load path, or CUE context — which is
 // what lets `garmr policy digest` on a git checkout be compared with the
 // digest a running server reports.
 func canonicalPolicyHash(val cue.Value) (string, error) {

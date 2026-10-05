@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -345,4 +346,46 @@ func newLifecycleTestServer(t *testing.T, cfg Config) *Server {
 		t.Fatalf("NewServer: %v", err)
 	}
 	return srv
+}
+
+// A browser preflights any request carrying a non-simple header and sends the
+// real request only if the header is in Access-Control-Allow-Headers. The list
+// was hard-coded to X-API-Key, so a custom api_key_header worked from curl and
+// failed from every browser.
+func TestCORS_AllowHeadersFollowConfig(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     Config
+		want    []string
+		notWant string
+	}{
+		{"default api key header", Config{}, []string{"X-API-Key", "Content-Type", "X-Request-Id"}, ""},
+		{"custom api key header", Config{APIKeyHeader: "X-Garmr-Key"}, []string{"X-Garmr-Key"}, "X-API-Key"},
+		{"rate limit client header", Config{RateLimitHeaderName: "X-Client-Id"}, []string{"X-API-Key", "X-Client-Id"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := setupTestServer(t, tc.cfg)
+			defer ts.Close()
+
+			req, _ := http.NewRequest(http.MethodOptions, ts.URL+"/v1/evaluate", nil)
+			req.Header.Set("Origin", "https://ui.example")
+			req.Header.Set("Access-Control-Request-Method", "POST")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+
+			got := resp.Header.Get("Access-Control-Allow-Headers")
+			for _, h := range tc.want {
+				if !strings.Contains(got, h) {
+					t.Errorf("Access-Control-Allow-Headers %q is missing %s", got, h)
+				}
+			}
+			if tc.notWant != "" && strings.Contains(got, tc.notWant) {
+				t.Errorf("Access-Control-Allow-Headers %q still advertises %s", got, tc.notWant)
+			}
+		})
+	}
 }

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/infrashift/garmr/internal/client"
 )
 
 // --- validate ---
@@ -644,6 +646,36 @@ func TestRunPolicyReload_JSONOutput(t *testing.T) {
 	})
 	if !strings.Contains(stdout, `"success"`) {
 		t.Errorf("expected JSON with success, got %q", stdout)
+	}
+}
+
+// A single-instance digest mismatch exits 1; with -o json the bare result
+// used to omit why, because the mismatch is recorded on the outcome.
+func TestRunPolicyReload_JSONDigestMismatchCarriesError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "p.cue"), []byte(testDirPolicy), 0644); err != nil {
+		t.Fatal(err)
+	}
+	newTestServerWithPolicyDir(t, dir)
+
+	viperSetOutput(t, "json")
+	cmd := reloadFanoutFlagSet(t)
+	if err := cmd.Flags().Set("expect-digest", strings.Repeat("0", 64)); err != nil {
+		t.Fatal(err)
+	}
+	rec := stubExit(t)
+	stdout, _ := captureOutput(t, func() {
+		_ = runPolicyReload(cmd, nil)
+	})
+	if rec.Code != 1 {
+		t.Fatalf("expected exit 1 on digest mismatch, got %d", rec.Code)
+	}
+	var got client.ReloadResult
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("single-instance JSON must stay the bare result: %v\n%s", err, stdout)
+	}
+	if !strings.Contains(got.Error, "does not match") {
+		t.Fatalf("error = %q, want the digest mismatch", got.Error)
 	}
 }
 

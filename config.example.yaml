@@ -45,10 +45,13 @@ log:
 # fail-open behavior — only do this if you knowingly evaluate inputs that
 # no policy targets.
 # timeout bounds a single evaluate/validate request, including time spent
-# waiting for an evaluation slot. This is the only limit that actually stops
-# work: write_timeout expires the connection without cancelling the handler,
-# and a policy's own spec.evaluation.timeout is optional. Keep it below the
-# sidecar's request timeout so Garmr, not the proxy, decides the outcome.
+# waiting for a validation slot. For evaluation it is the only limit that
+# actually stops work: write_timeout expires the connection without
+# cancelling the handler, and a policy's own spec.evaluation.timeout is
+# optional. A validation compile can't be interrupted, so past the budget the
+# caller gets 503 while the compile finishes in the background, holding its
+# slot. Keep it below the sidecar's request timeout so Garmr, not the proxy,
+# decides the outcome.
 evaluation:
   require_match: true
   timeout: "10s"

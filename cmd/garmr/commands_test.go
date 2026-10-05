@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -131,5 +133,29 @@ func TestDataCommandRemoved(t *testing.T) {
 		if c.Name() == "data" {
 			t.Error("stub 'data' command should not be registered")
 		}
+	}
+}
+
+// The exit code must not depend on the output format: an unhealthy server
+// reported with -o json used to exit 0.
+func TestRunHealth_UnhealthyExitsNonzeroInEveryFormat(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"healthy": false, "version": "test"}`))
+	}))
+	t.Cleanup(srv.Close)
+	viperSetServer(t, srv.URL)
+
+	for _, format := range []string{"table", "json"} {
+		t.Run(format, func(t *testing.T) {
+			viperSetOutput(t, format)
+			rec := stubExit(t)
+			_, _ = captureOutput(t, func() {
+				_ = runHealth(healthFlagSet(t), nil)
+			})
+			if rec.Code != exitNegative {
+				t.Errorf("-o %s: exit = %d, want %d", format, rec.Code, exitNegative)
+			}
+		})
 	}
 }

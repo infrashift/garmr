@@ -29,19 +29,23 @@ garmr eval --input deployment.json
 
 # Exit codes:
 # 0 = ALLOW or WARN (nothing blocked the evaluation)
-# 1 = DENY (a deny-enforced policy failed) -- OR the command failed:
-#     server unreachable, an HTTP error, unreadable input
+# 1 = DENY (a deny-enforced policy failed)
+# 2 = the evaluation did not run: server unreachable, an HTTP error,
+#     unreadable input, bad flags
 #
 # If you need warnings to gate CI, set enforcement.action to "deny"
 # in the policy — the decision belongs in code review, not a CLI flag.
 ```
 
-Exit code `1` fails the job either way, which is the safe outcome. When a
-pipeline needs to tell a deny from an outage — to print violations, or to
-retry only outages — use `-o json` and read `.decision`: a deny always prints
-a decision, while a failed call prints its error on stderr and nothing on
-stdout. Every example below treats a missing decision as a failure, never as
+Any nonzero code fails the job, which is the safe outcome. Branch on the
+code when the pipeline should react differently: print violations on `1`,
+retry or page on `2`. Every example below treats `2` as a failure, never as
 a pass.
+
+Capture the code with `rc=0; garmr eval ... || rc=$?`. That form works under
+`set -e` (GitHub Actions runs `bash -e`), and avoid piping `garmr eval`
+into `tee` or another command: a pipeline's status is the last command's
+unless `set -o pipefail` is on, so the exit code would be lost.
 
 ### Request ID for Audit Correlation
 
@@ -58,10 +62,12 @@ garmr eval --input deployment.json --request-id "${CI_JOB_ID}"
 # Machine-readable output
 garmr eval --input deployment.json -o json
 
-# Parse with jq (|| true: a deny exits 1 but still prints the JSON)
-RESULT=$(garmr eval --input deployment.json -o json) || true
-DECISION=$(echo "$RESULT" | jq -r '.decision // empty')
-[ -n "$DECISION" ] || { echo "evaluation failed: no decision"; exit 2; }
+# Parse with jq. A deny exits 1 but still prints the JSON; exit 2 prints
+# nothing on stdout (the error goes to stderr).
+rc=0
+RESULT=$(garmr eval --input deployment.json -o json) || rc=$?
+[ "$rc" -le 1 ] || { echo "evaluation failed (exit $rc)"; exit 2; }
+DECISION=$(echo "$RESULT" | jq -r '.decision')
 VIOLATIONS=$(echo "$RESULT" | jq '[.results[] | select(.passed == false)] | length')
 ```
 
@@ -109,22 +115,22 @@ jobs:
         run: |
           for file in k8s/*.yaml; do
             echo "Checking $file..."
-            # A deny exits 1 but still writes the JSON; read the decision
+            rc=0
             garmr eval --input "$file" \
               --request-id "gh-${{ github.run_id }}-${{ github.run_attempt }}" \
-              -o json > result.json || true
+              -o json > result.json || rc=$?
             cat result.json
 
-            decision=$(jq -r '.decision // empty' result.json)
-            if [ -z "$decision" ]; then
-              echo "::error::Policy evaluation failed for $file (no decision)"
-              exit 2
-            fi
-            if [ "$decision" = "deny" ]; then
-              echo "::error::Policy violation in $file"
-              jq -r '.results[] | select(.passed == false) | "- \(.rule_id): \(.message)"' result.json
-              exit 1
-            fi
+            case $rc in
+              0) ;;
+              1)
+                echo "::error::Policy violation in $file"
+                jq -r '.results[] | select(.passed == false) | "- \(.rule_id): \(.message)"' result.json
+                exit 1 ;;
+              *)
+                echo "::error::Policy evaluation failed for $file (exit $rc)"
+                exit 2 ;;
+            esac
           done
 
       - name: Upload policy results
@@ -146,7 +152,7 @@ policy-check:
   stage: validate
   # The published image's entrypoint is garmr-server; clear it so GitLab can
   # run the script. The image is Alpine without jq, so this job gates on the
-  # exit code: 1 means a deny or a failed call, and both should fail the job.
+  # exit code alone: 1 is a deny, 2 a failed call, and both fail the job.
   image:
     name: ghcr.io/infrashift/garmr:latest
     entrypoint: [""]
@@ -155,9 +161,12 @@ policy-check:
       status=0
       for file in k8s/*.yaml; do
         echo "Evaluating $file..."
+        rc=0
         garmr eval --input "$file" \
           --request-id "gl-${CI_PIPELINE_ID}-${CI_JOB_ID}" \
-          --server "${GARMR_SERVER_URL}" || status=1
+          --server "${GARMR_SERVER_URL}" || rc=$?
+        # Keep the worst code: an outage (2) outranks a deny (1).
+        [ "$rc" -le "$status" ] || status=$rc
       done
       exit $status
 
@@ -189,22 +198,21 @@ pipeline {
                     files.each { file ->
                         echo "Evaluating ${file.name}..."
 
-                        // A deny exits 1 but still writes the JSON, so don't
-                        // let sh() throw; a failed call writes nothing.
-                        sh """
+                        // returnStatus keeps sh() from throwing on a nonzero
+                        // exit: 1 is a deny (the JSON is still written), 2 a
+                        // failed call.
+                        def rc = sh(returnStatus: true, script: """
                             garmr eval --input ${file.path} \
                                 --request-id "${REQUEST_ID}" \
                                 --server "${GARMR_SERVER}" \
-                                -o json > result.json || true
-                        """
+                                -o json > result.json
+                        """)
 
-                        def text = readFile('result.json').trim()
-                        if (!text) {
-                            error("Policy evaluation failed for ${file.name} (no decision)")
+                        if (rc > 1) {
+                            error("Policy evaluation failed for ${file.name} (exit ${rc})")
                         }
-                        def json = readJSON(text: text)
-
-                        if (json.decision == 'deny') {
+                        if (rc == 1) {
+                            def json = readJSON(file: 'result.json')
                             failed = true
                             echo "POLICY VIOLATION in ${file.name}"
                             json.results.findAll { !it.passed }.each { r ->
@@ -279,22 +287,23 @@ stages:
 
                 for file in k8s/*.yaml; do
                   echo "Checking $file..."
+                  rc=0
                   garmr eval --input "$file" \
                     --request-id "$REQUEST_ID" \
                     --server "$(GARMR_SERVER)" \
-                    -o json > result.json || true
+                    -o json > result.json || rc=$?
                   cat result.json
 
-                  DECISION=$(jq -r '.decision // empty' result.json)
-                  if [ -z "$DECISION" ]; then
-                    echo "##vso[task.logissue type=error]Policy evaluation failed for $file"
-                    exit 2
-                  fi
-                  if [ "$DECISION" = "deny" ]; then
-                    echo "##vso[task.logissue type=error]Policy violation in $file"
-                    jq -r '.results[] | select(.passed == false) | "##vso[task.logissue type=error]\(.rule_id): \(.message)"' result.json
-                    exit 1
-                  fi
+                  case $rc in
+                    0) ;;
+                    1)
+                      echo "##vso[task.logissue type=error]Policy violation in $file"
+                      jq -r '.results[] | select(.passed == false) | "##vso[task.logissue type=error]\(.rule_id): \(.message)"' result.json
+                      exit 1 ;;
+                    *)
+                      echo "##vso[task.logissue type=error]Policy evaluation failed for $file (exit $rc)"
+                      exit 2 ;;
+                  esac
                 done
 
           - task: PublishBuildArtifacts@1
@@ -329,22 +338,23 @@ jobs:
 
             for file in k8s/*.yaml; do
               echo "Checking $file..."
+              rc=0
               garmr eval --input "$file" \
                 --request-id "$REQUEST_ID" \
                 --server "${GARMR_SERVER_URL}" \
-                -o json > result.json || true
+                -o json > result.json || rc=$?
               cat result.json
 
-              decision=$(jq -r '.decision // empty' result.json)
-              if [ -z "$decision" ]; then
-                echo "Policy evaluation failed for $file (no decision)"
-                exit 2
-              fi
-              if [ "$decision" = "deny" ]; then
-                echo "Policy violations in $file:"
-                jq -r '.results[] | select(.passed == false) | "  \(.severity) \(.rule_id): \(.message)"' result.json
-                exit 1
-              fi
+              case $rc in
+                0) ;;
+                1)
+                  echo "Policy violations in $file:"
+                  jq -r '.results[] | select(.passed == false) | "  \(.severity) \(.rule_id): \(.message)"' result.json
+                  exit 1 ;;
+                *)
+                  echo "Policy evaluation failed for $file (exit $rc)"
+                  exit 2 ;;
+              esac
             done
       - store_artifacts:
           path: result.json
@@ -736,20 +746,18 @@ Use consistent, meaningful request IDs:
 
 ### Error Handling
 
-`garmr eval` exits `1` for a deny and for a failed call alike. Tell them
-apart by whether a decision came back — keep stdout and stderr separate so
-an error message never lands in the JSON:
+`garmr eval` exits `1` for a deny and `2` when the evaluation did not run.
+Branch on the code; keep stderr separate so an error message never lands
+in the JSON:
 
 ```bash
-set +e
-RESULT=$(garmr eval --input resource.json -o json 2>eval.err)
-set -e
+rc=0
+RESULT=$(garmr eval --input resource.json -o json 2>eval.err) || rc=$?
 
-DECISION=$(echo "$RESULT" | jq -r '.decision // empty' 2>/dev/null)
-case "$DECISION" in
-  allow|warn)
-    echo "Policy check passed ($DECISION)" ;;
-  deny)
+case $rc in
+  0)
+    echo "Policy check passed ($(echo "$RESULT" | jq -r .decision))" ;;
+  1)
     echo "Policy violation detected"
     echo "$RESULT" | jq '.results[] | select(.passed == false)'
     exit 1 ;;
@@ -761,19 +769,17 @@ esac
 
 ### Retry Logic
 
-Retry only failed calls. A deny is a verdict, and evaluating the same input
-again returns the same deny:
+Retry only exit `2`. A deny (`1`) is a verdict, and evaluating the same
+input again returns the same deny:
 
 ```bash
 MAX_RETRIES=3
 RETRY_DELAY=5
 
 for i in $(seq 1 $MAX_RETRIES); do
-    RESULT=$(garmr eval --input resource.json -o json) || true
-    DECISION=$(echo "$RESULT" | jq -r '.decision // empty' 2>/dev/null)
-    if [ -n "$DECISION" ]; then
-        break   # got a verdict (allow, warn, or deny): stop retrying
-    fi
+    rc=0
+    garmr eval --input resource.json || rc=$?
+    [ "$rc" -eq 2 ] || break   # a verdict (0 allow/warn, 1 deny): stop retrying
 
     if [ $i -eq $MAX_RETRIES ]; then
         echo "Evaluation failed after $MAX_RETRIES attempts"
@@ -784,7 +790,7 @@ for i in $(seq 1 $MAX_RETRIES); do
     sleep $RETRY_DELAY
 done
 
-[ "$DECISION" != "deny" ] || { echo "Policy violation"; exit 1; }
+[ "$rc" -eq 0 ] || { echo "Policy violation"; exit 1; }
 ```
 
 ---

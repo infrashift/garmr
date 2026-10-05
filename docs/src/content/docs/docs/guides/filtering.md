@@ -184,17 +184,20 @@ curl -X POST http://localhost:8080/v1/evaluate \
 
 ### Selecting Specific Policies
 
-To evaluate named policies only, list their names (`metadata.name`) with
-`-p`/`--policy` (repeatable or comma-separated) or `"policies"` in the
-request body. Names are looked up in the namespace given with `-n` /
-`"namespace"` (`default` when omitted), and a named policy still runs only
-if its target matches the input:
+To evaluate named policies only, list them with `-p`/`--policy`
+(repeatable or comma-separated) or `"policies"` in the request body. Each
+entry is either `namespace/name` or a bare `metadata.name`, which is looked
+up in the namespace given with `-n` / `"namespace"` (`default` when
+omitted). A qualified name ignores the namespace filter, so one request can
+name policies from several namespaces. A named policy still runs only if its
+target matches the input:
 
 ```bash
+garmr eval --input pod.json -p security/container-security,release/release-gate
 garmr eval --input pod.json -n security -p container-security,network-policy
 
 curl -X POST http://localhost:8080/v1/evaluate \
-  -d '{"input": {...}, "namespace": "security", "policies": ["container-security"]}'
+  -d '{"input": {...}, "policies": ["security/container-security"]}'
 ```
 
 If a named policy does not exist, or none of the named policies targets the

@@ -226,6 +226,17 @@ func (a *evalAccumulator) finish() {
 	}
 }
 
+// selectorKey resolves one requested policy selector to its policy key. A
+// selector is either "namespace/name" or a bare name resolved in the
+// request's namespace ("default" when unset). Policy names cannot contain
+// "/", so the two forms never collide.
+func selectorKey(namespace, selector string) string {
+	if strings.Contains(selector, "/") {
+		return selector
+	}
+	return policyKey(namespace, selector)
+}
+
 // findApplicablePolicies returns the policies that apply to the request.
 func (e *Engine) findApplicablePolicies(set *policySet, req *EvaluateRequest, res resource) []*CompiledPolicy {
 	var result []*CompiledPolicy
@@ -233,8 +244,8 @@ func (e *Engine) findApplicablePolicies(set *policySet, req *EvaluateRequest, re
 	// If specific policies requested, return only those, in request order.
 	if len(req.Policies) > 0 {
 		seen := make(map[string]bool, len(req.Policies))
-		for _, name := range req.Policies {
-			key := policyKey(req.Namespace, name)
+		for _, sel := range req.Policies {
+			key := selectorKey(req.Namespace, sel)
 			if seen[key] {
 				continue // naming a policy twice must not evaluate it twice
 			}
@@ -534,14 +545,11 @@ func (e *Engine) buildNoMatchResult(set *policySet, req *EvaluateRequest) RuleRe
 	case len(set.policies) == 0:
 		message = "No policies are loaded on the server. Check the server's policy directory and ensure policies compiled successfully."
 	case len(req.Policies) > 0:
-		ns := req.Namespace
-		if ns == "" {
-			ns = "default"
-		}
 		var missing []string
-		for _, name := range req.Policies {
-			if _, ok := set.policies[policyKey(ns, name)]; !ok {
-				missing = append(missing, fmt.Sprintf("%s/%s", ns, name))
+		for _, sel := range req.Policies {
+			key := selectorKey(req.Namespace, sel)
+			if _, ok := set.policies[key]; !ok {
+				missing = append(missing, key)
 			}
 		}
 		if len(missing) > 0 {

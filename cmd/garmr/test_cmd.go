@@ -125,7 +125,7 @@ func runTest(cmd *cobra.Command, args []string) error {
 	}
 
 	if totals.failed > 0 {
-		return fmt.Errorf("%d test(s) failed", totals.failed)
+		return resultError{fmt.Errorf("%d test(s) failed", totals.failed)}
 	}
 	return nil
 }

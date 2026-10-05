@@ -70,7 +70,7 @@ func runHealth(cmd *cobra.Command, args []string) error {
 	c, err := client.NewClient(cfg)
 	if err != nil {
 		fmt.Printf("✗ %v\n", err)
-		osExit(1)
+		osExit(exitError)
 	}
 	defer c.Close()
 
@@ -83,22 +83,25 @@ func runHealth(cmd *cobra.Command, args []string) error {
 			return waitForHealth(ctx, cfg)
 		}
 		fmt.Printf("✗ Health check failed: %v\n", err)
-		osExit(1)
+		osExit(exitNegative)
 	}
 
 	format := viper.GetString("output")
-	if format == "json" {
+	switch {
+	case format == "json":
 		data, _ := json.MarshalIndent(result, "", "  ")
 		fmt.Println(string(data))
-	} else {
-		if result.Healthy {
-			fmt.Printf("✓ Server healthy (version %s)\n", result.Version)
-		} else {
-			fmt.Printf("✗ Server unhealthy\n")
-			osExit(1)
-		}
+	case result.Healthy:
+		fmt.Printf("✓ Server healthy (version %s)\n", result.Version)
+	default:
+		fmt.Printf("✗ Server unhealthy\n")
 	}
 
+	// The exit code must not depend on the output format: -o json used to
+	// exit 0 for an unhealthy server.
+	if !result.Healthy {
+		osExit(exitNegative)
+	}
 	return nil
 }
 
@@ -109,7 +112,7 @@ func waitForHealth(ctx context.Context, cfg client.Config) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("timeout waiting for server")
+			return resultError{fmt.Errorf("timeout waiting for server")}
 		case <-ticker.C:
 			c, err := client.NewClient(cfg)
 			if err != nil {

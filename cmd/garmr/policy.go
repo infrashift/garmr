@@ -95,7 +95,7 @@ func runValidateLocal(args []string) error {
 	}
 
 	if hasErrors {
-		osExit(1)
+		osExit(exitNegative)
 	}
 	return nil
 }
@@ -160,7 +160,7 @@ func runValidateRemote(args []string) error {
 	}
 
 	if hasErrors {
-		osExit(1)
+		osExit(exitNegative)
 	}
 
 	return nil
@@ -481,7 +481,7 @@ func runPolicyValidateLock(cmd *cobra.Command, args []string) error {
 
 	if len(errors) > 0 {
 		fmt.Fprintf(os.Stderr, "\n%d validation error(s)\n", len(errors))
-		osExit(1)
+		osExit(exitNegative)
 	}
 
 	fmt.Printf("\n✓ All %d lock files valid\n", len(files))
@@ -877,7 +877,14 @@ func runPolicyReload(cmd *cobra.Command, args []string) error {
 		// Single-instance keeps the historical shape (the bare result);
 		// fan-out emits the per-instance outcome list.
 		if len(outcomes) == 1 && outcomes[0].Result != nil {
-			data, _ := json.MarshalIndent(outcomes[0].Result, "", "  ")
+			// A client-side failure such as a digest mismatch lives on the
+			// outcome, not the result; carry it into the bare shape so a
+			// nonzero exit always comes with the reason.
+			result := *outcomes[0].Result
+			if result.Error == "" {
+				result.Error = outcomes[0].Error
+			}
+			data, _ := json.MarshalIndent(result, "", "  ")
 			fmt.Println(string(data))
 		} else {
 			data, _ := json.MarshalIndent(outcomes, "", "  ")
@@ -904,7 +911,7 @@ func runPolicyReload(cmd *cobra.Command, args []string) error {
 	}
 
 	if failed {
-		osExit(1)
+		osExit(exitNegative)
 	}
 	return nil
 }
@@ -999,7 +1006,7 @@ func runPolicyReloadConverge(addr, expectDigest string, want int, timeout time.D
 	}
 
 	if !report.Converged {
-		osExit(1)
+		osExit(exitNegative)
 	}
 	return nil
 }

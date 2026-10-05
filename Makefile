@@ -88,8 +88,8 @@ dev: build ## Run server in development mode (no config file)
 	@mkdir -p /tmp/garmr-audit
 	./bin/garmr-server --dev --policy-dir ./example-policies --audit-path /tmp/garmr-audit/audit.log --log-format console
 
-run-server: build-server ## Run the server with example config
-	./bin/garmr-server --config config.example.yaml
+run-server: build-server ## Run the server with example config (local policy and audit paths)
+	./bin/garmr-server --config config.example.yaml --policy-dir ./example-policies --audit-path stdout
 
 ## Docs
 

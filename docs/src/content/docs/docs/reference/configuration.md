@@ -70,15 +70,18 @@ evaluation:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `evaluation.timeout` | `10s` | Max time for one `/v1/evaluate` request. For `/v1/validate` it bounds only the wait for a validation slot, not the compilation itself. |
+| `evaluation.timeout` | `10s` | Max time for one `/v1/evaluate` or `/v1/validate` request. |
 
 For evaluation, this is the only limit that actually stops work.
 `write_timeout` expires the connection without cancelling the handler, and a
 policy's own `spec.evaluation.timeout` is optional and unset by default — so
 without this, a request that had already lost its client went on running and
-holding its decoded input. Validation is different: once a request holds a
-slot, compiling its source is not interruptible, which is why
-`max_validate_size` caps the source instead.
+holding its decoded input. Validation is different: CUE compilation can't be
+interrupted, so the budget bounds how long the caller waits, not the compile.
+A compile that outruns it gets `503` (`"Validation exceeded the time
+budget"`), while the compile keeps its concurrency slot until it really
+finishes. Abandoned compiles therefore still count against the gate below,
+and `max_validate_size` caps how much source one compile can take.
 
 Evaluations have no pool and no queue: every request runs immediately, in
 parallel, against the loaded policy set. A request whose budget expires
@@ -87,7 +90,7 @@ while its rules are running is denied with a synthetic timeout result
 before evaluation starts gets `503` (retry is meaningful). `/v1/validate`
 compiles caller-supplied CUE, so it is bounded by a concurrency gate of
 `min(GOMAXPROCS, 8)`. A validate request whose budget expires while waiting
-for that gate is rejected with `503`.
+for that gate, or while its source compiles, is rejected with `503`.
 
 **Keep this below the sidecar's request timeout** so Garmr, not the proxy,
 decides the outcome — otherwise the caller gets the proxy's `504` and no
@@ -143,11 +146,12 @@ cors:
 | `cors.allowed_origins` | _(empty)_ | Origins echoed back in `Access-Control-Allow-Origin`. Empty allows every origin (`*`); an entry of `*` allows any origin that sends an `Origin` header. |
 
 Every response carries `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS`
-and `Access-Control-Allow-Headers: Content-Type, Authorization, X-Request-Id, X-API-Key`.
-`OPTIONS` preflights are answered `200` before authentication runs, so they
-never need the API key. Browser clients using a custom `api_key_header` should
-send `Authorization: Bearer <key>` instead, since only `X-API-Key` is in the
-allowed-headers list.
+and an `Access-Control-Allow-Headers` list built from the config:
+`Content-Type, Authorization, X-Request-Id`, the configured
+`auth.api_key_header` (default `X-API-Key`), and `rate_limit.header_name`
+(default `X-Client-ID`). A browser can therefore send a custom API-key or
+client-identifier header. `OPTIONS` preflights are answered `200` before
+authentication runs, so they never need the API key.
 
 ## Logging
 

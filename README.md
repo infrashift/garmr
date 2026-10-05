@@ -33,11 +33,12 @@ make build
 ### Start the Server
 
 ```bash
-# Start with example policies
-./bin/garmr-server --policy-dir ./example-policies --audit-path /var/log/garmr/audit.log
+# Start with example policies (audit records to stdout; the default
+# /var/log/garmr/audit.log needs a writable /var/log/garmr)
+./bin/garmr-server --policy-dir ./example-policies --audit-path stdout
 
-# Development mode with console logging
-./bin/garmr-server --dev --policy-dir ./example-policies --log-format console
+# Development mode with console logging (or: make dev)
+./bin/garmr-server --dev --policy-dir ./example-policies --audit-path stdout --log-format console
 ```
 
 ### Evaluate a Resource
@@ -46,7 +47,8 @@ make build
 # Evaluate a pod against the security namespace (expect ALLOW)
 ./bin/garmr eval --input testdata/real-world/k8s-pod-security-context-pass.json -n security
 
-# The failing variant is denied (exit code 1)
+# The failing variant is denied (exit code 1; exit code 2 means the
+# evaluation did not run, e.g. the server is unreachable)
 ./bin/garmr eval --input testdata/real-world/k8s-pod-security-context-fail.yml -n security
 
 # JSON output for CI/CD

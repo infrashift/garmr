@@ -1,6 +1,6 @@
 module github.com/infrashift/garmr
 
-go 1.25.3
+go 1.25.14
 
 require (
 	cuelang.org/go v0.15.1

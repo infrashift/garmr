@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -55,13 +56,22 @@ func init() {
 	// Global flags
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.garmr.yaml)")
 	rootCmd.PersistentFlags().String("server", "http://localhost:8080", "Garmr server URL")
+	rootCmd.PersistentFlags().String("ca-cert", "", "PEM CA bundle to trust in addition to the system roots (https servers with a private CA)")
+	rootCmd.PersistentFlags().String("client-cert", "", "PEM client certificate for servers that require mTLS (with --client-key)")
+	rootCmd.PersistentFlags().String("client-key", "", "PEM private key for --client-cert")
 	rootCmd.PersistentFlags().StringP("output", "o", "table", "output format (table, json, yaml)")
 	rootCmd.PersistentFlags().BoolP("quiet", "q", false, "suppress non-essential output")
 	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "show rule details (default: show on fail, hide on pass; use --verbose=false to always hide)")
 
 	// Bind flags to viper. BindPFlag only fails when the flag does not
 	// exist, which is a programming error worth aborting on.
-	for key, name := range map[string]string{"server": "server", "output": "output"} {
+	for key, name := range map[string]string{
+		"server":          "server",
+		"output":          "output",
+		"tls.ca_cert":     "ca-cert",
+		"tls.client_cert": "client-cert",
+		"tls.client_key":  "client-key",
+	} {
 		if err := viper.BindPFlag(key, rootCmd.PersistentFlags().Lookup(name)); err != nil {
 			panic(err)
 		}
@@ -96,6 +106,8 @@ func initConfig() {
 	}
 
 	viper.SetEnvPrefix("GARMR")
+	// Nested keys map to underscore env vars: tls.ca_cert -> GARMR_TLS_CA_CERT.
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	viper.AutomaticEnv()
 
 	// A missing config file is fine — flags and env vars carry the defaults.

@@ -14,6 +14,10 @@ Complete HTTP API reference for Garmr.
 http://localhost:8080
 ```
 
+With `tls.enabled` the server speaks HTTPS only, and the base URL becomes
+`https://<host>:8080`. Plain HTTP requests to a TLS listener get `400`. See
+[Configuration → Transport Security](/garmr/docs/reference/configuration/#transport-security-tls).
+
 ## OpenAPI Specification
 
 The OpenAPI 3.0 specification is embedded in the server binary (source: `internal/server/openapi.json`) and served at `/openapi.json`. It is not auth-exempt: when `auth.api_key` is set, fetching it requires the key like any other API call.
@@ -49,6 +53,24 @@ When an API key is configured, clients must send it on every request, either:
 
 Requests with a missing or invalid key receive `401 Unauthorized`. Health endpoints (`/health`, `/ready`, `/healthz`, `/readyz`, `/livez`) and `/metrics` are exempt from authentication so probes and scrapers keep working. `/health/deep` and `/openapi.json` are not exempt.
 
+### Client certificates (mTLS)
+
+When the server runs with TLS and a client CA (`tls.client_ca_file`), every
+non-exempt request must also present a client certificate signed by that CA:
+
+```bash
+curl --cacert ca.pem --cert client.pem --key client.key \
+  https://localhost:8080/v1/policies
+```
+
+- A request without a client certificate gets
+  `401 {"error":"client certificate required"}`. The exempt paths are the same
+  as for the API key, so probes and scrapers that carry no certificate keep
+  working.
+- A certificate from an unknown CA fails the TLS handshake. It never gets an
+  HTTP response.
+- If an API key is configured as well, both are required.
+
 ## CORS
 
 Every response carries CORS headers. With `cors.allowed_origins` empty (the
@@ -59,7 +81,7 @@ runs. `Access-Control-Allow-Headers` lists `Content-Type`, `Authorization`,
 `X-Request-Id`, the configured `auth.api_key_header` (default `X-API-Key`),
 and `rate_limit.header_name` (default `X-Client-ID`). See [Configuration → CORS](/garmr/docs/reference/configuration/#cors).
 
-Note: the `garmr` CLI does not yet support sending an API key — use the REST API directly against authenticated servers.
+Note: the `garmr` CLI does not yet support sending an API key — use the REST API directly against key-protected servers. It does support TLS and client certificates (`--ca-cert`, `--client-cert`, `--client-key`); see the [CLI guide](/garmr/docs/guides/cli/#tls).
 
 ---
 
@@ -544,7 +566,7 @@ shape:
 |------|---------|
 | 200 | Success |
 | 400 | Bad Request (malformed body, missing `input`, invalid input, reload with no policy source configured) |
-| 401 | Unauthorized (API key configured but missing or wrong) |
+| 401 | Unauthorized (API key configured but missing or wrong, or mTLS configured and no client certificate presented) |
 | 405 | Method Not Allowed |
 | 413 | Request Entity Too Large (body exceeds `max_recv_size`, or `max_validate_size` on `/v1/validate`) |
 | 429 | Too Many Requests (rate limited; `Retry-After` and `X-RateLimit-*` headers are set). Probe endpoints and `/metrics` are never rate limited. |
@@ -758,8 +780,11 @@ A decision record:
 }
 ```
 
-`principal` is the URI from the mesh identity header (`auth.identity_header`)
-and is empty when no sidecar sets it. `trace_id` is empty when the request
+`principal` is the caller's identity. Behind a mesh it is the URI from the
+identity header (`auth.identity_header`), and it is empty when no sidecar sets
+it. With `tls.enabled` that header is ignored. `principal` is then the
+`spiffe://` URI SAN (or the first URI SAN) of the verified client certificate,
+and it is empty when the caller presented no certificate. `trace_id` is empty when the request
 carries no trace context. Every event carries `request_id`, `timestamp`,
 `source_ip`, `principal`, and `trace_id`; the other events add their own
 fields (`valid`/`error_count` for `validate`, plus `timed_out: true` when the

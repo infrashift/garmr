@@ -209,6 +209,46 @@ spec:
     - { name: "*", action: deny }
 ```
 
+## Running outside a mesh (built-in TLS)
+
+Without a sidecar, Garmr can terminate TLS itself, with optional mTLS.
+The full reference is under
+[Transport Security](/garmr/docs/reference/configuration/#transport-security-tls). The
+points that matter for deployment:
+
+- **Pick one TLS owner.** Inside Consul Connect the sidecar owns mTLS and
+  Garmr must stay on plain HTTP. Enabling both breaks the Connect path, and the
+  Helm chart refuses to render `tls.enabled` together with
+  `mesh.consulConnect.enabled`. It also refuses `tls.secretName` or
+  `tls.clientCASecretName` without `tls.enabled`, which would otherwise
+  render a plaintext pod that looks configured for mTLS.
+- **mTLS replaces the mesh's identity.** With `tls.client_ca_file` set, API
+  calls must present a certificate from that CA. Its `spiffe://` URI SAN is
+  recorded as the audit `principal` and keys `rate_limit.client_identifier:
+  identity`. The XFCC header is ignored while TLS is on, because without a
+  sidecar any caller could forge it.
+- **Probes keep working.** `/healthz`, `/livez`, `/readyz` (and the legacy
+  probes and `/metrics`) answer without a client certificate. Point probes at
+  HTTPS. Kubelet does not verify the certificate, and Consul checks take
+  `tls_skip_verify` or `tls_server_name`.
+- **Rotation needs no restart.** Certificate, key and client CA are re-read
+  when their files change. In Kubernetes, mount the Secret as a directory, never
+  with `subPath`, or renewals never reach the pod. Under Nomad, render with
+  `change_mode = "noop"`. See `deploy/nomad/README.md`.
+
+Helm:
+
+```yaml
+tls:
+  enabled: true
+  secretName: garmr-tls              # tls.crt / tls.key, e.g. from cert-manager
+  clientCASecretName: garmr-clients  # optional: enables mTLS
+  clientCAKey: ca.crt
+```
+
+The chart passes the `--tls*` flags, mounts both Secrets as directories,
+renames the port to `https`, and switches the probes to `scheme: HTTPS`.
+
 ## Observability
 
 ### Metrics

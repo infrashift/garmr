@@ -78,7 +78,7 @@ stdout/stderr for the platform's log pipeline, with:
 - Request ID and W3C trace ID for correlation
 - Decision (allow/deny/warn), policies and rules evaluated, violations count
 - The input's `kind` and `metadata.name`
-- The caller: source IP, user agent, and the service-mesh identity (SPIFFE principal)
+- The caller: source IP, user agent, and the SPIFFE principal (from the service mesh, or from the client certificate under mTLS)
 
 Validation, policy deletion and reload requests are audited too.
 

@@ -1,3 +1,4 @@
+{{- include "garmr.validateTLS" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -49,8 +50,18 @@ spec:
           {{- if .Values.policies.inline }}
             - --policy-dir=/etc/garmr/policies
           {{- end }}
+          {{- if .Values.tls.enabled }}
+            - --tls
+            - --tls-cert=/etc/garmr/tls/tls.crt
+            - --tls-key=/etc/garmr/tls/tls.key
+            - --tls-min-version={{ .Values.tls.minVersion }}
+            - --tls-reload-interval={{ .Values.tls.reloadInterval }}
+            {{- if .Values.tls.clientCASecretName }}
+            - --tls-client-ca=/etc/garmr/client-ca/{{ .Values.tls.clientCAKey }}
+            {{- end }}
+          {{- end }}
           ports:
-            - name: http
+            - name: {{ include "garmr.portName" . }}
               containerPort: 8080
               protocol: TCP
           env:
@@ -68,13 +79,19 @@ spec:
           livenessProbe:
             httpGet:
               path: {{ .Values.probes.liveness.path }}
-              port: http
+              port: {{ include "garmr.portName" . }}
+              {{- if .Values.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
           readinessProbe:
             httpGet:
               path: {{ .Values.probes.readiness.path }}
-              port: http
+              port: {{ include "garmr.portName" . }}
+              {{- if .Values.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
           resources:
@@ -88,6 +105,18 @@ spec:
             - name: policies
               mountPath: /etc/garmr/policies
               readOnly: true
+            {{- end }}
+            {{- if .Values.tls.enabled }}
+            # Directory mounts (never subPath) so certificate renewals
+            # propagate into the running pod.
+            - name: tls
+              mountPath: /etc/garmr/tls
+              readOnly: true
+            {{- if .Values.tls.clientCASecretName }}
+            - name: client-ca
+              mountPath: /etc/garmr/client-ca
+              readOnly: true
+            {{- end }}
             {{- end }}
             - name: audit
               mountPath: /var/log/garmr
@@ -104,6 +133,16 @@ spec:
         - name: policies
           configMap:
             name: {{ include "garmr.fullname" . }}-policies
+        {{- end }}
+        {{- if .Values.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+        {{- if .Values.tls.clientCASecretName }}
+        - name: client-ca
+          secret:
+            secretName: {{ .Values.tls.clientCASecretName }}
+        {{- end }}
         {{- end }}
         - name: audit
           emptyDir: {}

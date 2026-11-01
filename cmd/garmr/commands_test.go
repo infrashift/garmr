@@ -105,12 +105,22 @@ func TestVersionCmd_JSON(t *testing.T) {
 
 // --- waitForHealth (exercised directly) ---
 
+func mustClient(t *testing.T, cfg clientCfg) *client.Client {
+	t.Helper()
+	c, err := client.NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
 func TestWaitForHealth_Timeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	err := waitForHealth(ctx, clientCfg{Address: "http://127.0.0.1:1"})
-	if err == nil {
-		t.Error("expected timeout error")
+	err := waitForHealth(ctx, mustClient(t, clientCfg{Address: "http://127.0.0.1:1"}))
+	if err == nil || !strings.Contains(err.Error(), "timeout waiting for server: ") {
+		t.Errorf("err = %v, want a timeout carrying the last error", err)
 	}
 }
 
@@ -120,7 +130,7 @@ func TestWaitForHealth_EventuallyHealthy(t *testing.T) {
 	defer cancel()
 
 	_, _ = captureOutput(t, func() {
-		if err := waitForHealth(ctx, clientCfg{Address: env.URL}); err != nil {
+		if err := waitForHealth(ctx, mustClient(t, clientCfg{Address: env.URL})); err != nil {
 			t.Fatalf("waitForHealth: %v", err)
 		}
 	})

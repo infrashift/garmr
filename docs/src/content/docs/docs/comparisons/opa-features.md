@@ -71,11 +71,11 @@ This document compares their feature sets side-by-side and highlights capabiliti
 |---|---|---|---|
 | HTTP API | REST (evaluate, validate, policies, reload) | REST (data, policies, query, compile) | Both provide REST APIs |
 | gRPC API | Not available (REST only) | Not built-in (Envoy plugin provides gRPC) | — |
-| API authentication | API key (header + Bearer token) | Bearer token, mTLS | OPA has more auth options |
+| API authentication | API key (header + Bearer token), mTLS client certificates | Bearer token, mTLS | Comparable; OPA also has token-based authz policies |
 | CORS | Configurable allowed origins | Not built-in | Garmr advantage |
 | Rate limiting | Built-in token bucket | Not built-in | Garmr advantage |
 | Request body size limits | Configurable | Not built-in | Garmr advantage |
-| TLS | Not built-in (mesh/proxy terminates TLS) | Configurable cert/key | OPA terminates TLS itself; Garmr delegates to the mesh |
+| TLS | Optional cert/key (+ client CA for mTLS), reloaded on rotation | Configurable cert/key | Both terminate TLS themselves; in a mesh Garmr leaves it to the sidecar |
 | Health checks | K8s probes (/healthz, /readyz, /livez) + legacy | /health with bundle awareness | Both provide health checks |
 | OpenAPI / Swagger | Built-in spec served at /openapi.json | Not built-in | Garmr advantage |
 | Audit logging | Structured JSON with request ID and mesh principal; to a rotated file or stdout/stderr for the platform's log shipper | Decision logs (remote push) | OPA's remote push is more mature |

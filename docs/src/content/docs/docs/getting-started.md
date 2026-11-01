@@ -356,8 +356,13 @@ http_addr: ":8080"
 # Policy loading (selects the filesystem backend rooted here)
 policy_dir: "/policies"
 
-# Transport security: Garmr serves plain HTTP only. TLS/mTLS is the
-# service mesh's (or a fronting proxy's) job.
+# Transport security: inside a service mesh, leave TLS off; the sidecar
+# owns mTLS. Outside a mesh, enable Garmr's own TLS (optionally mTLS):
+# tls:
+#   enabled: true
+#   cert_file: "/etc/garmr/tls/server.crt"
+#   key_file: "/etc/garmr/tls/server.key"
+#   client_ca_file: ""   # set to require client certificates
 
 # Logging
 log:

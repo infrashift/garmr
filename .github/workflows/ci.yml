@@ -71,9 +71,13 @@ jobs:
           fi
       # Pinned: `version: latest` lets an upstream release break CI with no
       # change to this repo.
+      # goinstall builds the linter with the Go from setup-go. The released
+      # v1.64.8 binary is built with go1.24 and refuses to load a module that
+      # targets go1.25 ("can't load config: the Go language version ...").
       - uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.8
+          install-mode: goinstall
           args: --timeout=5m
 
   schemas:

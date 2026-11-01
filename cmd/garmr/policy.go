@@ -1018,7 +1018,7 @@ func reloadInstance(addr, expectDigest string) reloadOutcome {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	c, err := client.NewClient(client.Config{Address: addr})
+	c, err := client.NewClient(clientConfig(addr))
 	if err != nil {
 		outcome.Error = err.Error()
 		return outcome

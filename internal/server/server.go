@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -33,18 +35,28 @@ import (
 	"github.com/infrashift/garmr/internal/observability"
 	"github.com/infrashift/garmr/internal/ratelimit"
 	"github.com/infrashift/garmr/internal/storage"
+	"github.com/infrashift/garmr/internal/tlsconf"
 )
 
 //go:embed openapi.json
 var openAPISpec []byte
 
 // Config holds server configuration.
-// Garmr terminates plain HTTP only: transport security (mTLS) is the service
-// mesh's job. The TLS listener and its config knobs were removed deliberately;
-// anyone deploying outside a mesh should front the server with a TLS proxy.
+//
+// Transport security has two modes. Inside a service mesh (the production
+// Consul Connect posture) Garmr serves plain HTTP: the sidecar terminates
+// mTLS and forwards the verified caller in the identity header. Outside a
+// mesh, TLSEnabled makes Garmr terminate TLS — and, with a client CA, mTLS —
+// itself; the identity header is then ignored, since no sidecar owns it.
 type Config struct {
 	HTTPAddr  string
 	PolicyDir string
+	// TLSEnabled serves HTTPS using TLS. Leave it off inside a mesh.
+	TLSEnabled bool
+	// TLS configures the listener when TLSEnabled is set. A ClientCAFile
+	// turns on mTLS: non-probe requests must present a certificate that
+	// verifies against it, and its URI SAN becomes the caller's principal.
+	TLS tlsconf.Options
 	// MaxRecvSize caps request bodies in bytes (default 16 MiB). Evaluate
 	// buffers the whole body before parsing, so this bounds per-request
 	// memory — size it together with the container's memory limit.
@@ -134,6 +146,8 @@ type Server struct {
 	healthHandler  *health.Handler
 	obs            *observability.Provider
 	storageBackend storage.Backend
+	// tls is non-nil when the server terminates TLS itself.
+	tls *tlsconf.Reloader
 
 	// validateSem bounds concurrent /v1/validate compilations. Evaluation is
 	// cheap compiled Go and needs no bound; validation compiles
@@ -168,6 +182,24 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 		obs:         obs,
 		validateSem: make(chan struct{}, validateConcurrency()),
 		validate:    eng.Validate,
+	}
+
+	// TLS first: a bad certificate must fail startup before anything that
+	// opens files or starts goroutines.
+	if cfg.TLSEnabled {
+		reloader, err := tlsconf.New(cfg.TLS, logger)
+		if err != nil {
+			return nil, fmt.Errorf("configuring TLS: %w", err)
+		}
+		s.tls = reloader
+		if cfg.IdentityHeader != "" && cfg.IdentityHeader != DefaultIdentityHeader {
+			logger.Warn("identity header is ignored while TLS is enabled; caller identity comes from verified client certificates",
+				zap.String("identity_header", cfg.IdentityHeader))
+		}
+	} else if cfg.TLS.CertFile != "" || cfg.TLS.KeyFile != "" || cfg.TLS.ClientCAFile != "" {
+		// Certificates without tls.enabled look like (m)TLS in the config
+		// while the API is served in the clear: refuse rather than warn.
+		return nil, errors.New("TLS files are configured but TLS is disabled: set tls.enabled, or remove tls.cert_file, tls.key_file and tls.client_ca_file to serve plain HTTP")
 	}
 
 	// Wire observability into the engine
@@ -223,21 +255,28 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 				"invalid rate limit client identifier %q: want one of ip, header, identity",
 				rlConfig.ClientIdentifier)
 		}
-		// The "identity" identifier reads the same mesh header the audit
-		// principal comes from.
-		rlConfig.IdentityHeader = cfg.IdentityHeader
+		// The "identity" identifier reads the same source the audit
+		// principal comes from: the mesh header, or — when Garmr terminates
+		// TLS — the verified client certificate.
+		rlConfig.Identity = s.principalOf
+		if rlConfig.ClientIdentifier == "identity" && s.tls != nil && !s.tls.MutualTLS() {
+			// TLS without a client CA has no trusted identity at all: the
+			// header is ignored and there are no verified certificates.
+			return nil, errors.New(
+				"rate limit client identifier \"identity\" requires mTLS when TLS is enabled: set the TLS client CA, or use \"ip\"")
+		}
 		rlConfig.TrustedProxies = cfg.RateLimitTrustedProxies
 		// Probes must never be rate limited: a 429 on /readyz reads as an
 		// unhealthy instance and gets it pulled from the mesh.
 		rlConfig.ExemptPaths = append(append([]string{}, probePaths...), cfg.AuthExemptPaths...)
 
-		if rlConfig.ClientIdentifier == "identity" {
+		if rlConfig.ClientIdentifier == "identity" && s.tls == nil {
 			// Identity keying degrades silently: with no XFCC header the
 			// limiter falls back to the client IP, which behind a sidecar is
 			// the local proxy — one shared bucket for every caller, looking
 			// exactly like a working per-client limit.
 			logger.Info("rate limiting keyed on mesh identity",
-				zap.String("header", rlConfig.IdentityHeader),
+				zap.String("header", s.identityHeader()),
 				zap.String("requires",
 					"a sidecar that sets the identity header; on Consul this needs "+
 						"service-defaults protocol=http, or the header is never injected "+
@@ -466,6 +505,15 @@ func (s *Server) Start(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 
+	// Certificate rotation is polled for as long as Start runs. Start returns
+	// only after Stop has drained the listener, so the poller is live for
+	// every connection the server accepts.
+	if s.tls != nil {
+		tlsCtx, cancelTLS := context.WithCancel(ctx)
+		defer cancelTLS()
+		go s.tls.Run(tlsCtx)
+	}
+
 	// Build the server synchronously so s.httpServer is set before anything
 	// can observe it, then serve on a goroutine.
 	srv := s.newHTTPServer()
@@ -487,7 +535,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mu.Unlock()
 
 	s.logger.Info("server started",
-		zap.String("http", s.config.HTTPAddr),
+		zap.String(s.scheme(), s.config.HTTPAddr),
 	)
 
 	select {
@@ -651,6 +699,13 @@ func (s *Server) newHTTPServer() *http.Server {
 		ReadTimeout:  durationOr(s.config.ReadTimeout, 30*time.Second),
 		WriteTimeout: durationOr(s.config.WriteTimeout, 60*time.Second),
 		IdleTimeout:  durationOr(s.config.IdleTimeout, 120*time.Second),
+		// net/http reports connection-level failures (TLS handshake errors
+		// from scanners and misconfigured clients, mostly) through this
+		// logger; the default writes unstructured lines to stderr.
+		ErrorLog: s.httpErrorLog(),
+	}
+	if s.tls != nil {
+		srv.TLSConfig = s.tls.TLSConfig()
 	}
 
 	s.mu.Lock()
@@ -658,6 +713,28 @@ func (s *Server) newHTTPServer() *http.Server {
 	s.mu.Unlock()
 
 	return srv
+}
+
+// httpErrorLog adapts the zap logger for http.Server.ErrorLog.
+func (s *Server) httpErrorLog() *log.Logger {
+	return log.New(httpErrorWriter{s.logger.Named("http")}, "", 0)
+}
+
+// httpErrorWriter logs net/http's connection errors at warn, except a TLS
+// handshake cut short by the peer. That is what every L4/TCP health check
+// (an NLB, a Consul TCP check) does to a TLS listener: connect, then close.
+// At warn those lines would arrive every few seconds and drown real errors.
+type httpErrorWriter struct{ logger *zap.Logger }
+
+func (w httpErrorWriter) Write(p []byte) (int, error) {
+	msg := strings.TrimSpace(string(p))
+	if strings.HasPrefix(msg, "http: TLS handshake error") &&
+		(strings.HasSuffix(msg, ": EOF") || strings.HasSuffix(msg, "connection reset by peer")) {
+		w.logger.Debug(msg)
+	} else {
+		w.logger.Warn(msg)
+	}
+	return len(p), nil
 }
 
 // durationOr returns d, or def when d is unset.
@@ -670,8 +747,24 @@ func durationOr(d, def time.Duration) time.Duration {
 
 // serve blocks serving on srv. Only ever called from the Start goroutine.
 func (s *Server) serve(srv *http.Server) error {
+	if s.tls != nil {
+		s.logger.Info("starting HTTPS server",
+			zap.String("addr", s.config.HTTPAddr),
+			zap.Bool("mutual_tls", s.tls.MutualTLS()))
+		// Empty paths: the certificate is served from srv.TLSConfig, which
+		// tracks rotation on disk.
+		return srv.ListenAndServeTLS("", "")
+	}
 	s.logger.Info("starting HTTP server", zap.String("addr", s.config.HTTPAddr))
 	return srv.ListenAndServe()
+}
+
+// scheme is "https" when the server terminates TLS, else "http".
+func (s *Server) scheme() string {
+	if s.tls != nil {
+		return "https"
+	}
+	return "http"
 }
 
 // writeError writes a generic error message to the client and logs the full error server-side.
@@ -1477,6 +1570,12 @@ func corsMiddleware(h http.Handler, allowedOrigins []string, allowHeaders string
 	})
 }
 
+// authExempt reports whether path skips authentication: the probe endpoints
+// always, plus any configured AuthExemptPaths.
+func (s *Server) authExempt(path string) bool {
+	return slices.Contains(probePaths, path) || slices.Contains(s.config.AuthExemptPaths, path)
+}
+
 // probePaths are the liveness/readiness endpoints an orchestrator polls.
 // They are exempt from both authentication and rate limiting: a 401 or 429
 // here is indistinguishable from an unhealthy instance, so either one gets a
@@ -1485,27 +1584,29 @@ var probePaths = []string{"/health", "/ready", "/healthz", "/readyz", "/livez"}
 
 // authMiddleware provides API key authentication.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	requireCert := s.tls != nil && s.tls.MutualTLS()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip auth if no API key configured
-		if s.config.APIKey == "" {
+		// Skip auth if neither an API key nor mTLS is configured, and on
+		// probe and other exempt paths.
+		if (s.config.APIKey == "" && !requireCert) || s.authExempt(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Check exempt paths
-		for _, path := range s.config.AuthExemptPaths {
-			if r.URL.Path == path {
-				next.ServeHTTP(w, r)
-				return
-			}
+		// mTLS. The handshake only verifies a certificate if one is
+		// presented (probes present none), so its absence is enforced here.
+		// Combined with an API key, both are required.
+		if requireCert && !tlsconf.HasVerifiedPeer(r.TLS) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": "client certificate required",
+			})
+			return
 		}
-
-		// Always exempt health/ready endpoints
-		for _, path := range probePaths {
-			if r.URL.Path == path {
-				next.ServeHTTP(w, r)
-				return
-			}
+		if s.config.APIKey == "" {
+			next.ServeHTTP(w, r)
+			return
 		}
 
 		// Check API key

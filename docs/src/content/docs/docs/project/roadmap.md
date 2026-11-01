@@ -61,7 +61,7 @@ This document describes what Garmr can do today and where it's headed.
 
 ### Security & Networking
 
-- Plain HTTP only; TLS/mTLS is the service mesh's (or a fronting proxy's) job
+- Optional TLS with optional mTLS, for deployments outside a mesh: client-certificate identity (URI SAN) recorded as the audit `principal`, certificate rotation without restart. Inside a mesh the sidecar owns mTLS and Garmr serves plain HTTP.
 - API key authentication
 - Service-mesh caller identity: SPIFFE URI parsed from `X-Forwarded-Client-Cert` (XFCC) and recorded as `principal` on every audit entry
 - Configurable CORS

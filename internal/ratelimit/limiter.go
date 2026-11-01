@@ -16,8 +16,6 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
-
-	"github.com/infrashift/garmr/internal/xfcc"
 )
 
 // Config configures rate limiting.
@@ -52,9 +50,12 @@ type Config struct {
 	// HeaderName for header-based client identification
 	HeaderName string `json:"headerName"`
 
-	// IdentityHeader is the header carrying the mesh-verified identity for
-	// the "identity" client identifier. Empty means xfcc.DefaultHeader.
-	IdentityHeader string `json:"identityHeader"`
+	// Identity returns the caller's verified identity for the "identity"
+	// client identifier, or "" when it has none. The server passes the same
+	// function that sets the audit principal, so the limiter and the audit
+	// log always trust the same source (mesh header or client certificate).
+	// Nil, or an empty result, keys the caller by client IP.
+	Identity func(*http.Request) string `json:"-"`
 
 	// CleanupInterval for expired client limiters
 	CleanupInterval time.Duration `json:"cleanupInterval"`
@@ -398,16 +399,14 @@ func (l *Limiter) extractClientID(r *http.Request) string {
 		return r.Header.Get(l.config.HeaderName)
 
 	case "identity":
-		// Key on the mesh-verified SPIFFE identity from the XFCC header.
-		// Falls back to the client IP when the header is absent or carries
-		// no URI — behind a sidecar that collapses to the loopback bucket,
+		// Falls back to the client IP when the caller has no verified
+		// identity. Behind a sidecar that collapses to the loopback bucket,
 		// which fails safe (shared limit) rather than open (fresh buckets).
-		header := l.config.IdentityHeader
-		if header == "" {
-			header = xfcc.DefaultHeader
-		}
-		if id := xfcc.ParseSPIFFEIdentity(r.Header.Values(header)); id != "" {
-			return id
+		// Without a proxy in front, RemoteAddr is the real peer.
+		if l.config.Identity != nil {
+			if id := l.config.Identity(r); id != "" {
+				return id
+			}
 		}
 		return clientIP(r.RemoteAddr)
 

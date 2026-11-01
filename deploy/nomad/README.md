@@ -44,6 +44,72 @@ call Garmr with ServiceIntentions (see
 intentions are service-level, so any service allowed to evaluate can also
 call the management endpoints; keep the allow list tight).
 
+Leave Garmr's built-in TLS (`tls.enabled`) **off** in these jobs. The
+sidecar forwards plaintext to Garmr on loopback; enabling TLS there breaks
+the Connect path, and Garmr would ignore the XFCC identity.
+
+### Outside the mesh: built-in TLS
+
+For a job that is *not* behind Connect, Garmr can terminate TLS (and
+optionally mTLS) itself. Render the certificate, chain and key into **one**
+PEM file with a single Vault `template`, and pass that file as both
+`--tls-cert` and `--tls-key`. One file is written atomically, so a renewal
+can never be seen half written. Two `pkiCert`/`secret` calls in separate
+templates would also issue two different certificates. Use
+`change_mode = "noop"`: Garmr re-reads the file when it changes
+(`--tls-reload-interval`, default 1m), so a renewal needs no restart or
+signal.
+
+```hcl
+task "garmr" {
+  vault { role = "garmr" }
+
+  template {
+    data        = <<-EOT
+      {{ with pkiCert "pki/issue/garmr" "common_name=garmr.service.consul" "ttl=72h" }}
+      {{ .Cert }}{{ .CA }}{{ .Key }}
+      {{ end }}
+    EOT
+    destination = "secrets/garmr.pem"
+    change_mode = "noop"
+  }
+
+  # Only for mTLS: the CA that client certificates must chain to.
+  template {
+    data        = "{{ with secret \"pki/cert/ca\" }}{{ .Data.certificate }}{{ end }}"
+    destination = "secrets/clients-ca.crt"
+    change_mode = "noop"
+  }
+
+  config {
+    args = [
+      "--policy-dir=/policies",
+      "--tls",
+      "--tls-cert=${NOMAD_SECRETS_DIR}/garmr.pem",
+      "--tls-key=${NOMAD_SECRETS_DIR}/garmr.pem",
+      "--tls-client-ca=${NOMAD_SECRETS_DIR}/clients-ca.crt", # omit for TLS without mTLS
+    ]
+  }
+}
+
+service {
+  name = "garmr"
+  port = "https"
+  check {
+    type            = "http"
+    protocol        = "https"
+    path            = "/readyz"
+    interval        = "10s"
+    timeout         = "3s"
+    tls_skip_verify = true # or tls_server_name = "garmr.service.consul"
+  }
+}
+```
+
+The probe paths answer without a client certificate even under mTLS, so the
+Consul check works unchanged. Callers use the CLI's TLS flags
+(`garmr --server https://... --ca-cert ... --client-cert ... --client-key ...`).
+
 ## Rate limiting in the mesh
 
 If you enable rate limiting, set `--rate-limit-identifier identity` (or

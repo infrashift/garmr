@@ -185,41 +185,43 @@ func TestExtractClientID_UnknownModeFallsBackToIP(t *testing.T) {
 	}
 }
 
+// The "identity" identifier keys on whatever Identity returns; which source
+// is trusted (mesh header or client certificate) is the server's decision
+// and is tested there.
 func TestExtractClientID_IdentityMode(t *testing.T) {
 	cfg := testConfig()
 	cfg.ClientIdentifier = "identity"
+	cfg.Identity = func(r *http.Request) string { return r.Header.Get("X-Test-Identity") }
 	l := New(cfg)
 	defer l.Close()
 
-	// Mesh-verified SPIFFE URI in the XFCC header keys the bucket.
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "127.0.0.1:41000" // the sidecar
-	req.Header.Set("X-Forwarded-Client-Cert",
-		`By=spiffe://dc1/ns/default/svc/garmr;Hash=abc;URI=spiffe://dc1/ns/default/svc/web`)
+	req.Header.Set("X-Test-Identity", "spiffe://dc1/ns/default/svc/web")
 	if got := l.extractClientID(req); got != "spiffe://dc1/ns/default/svc/web" {
-		t.Errorf("extractClientID = %q, want the SPIFFE URI", got)
+		t.Errorf("extractClientID = %q, want the identity", got)
 	}
 
-	// Absent or URI-less header falls back to the client IP — behind a
-	// sidecar that collapses to the loopback bucket, which fails safe.
+	// No identity falls back to the client IP — behind a sidecar that
+	// collapses to the loopback bucket, which fails safe.
 	bare := httptest.NewRequest(http.MethodGet, "/", nil)
 	bare.RemoteAddr = "127.0.0.1:41000"
 	if got := l.extractClientID(bare); got != "127.0.0.1" {
-		t.Errorf("extractClientID without header = %q, want IP fallback", got)
+		t.Errorf("extractClientID without identity = %q, want IP fallback", got)
 	}
 }
 
-func TestExtractClientID_IdentityMode_CustomHeader(t *testing.T) {
+func TestExtractClientID_IdentityMode_NoSource(t *testing.T) {
 	cfg := testConfig()
 	cfg.ClientIdentifier = "identity"
-	cfg.IdentityHeader = "X-Mesh-Identity"
 	l := New(cfg)
 	defer l.Close()
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("X-Mesh-Identity", `URI=spiffe://dc1/ns/default/svc/ci`)
-	if got := l.extractClientID(req); got != "spiffe://dc1/ns/default/svc/ci" {
-		t.Errorf("extractClientID = %q, want SPIFFE URI from the custom header", got)
+	req.RemoteAddr = "10.0.0.9:41000"
+	req.Header.Set("X-Forwarded-Client-Cert", `URI=spiffe://dc1/ns/default/svc/forged`)
+	if got := l.extractClientID(req); got != "10.0.0.9" {
+		t.Errorf("extractClientID with no Identity source = %q, want the client IP", got)
 	}
 }
 

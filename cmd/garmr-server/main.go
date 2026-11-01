@@ -20,6 +20,7 @@ import (
 	"github.com/infrashift/garmr/internal/engine"
 	"github.com/infrashift/garmr/internal/observability"
 	"github.com/infrashift/garmr/internal/server"
+	"github.com/infrashift/garmr/internal/tlsconf"
 )
 
 // version is injected at link time via the Makefile's `-X main.version=...`
@@ -74,6 +75,21 @@ func init() {
 	// Server flags
 	rootCmd.Flags().String("http-addr", ":8080", "HTTP listen address")
 	rootCmd.Flags().String("policy-dir", "", "directory containing policies")
+
+	// TLS flags. Off by default: inside a service mesh the sidecar owns
+	// mTLS and Garmr serves plain HTTP. Enable only outside a mesh.
+	rootCmd.Flags().Bool("tls", false, "serve HTTPS (leave off behind a service-mesh sidecar)")
+	rootCmd.Flags().String("tls-cert", "", "TLS certificate file (PEM, may include the chain)")
+	rootCmd.Flags().String("tls-key", "", "TLS private key file (PEM)")
+	rootCmd.Flags().String("tls-client-ca", "", "client CA bundle (PEM); setting it enables mTLS and certificate-based caller identity")
+	rootCmd.Flags().String("tls-min-version", "1.2", "minimum TLS version (1.2 or 1.3)")
+	rootCmd.Flags().Duration("tls-reload-interval", time.Minute, "how often certificate files are checked for rotation")
+	mustBind("tls.enabled", rootCmd.Flags().Lookup("tls"))
+	mustBind("tls.cert_file", rootCmd.Flags().Lookup("tls-cert"))
+	mustBind("tls.key_file", rootCmd.Flags().Lookup("tls-key"))
+	mustBind("tls.client_ca_file", rootCmd.Flags().Lookup("tls-client-ca"))
+	mustBind("tls.min_version", rootCmd.Flags().Lookup("tls-min-version"))
+	mustBind("tls.reload_interval", rootCmd.Flags().Lookup("tls-reload-interval"))
 
 	// Logging flags
 	rootCmd.Flags().String("log-level", "info", "log level (debug, info, warn, error)")
@@ -235,8 +251,16 @@ func runServer(cmd *cobra.Command, args []string) error {
 	requireMatch := viper.GetBool("evaluation.require_match")
 	rateLimitPerClient := viper.GetBool("rate_limit.per_client")
 	cfg := server.Config{
-		HTTPAddr:           viper.GetString("http_addr"),
-		PolicyDir:          viper.GetString("policy_dir"),
+		HTTPAddr:   viper.GetString("http_addr"),
+		PolicyDir:  viper.GetString("policy_dir"),
+		TLSEnabled: viper.GetBool("tls.enabled"),
+		TLS: tlsconf.Options{
+			CertFile:       viper.GetString("tls.cert_file"),
+			KeyFile:        viper.GetString("tls.key_file"),
+			ClientCAFile:   viper.GetString("tls.client_ca_file"),
+			MinVersion:     viper.GetString("tls.min_version"),
+			ReloadInterval: viper.GetDuration("tls.reload_interval"),
+		},
 		MaxRecvSize:        viper.GetInt("max_recv_size"),
 		ShutdownTimeout:    viper.GetDuration("shutdown_timeout"),
 		ReadTimeout:        viper.GetDuration("read_timeout"),
@@ -293,11 +317,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		cancel()
 	}()
 
-	// Start server
-	logger.Info("server listening",
-		zap.String("http", cfg.HTTPAddr),
-	)
-
+	// Start logs the listen address and scheme itself.
 	if err := srv.Start(ctx); err != nil {
 		return fmt.Errorf("server error: %w", err)
 	}

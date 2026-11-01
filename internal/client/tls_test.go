@@ -109,3 +109,27 @@ func TestNewClient_TLSOptionErrors(t *testing.T) {
 		})
 	}
 }
+
+// Close must only touch a transport the client built. A plain client shares
+// http.DefaultTransport, and closing that would drop every other user's
+// pooled connections.
+func TestClose_OnlyOwnTransport(t *testing.T) {
+	plain, err := NewClient(Config{Address: "http://localhost:8080"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.transport != nil {
+		t.Error("plain client owns a transport; want the shared default")
+	}
+	_ = plain.Close()
+
+	ca := tlstest.NewCA(t, "private")
+	withTLS, err := NewClient(Config{Address: "https://x", CACertFile: ca.WriteCA(t, t.TempDir(), "ca")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withTLS.transport == nil {
+		t.Error("TLS client has no transport of its own")
+	}
+	_ = withTLS.Close()
+}

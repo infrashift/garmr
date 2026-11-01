@@ -290,7 +290,8 @@ func TestNewServer_TLSValidation(t *testing.T) {
 		{"identity limiter with mTLS", Config{TLSEnabled: true, TLS: mutual.opts,
 			RateLimitEnabled: true, RateLimitClientIdentifier: "identity"}, ""},
 		{"custom identity header warns only", Config{TLSEnabled: true, TLS: serverOnly.opts, IdentityHeader: "X-Mesh-Id"}, ""},
-		{"files set but disabled warns only", Config{TLS: serverOnly.opts}, ""},
+		{"files set but disabled", Config{TLS: serverOnly.opts}, "TLS is disabled"},
+		{"client CA set but disabled", Config{TLS: tlsconf.Options{ClientCAFile: "ca.pem"}}, "TLS is disabled"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

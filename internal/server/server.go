@@ -197,8 +197,9 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 				zap.String("identity_header", cfg.IdentityHeader))
 		}
 	} else if cfg.TLS.CertFile != "" || cfg.TLS.KeyFile != "" || cfg.TLS.ClientCAFile != "" {
-		logger.Warn("TLS files are configured but TLS is disabled; serving plain HTTP",
-			zap.String("cert_file", cfg.TLS.CertFile))
+		// Certificates without tls.enabled look like (m)TLS in the config
+		// while the API is served in the clear: refuse rather than warn.
+		return nil, errors.New("TLS files are configured but TLS is disabled: set tls.enabled, or remove tls.cert_file, tls.key_file and tls.client_ca_file to serve plain HTTP")
 	}
 
 	// Wire observability into the engine

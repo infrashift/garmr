@@ -112,7 +112,7 @@ func New(opts Options, logger *zap.Logger) (*Reloader, error) {
 	}
 
 	r := &Reloader{opts: opts, minVersion: minVersion, logger: logger}
-	snap, err := r.load()
+	snap, err := r.load(r.stat())
 	if err != nil {
 		return nil, err
 	}
@@ -167,12 +167,12 @@ func (r *Reloader) Reload() bool {
 	// A failed stat still yields stamps (a missing file has a sentinel), so
 	// an unchanged broken state, a file deleted for a while included, is
 	// reported once rather than on every tick.
-	stamps, _ := r.stat()
+	stamps, statErr := r.stat()
 	if stampsEqual(stamps, r.current.Load().stamps) || stampsEqual(stamps, r.lastFailed) {
 		return false
 	}
 
-	snap, err := r.load()
+	snap, err := r.load(stamps, statErr)
 	if err != nil {
 		r.logger.Warn("TLS reload failed; still serving the previous certificate", zap.Error(err))
 		r.lastFailed = stamps
@@ -213,12 +213,12 @@ func (r *Reloader) stat() ([]fileStamp, error) {
 	return stamps, firstErr
 }
 
-// load reads every file and builds a snapshot. Stamps are taken before the
-// reads, so a write racing the load is seen as a change on the next check.
-func (r *Reloader) load() (*snapshot, error) {
-	stamps, err := r.stat()
-	if err != nil {
-		return nil, fmt.Errorf("reading TLS files: %w", err)
+// load reads every file and builds a snapshot recorded under stamps, the
+// result of the stat() that preceded it. Stamps are taken before the reads,
+// so a write racing the load is seen as a change on the next check.
+func (r *Reloader) load(stamps []fileStamp, statErr error) (*snapshot, error) {
+	if statErr != nil {
+		return nil, fmt.Errorf("reading TLS files: %w", statErr)
 	}
 
 	cert, err := tls.LoadX509KeyPair(r.opts.CertFile, r.opts.KeyFile)

@@ -3,7 +3,10 @@
 # Multi-stage, multi-arch build for Garmr.
 # Works with both `docker build` and `docker buildx build --platform=...`.
 
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+# Pinned to go.mod's floor: official images set GOTOOLCHAIN=local, so an
+# older floating golang:1.25 tag would fail the build (or, before go.mod
+# was raised, silently ship without the GO-2026-4337 crypto/tls fix).
+FROM --platform=$BUILDPLATFORM golang:1.25.14-alpine AS builder
 
 RUN apk add --no-cache git
 

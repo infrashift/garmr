@@ -22,6 +22,9 @@ import (
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
+	// transport is set only when the client built its own (TLS options);
+	// otherwise requests use the shared http.DefaultTransport.
+	transport *http.Transport
 }
 
 // Config holds client configuration.
@@ -104,6 +107,7 @@ func NewClient(cfg Config) (*Client, error) {
 	}
 
 	httpClient := &http.Client{Timeout: timeout}
+	var transport *http.Transport
 	if cfg.hasTLS() {
 		// TLS options on a plaintext address would look like mTLS while
 		// sending everything in the clear.
@@ -114,7 +118,7 @@ func NewClient(cfg Config) (*Client, error) {
 		if err != nil {
 			return nil, err
 		}
-		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport = http.DefaultTransport.(*http.Transport).Clone()
 		transport.TLSClientConfig = tlsCfg
 		httpClient.Transport = transport
 	}
@@ -122,14 +126,18 @@ func NewClient(cfg Config) (*Client, error) {
 	return &Client{
 		baseURL:    strings.TrimSuffix(baseURL, "/"),
 		httpClient: httpClient,
+		transport:  transport,
 	}, nil
 }
 
-// Close releases the client's idle keep-alive connections. A client built
-// with TLS options owns a dedicated transport, whose connections would
-// otherwise linger until IdleConnTimeout.
+// Close releases the idle keep-alive connections of a transport the client
+// owns (one built for TLS options), which would otherwise linger until
+// IdleConnTimeout. The shared http.DefaultTransport is left alone: closing
+// it would tear down every other user's pooled connections.
 func (c *Client) Close() error {
-	c.httpClient.CloseIdleConnections()
+	if c.transport != nil {
+		c.transport.CloseIdleConnections()
+	}
 	return nil
 }
 

@@ -144,8 +144,9 @@ tls:
 
 **Startup fails closed.** A missing or unreadable file, a certificate that does
 not match its key, a client CA file with no certificates, or an unknown
-`min_version` stops the server before it listens. If TLS files are configured
-while `tls.enabled` is false, the server only logs a warning and serves plain HTTP.
+`min_version` stops the server before it listens. So do TLS files
+configured while `tls.enabled` is false: the server would otherwise serve plain
+HTTP while looking configured for (m)TLS.
 
 **Rotation needs no restart.** Every `reload_interval` the server compares the
 modification time and size of each file. When one changes, it loads the set and

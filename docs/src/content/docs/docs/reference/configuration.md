@@ -113,9 +113,68 @@ source: the server starts with zero policies (so, under the default
 `require_match: true`, it denies every evaluation) and
 `POST /v1/policies/reload` returns `400 No policy source configured`.
 
-## Transport Security
+## Transport Security (TLS)
 
-Garmr serves plain HTTP only — there are no TLS settings. Transport security, including mTLS, is the service mesh's job: Consul Connect (or another sidecar proxy) terminates mTLS and forwards the verified caller identity in the header configured by `auth.identity_header`. Deploying outside a mesh? Front the server with a TLS-terminating proxy.
+TLS is optional and off by default. Which mode to use depends on where Garmr runs:
+
+- **Inside a service mesh, leave it off.** Consul Connect (or another sidecar
+  proxy) terminates mTLS and forwards the verified caller identity in the
+  header configured by `auth.identity_header`. Garmr serves plain HTTP on the
+  loopback interface the sidecar talks to.
+- **Outside a mesh, Garmr can terminate TLS itself**, with optional mTLS.
+
+```yaml
+tls:
+  enabled: true
+  cert_file: "/etc/garmr/tls/server.crt"
+  key_file: "/etc/garmr/tls/server.key"
+  client_ca_file: "/etc/garmr/tls/clients-ca.crt"   # optional: enables mTLS
+  min_version: "1.2"
+  reload_interval: "1m"
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `tls.enabled` | `false` | Serve HTTPS on `http_addr` |
+| `tls.cert_file` | _(none)_ | PEM server certificate; may contain the full chain. Required when enabled. |
+| `tls.key_file` | _(none)_ | PEM private key. Required when enabled. May be the same file as `cert_file` when one PEM holds certificate, chain and key, which also makes renewals atomic. |
+| `tls.client_ca_file` | _(none)_ | PEM CA bundle. Setting it enables mTLS (see below). |
+| `tls.min_version` | `1.2` | Minimum TLS version: `1.2` or `1.3` |
+| `tls.reload_interval` | `1m` | How often the certificate, key and CA files are checked for changes |
+
+**Startup fails closed.** A missing or unreadable file, a certificate that does
+not match its key, a client CA file with no certificates, or an unknown
+`min_version` stops the server before it listens. If TLS files are configured
+while `tls.enabled` is false, the server only logs a warning and serves plain HTTP.
+
+**Rotation needs no restart.** Every `reload_interval` the server compares the
+modification time and size of each file. When one changes, it loads the set and
+swaps it in atomically, and new handshakes use the new certificate and client CA.
+If the load fails, the previous certificate keeps serving and one warning is
+logged. That covers a renderer that writes the certificate and key as separate
+files: the mismatched pair is rejected, and the next check picks up the matched
+pair. Each load logs the certificate's subject, serial and `not_after`.
+
+**mTLS.** With `client_ca_file` set:
+
+- API requests must present a client certificate that chains to that CA. A
+  certificate from any other CA fails the handshake. A request with no
+  certificate gets `401 {"error":"client certificate required"}`.
+- The probe endpoints (`/health`, `/ready`, `/healthz`, `/readyz`, `/livez`)
+  and `/metrics` stay reachable without a certificate. The handshake requests a
+  client certificate but does not require one, because kubelet and Consul HTTPS
+  health checks present none. Requiring one at the handshake would fail every
+  probe.
+- The certificate's first `spiffe://` URI SAN (or, failing that, its first URI
+  SAN) becomes the audit record's `principal` and the key for
+  `rate_limit.client_identifier: identity`.
+- If `auth.api_key` is also set, both are required.
+
+**While TLS is enabled, `auth.identity_header` is ignored.** No sidecar sits in
+front to own the XFCC header, so any caller could set it. Caller identity comes
+only from verified client certificates. For the same reason,
+`rate_limit.client_identifier: identity` with TLS enabled requires
+`client_ca_file`, and the server refuses to start without it.
 
 ## Authentication
 
@@ -132,7 +191,7 @@ auth:
 |---------|---------|-------------|
 | `auth.api_key` | _(empty — auth disabled)_ | API key clients must present |
 | `auth.api_key_header` | `X-API-Key` | Header name used to read the API key |
-| `auth.identity_header` | `X-Forwarded-Client-Cert` | Header carrying the mesh-verified caller identity (XFCC format). Its URI (SPIFFE ID) becomes the audit record's `principal` and the key for `rate_limit.client_identifier: identity`. Only trustworthy when a sidecar sets it. |
+| `auth.identity_header` | `X-Forwarded-Client-Cert` | Header carrying the mesh-verified caller identity (XFCC format). Its URI (SPIFFE ID) becomes the audit record's `principal` and the key for `rate_limit.client_identifier: identity`. Only trustworthy when a sidecar sets it. Ignored when `tls.enabled` is true; the identity then comes from the client certificate. |
 
 ## CORS
 
@@ -294,6 +353,10 @@ callers it is spoofable, which would let them mint fresh buckets at will.
 When the header is absent, `identity` mode falls back to the client IP,
 which fails safe (a shared bucket) rather than open.
 
+With `tls.enabled`, `identity` keys on the verified client certificate's URI
+SAN and never reads the header. It requires `tls.client_ca_file`. Requests
+without a certificate (only the exempt probe paths) fall back to the client IP.
+
 On Consul, Envoy only injects XFCC when the service's protocol is `http`.
 Without a `service-defaults` entry setting `Protocol = "http"` the header
 never arrives, every caller shares the sidecar's bucket, and the audit log has
@@ -344,6 +407,15 @@ shutdown_timeout: "30s"
 # read_timeout: "30s"
 # write_timeout: "60s"
 # idle_timeout: "120s"
+
+# TLS (optional; leave off inside a service mesh)
+# tls:
+#   enabled: true
+#   cert_file: "/etc/garmr/tls/server.crt"
+#   key_file: "/etc/garmr/tls/server.key"
+#   client_ca_file: ""        # set to require client certificates (mTLS)
+#   min_version: "1.2"
+#   reload_interval: "1m"
 
 # Authentication & caller identity (optional)
 # auth:
@@ -405,6 +477,12 @@ passed overrides both the environment variable and the config file.
 | `--config` | — | _(search path above)_ |
 | `--http-addr` | `http_addr` | `:8080` |
 | `--policy-dir` | `policy_dir` | _(none)_ |
+| `--tls` | `tls.enabled` | `false` |
+| `--tls-cert` | `tls.cert_file` | _(none)_ |
+| `--tls-key` | `tls.key_file` | _(none)_ |
+| `--tls-client-ca` | `tls.client_ca_file` | _(none)_ |
+| `--tls-min-version` | `tls.min_version` | `1.2` |
+| `--tls-reload-interval` | `tls.reload_interval` | `1m` |
 | `--storage-type` | `storage.type` | _(empty)_ |
 | `--storage-root` | `storage.root` | _(empty → `/policies`)_ |
 | `--log-level` | `log.level` | `info` |

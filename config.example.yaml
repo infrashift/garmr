@@ -26,12 +26,28 @@ shutdown_timeout: "30s"
 # Policy configuration
 policy_dir: "/etc/garmr/policies"
 
-# Transport security
-# Garmr serves plain HTTP only. TLS — including mTLS — is the service mesh's
-# job: Consul Connect terminates mTLS at the sidecar and forwards the
-# verified identity (see auth.identity_header below and
-# deploy/helm/garmr/examples/consul-connect/). Deploying outside a mesh?
-# Front the server with a TLS-terminating proxy.
+# Transport security (optional)
+# Inside a service mesh, leave TLS off: Consul Connect terminates mTLS at the
+# sidecar and forwards the verified identity (see auth.identity_header below
+# and deploy/helm/garmr/examples/consul-connect/).
+#
+# Outside a mesh, Garmr can terminate TLS itself. Setting client_ca_file
+# turns on mTLS: requests to the API must present a certificate that chains
+# to that CA, and its URI SAN (SPIFFE ID) becomes the audit principal and the
+# rate_limit "identity" key. Probe endpoints stay reachable without a client
+# certificate so kubelet/Consul health checks keep working. While TLS is on,
+# auth.identity_header is ignored — no sidecar owns it, so callers could forge it.
+#
+# Certificate, key and CA files are re-read when they change (checked every
+# reload_interval), so rotation needs no restart. A rotation caught half
+# written keeps the previous certificate serving until both files match.
+# tls:
+#   enabled: false
+#   cert_file: "/etc/garmr/tls/server.crt"   # PEM, may include the chain
+#   key_file: "/etc/garmr/tls/server.key"
+#   client_ca_file: ""                       # set to enable mTLS
+#   min_version: "1.2"                       # "1.2" or "1.3"
+#   reload_interval: "1m"
 
 # Logging configuration
 log:
@@ -117,7 +133,9 @@ auth:
 #   #              traffic shares one bucket.
 #   #   identity — the mesh-verified SPIFFE URI from the XFCC header
 #   #              (auth.identity_header). Use this under Consul Connect.
-#   #              Only safe when a sidecar owns that header.
+#   #              Only safe when a sidecar owns that header. With tls
+#   #              enabled it keys on the client certificate instead, and
+#   #              requires tls.client_ca_file.
 #   #   header   — a caller-supplied header (header_name); trusted callers only.
 #   client_identifier: "ip"
 #   header_name: "X-Client-ID"

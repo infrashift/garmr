@@ -10,7 +10,7 @@ Complete command reference for the Garmr CLI.
 
 `eval`, `policy list/get/delete/reload`, and `health` are REST clients and require a running Garmr server. `validate`, `test`, `docs generate`, and `policy digest/lock/validate-lock/diff` run locally without a server — `validate` and `policy digest` embed the exact engine loader the server runs, so their results predict what the server will load.
 
-The CLI has no authentication or TLS client options and cannot talk to an API-key-protected server. Run the CLI against the server over a trusted network (localhost, cluster-internal), or behind a service mesh sidecar that handles mTLS — the same deployment model the server's `auth.identity_header` support is designed for.
+The CLI has no API-key option and cannot talk to an API-key-protected server. It does speak TLS: an `https://` `--server` works against publicly trusted certificates as-is, `--ca-cert` trusts a private CA, and `--client-cert`/`--client-key` present a client certificate to a server that requires mTLS (see [TLS](#tls)). Inside a service mesh, run the CLI as a mesh workload and let the sidecar handle mTLS, which is the same deployment model the server's `auth.identity_header` support is designed for.
 
 ## Global Flags
 
@@ -21,6 +21,30 @@ The CLI has no authentication or TLS client options and cannot talk to an API-ke
 | `--output` | `-o` | Output format (table, json, yaml) | `table` |
 | `--quiet` | `-q` | Suppress non-essential output | `false` |
 | `--verbose` | `-v` | Verbose output (see per-command docs for exact effect) | unset |
+| `--ca-cert` | | PEM CA bundle trusted in addition to the system roots | _(none)_ |
+| `--client-cert` | | PEM client certificate for mTLS (requires `--client-key`) | _(none)_ |
+| `--client-key` | | PEM private key for `--client-cert` | _(none)_ |
+
+### TLS
+
+The TLS flags apply to every command that talks to a server, including each
+instance in a `policy reload --servers` fan-out. They require an `https://`
+server address. Combining them with `http://` is a configuration error (exit
+code 2), not a silent fallback to plaintext.
+
+```bash
+# Server certificate from a private CA
+garmr --server https://garmr.internal:8443 --ca-cert ca.pem health
+
+# Server that requires client certificates (tls.client_ca_file set)
+garmr --server https://garmr.internal:8443 \
+  --ca-cert ca.pem --client-cert ci.pem --client-key ci.key \
+  eval --input deployment.json
+```
+
+When the server requires mTLS, probe endpoints answer without a certificate,
+so `garmr health` works with `--ca-cert` alone. API commands without a client
+certificate get `401 client certificate required`.
 
 ## Exit Codes
 
@@ -590,7 +614,7 @@ garmr version
 
 ## Environment Variables
 
-Three settings can be set via environment variables. Other flags
+These settings can be set via environment variables. Other flags
 (`--quiet`, `--verbose`, and every per-command flag) have no environment
 equivalent.
 
@@ -598,6 +622,9 @@ equivalent.
 |----------|------|
 | `GARMR_SERVER` | `--server` |
 | `GARMR_OUTPUT` | `--output` |
+| `GARMR_TLS_CA_CERT` | `--ca-cert` |
+| `GARMR_TLS_CLIENT_CERT` | `--client-cert` |
+| `GARMR_TLS_CLIENT_KEY` | `--client-key` |
 | `GARMR_CONFIG` | `--config` |
 
 **Example:**
@@ -619,6 +646,10 @@ in both locations), or point `--config` / `GARMR_CONFIG` at any path:
 ```yaml
 server: "http://localhost:8080"
 output: "table"
+# tls:                      # only for https:// servers
+#   ca_cert: "/etc/garmr/ca.pem"
+#   client_cert: "/etc/garmr/ci.pem"
+#   client_key: "/etc/garmr/ci.key"
 ```
 
 ---

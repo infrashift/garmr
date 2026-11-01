@@ -44,7 +44,8 @@ service:
   annotations: {}
 
 # Liveness/readiness use Garmr's health endpoints — they work without any
-# additional configuration.
+# additional configuration. With tls.enabled they switch to HTTPS; kubelet
+# does not verify the certificate, and probe paths need no client cert.
 probes:
   liveness:
     path: /livez
@@ -140,6 +141,23 @@ mesh:
     service: ""
     # Override the upstream service port if yours differs from 8080.
     port: 8080
+
+# Built-in TLS, for clusters WITHOUT a service mesh. Inside Consul Connect
+# (mesh.consulConnect.enabled) leave this off: the sidecar owns mTLS and
+# forwards plaintext to Garmr, so the chart refuses to render both.
+tls:
+  enabled: false
+  # Secret holding tls.crt and tls.key (type kubernetes.io/tls), e.g. issued
+  # by cert-manager. It is mounted as a directory, not via subPath, so
+  # renewals reach the pod and are picked up without a restart.
+  secretName: ""
+  # Optional Secret holding the client CA bundle. Setting it enables mTLS:
+  # API calls must present a certificate from this CA, and its URI SAN
+  # becomes the audit principal.
+  clientCASecretName: ""
+  clientCAKey: ca.crt
+  minVersion: "1.2"
+  reloadInterval: 1m
 
 # Env vars appended verbatim to the pod spec. Useful for proxy settings.
 extraEnv: []

@@ -329,7 +329,7 @@
             }
           },
           "401": {
-            "description": "API key missing or invalid (only when auth.api_key is configured)",
+            "description": "API key missing or invalid (only when auth.api_key is configured), or no verified client certificate (only when tls.client_ca_file is configured)",
             "content": {
               "application/json": {
                 "schema": {
@@ -421,7 +421,7 @@
             }
           },
           "401": {
-            "description": "API key missing or invalid (only when auth.api_key is configured)",
+            "description": "API key missing or invalid (only when auth.api_key is configured), or no verified client certificate (only when tls.client_ca_file is configured)",
             "content": {
               "application/json": {
                 "schema": {
@@ -505,7 +505,7 @@
             }
           },
           "401": {
-            "description": "API key missing or invalid (only when auth.api_key is configured)",
+            "description": "API key missing or invalid (only when auth.api_key is configured), or no verified client certificate (only when tls.client_ca_file is configured)",
             "content": {
               "application/json": {
                 "schema": {
@@ -575,7 +575,7 @@
             }
           },
           "401": {
-            "description": "API key missing or invalid (only when auth.api_key is configured)",
+            "description": "API key missing or invalid (only when auth.api_key is configured), or no verified client certificate (only when tls.client_ca_file is configured)",
             "content": {
               "application/json": {
                 "schema": {
@@ -647,7 +647,7 @@
             }
           },
           "401": {
-            "description": "API key missing or invalid (only when auth.api_key is configured)",
+            "description": "API key missing or invalid (only when auth.api_key is configured), or no verified client certificate (only when tls.client_ca_file is configured)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1132,7 +1132,7 @@
         "type": "apiKey",
         "in": "header",
         "name": "X-API-Key",
-        "description": "Static API key, required only when the server is started with auth.api_key set. In the recommended in-mesh deployment (Consul Connect mTLS + intentions) no key is configured and requests are unauthenticated at the application layer."
+        "description": "Static API key, required only when the server is started with auth.api_key set. In the recommended in-mesh deployment (Consul Connect mTLS + intentions) no key is configured and requests are unauthenticated at the application layer. Outside a mesh the server can instead require mTLS client certificates (tls.client_ca_file), negotiated at the TLS layer and not expressible as an OpenAPI 3.0 security scheme; with both configured, both are required."
       },
       "BearerAuth": {
         "type": "http",

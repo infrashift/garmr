@@ -5,7 +5,10 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +28,52 @@ type Client struct {
 type Config struct {
 	Address string
 	Timeout time.Duration
+	// CACertFile adds a PEM CA bundle to the system roots, for servers
+	// whose certificate comes from a private CA.
+	CACertFile string
+	// ClientCertFile and ClientKeyFile present a client certificate, for
+	// servers that require mTLS. Both or neither.
+	ClientCertFile string
+	ClientKeyFile  string
+}
+
+// hasTLS reports whether any TLS option is set.
+func (c Config) hasTLS() bool {
+	return c.CACertFile != "" || c.ClientCertFile != "" || c.ClientKeyFile != ""
+}
+
+// tlsConfig builds the client TLS config from the file options.
+func (c Config) tlsConfig() (*tls.Config, error) {
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+
+	if c.CACertFile != "" {
+		pem, err := os.ReadFile(c.CACertFile)
+		if err != nil {
+			return nil, fmt.Errorf("reading CA certificate: %w", err)
+		}
+		// Extend the system roots rather than replacing them, so a private
+		// CA does not break publicly trusted servers.
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("CA certificate file %s contains no PEM certificates", c.CACertFile)
+		}
+		cfg.RootCAs = pool
+	}
+
+	if (c.ClientCertFile == "") != (c.ClientKeyFile == "") {
+		return nil, errors.New("client certificate and client key must be set together")
+	}
+	if c.ClientCertFile != "" {
+		cert, err := tls.LoadX509KeyPair(c.ClientCertFile, c.ClientKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("loading client certificate: %w", err)
+		}
+		cfg.Certificates = []tls.Certificate{cert}
+	}
+	return cfg, nil
 }
 
 // NewClient creates a new HTTP client.
@@ -54,11 +103,25 @@ func NewClient(cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("invalid server address %q: missing host", baseURL)
 	}
 
+	httpClient := &http.Client{Timeout: timeout}
+	if cfg.hasTLS() {
+		// TLS options on a plaintext address would look like mTLS while
+		// sending everything in the clear.
+		if parsed.Scheme != "https" {
+			return nil, fmt.Errorf("invalid server address %q: TLS options require an https:// address", baseURL)
+		}
+		tlsCfg, err := cfg.tlsConfig()
+		if err != nil {
+			return nil, err
+		}
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.TLSClientConfig = tlsCfg
+		httpClient.Transport = transport
+	}
+
 	return &Client{
-		baseURL: strings.TrimSuffix(baseURL, "/"),
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
+		baseURL:    strings.TrimSuffix(baseURL, "/"),
+		httpClient: httpClient,
 	}, nil
 }
 

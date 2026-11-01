@@ -1,8 +1,11 @@
 package ratelimit
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -220,6 +223,35 @@ func TestExtractClientID_IdentityMode_CustomHeader(t *testing.T) {
 	req.Header.Set("X-Mesh-Identity", `URI=spiffe://dc1/ns/default/svc/ci`)
 	if got := l.extractClientID(req); got != "spiffe://dc1/ns/default/svc/ci" {
 		t.Errorf("extractClientID = %q, want SPIFFE URI from the custom header", got)
+	}
+}
+
+// TestExtractClientID_IdentityMode_PeerCert covers Garmr terminating TLS
+// itself: the verified client certificate keys the bucket and the XFCC
+// header, which any caller could forge without a sidecar, is ignored.
+func TestExtractClientID_IdentityMode_PeerCert(t *testing.T) {
+	cfg := testConfig()
+	cfg.ClientIdentifier = "identity"
+	cfg.PeerCertIdentity = true
+	l := New(cfg)
+	defer l.Close()
+
+	id, _ := url.Parse("spiffe://dc1/ns/default/svc/web")
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.7:41000"
+	req.TLS = &tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{{URIs: []*url.URL{id}}}}}
+	req.Header.Set("X-Forwarded-Client-Cert", `URI=spiffe://dc1/ns/default/svc/forged`)
+	if got := l.extractClientID(req); got != id.String() {
+		t.Errorf("extractClientID = %q, want the certificate identity", got)
+	}
+
+	// No verified certificate: the forged header still loses, and the
+	// bucket is the real peer address.
+	bare := httptest.NewRequest(http.MethodGet, "/", nil)
+	bare.RemoteAddr = "10.0.0.8:41000"
+	bare.Header.Set("X-Forwarded-Client-Cert", `URI=spiffe://dc1/ns/default/svc/forged`)
+	if got := l.extractClientID(bare); got != "10.0.0.8" {
+		t.Errorf("extractClientID without cert = %q, want the peer IP", got)
 	}
 }
 

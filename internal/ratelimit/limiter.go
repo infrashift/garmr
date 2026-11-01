@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/infrashift/garmr/internal/tlsconf"
 	"github.com/infrashift/garmr/internal/xfcc"
 )
 
@@ -55,6 +56,12 @@ type Config struct {
 	// IdentityHeader is the header carrying the mesh-verified identity for
 	// the "identity" client identifier. Empty means xfcc.DefaultHeader.
 	IdentityHeader string `json:"identityHeader"`
+
+	// PeerCertIdentity makes the "identity" identifier key on the verified
+	// client certificate's URI SAN instead of the identity header. Set when
+	// Garmr terminates TLS itself: no sidecar sits in front to own the XFCC
+	// header, so any caller could forge it.
+	PeerCertIdentity bool `json:"peerCertIdentity"`
 
 	// CleanupInterval for expired client limiters
 	CleanupInterval time.Duration `json:"cleanupInterval"`
@@ -398,6 +405,15 @@ func (l *Limiter) extractClientID(r *http.Request) string {
 		return r.Header.Get(l.config.HeaderName)
 
 	case "identity":
+		// Garmr terminating TLS itself: key on the verified client
+		// certificate and never read the header. With no proxy in front,
+		// RemoteAddr is the real peer, so the IP fallback is per-caller.
+		if l.config.PeerCertIdentity {
+			if id := tlsconf.PeerIdentity(r.TLS); id != "" {
+				return id
+			}
+			return clientIP(r.RemoteAddr)
+		}
 		// Key on the mesh-verified SPIFFE identity from the XFCC header.
 		// Falls back to the client IP when the header is absent or carries
 		// no URI — behind a sidecar that collapses to the loopback bucket,

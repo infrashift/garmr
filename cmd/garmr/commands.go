@@ -31,15 +31,26 @@ func init() {
 	healthCmd.Flags().Duration("timeout", 30*time.Second, "timeout when waiting")
 }
 
+// clientConfig is the client configuration for addr: the address plus the
+// global TLS options (--ca-cert, --client-cert, --client-key). Every command
+// that talks to a server builds its client from this, so TLS settings apply
+// uniformly — including to each instance in a reload fan-out.
+func clientConfig(addr string) client.Config {
+	return client.Config{
+		Address:        addr,
+		CACertFile:     viper.GetString("tls.ca_cert"),
+		ClientCertFile: viper.GetString("tls.client_cert"),
+		ClientKeyFile:  viper.GetString("tls.client_key"),
+	}
+}
+
 // newServerClient builds the REST client from the configured --server
 // address together with the standard 30-second request context shared by
 // every server-backed command. The returned cleanup releases both; callers
 // defer it immediately.
 func newServerClient() (*client.Client, context.Context, func(), error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	c, err := client.NewClient(client.Config{
-		Address: viper.GetString("server"),
-	})
+	c, err := client.NewClient(clientConfig(viper.GetString("server")))
 	if err != nil {
 		cancel()
 		return nil, nil, nil, fmt.Errorf("connecting to server: %w", err)
@@ -54,9 +65,7 @@ func runHealth(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cfg := client.Config{
-		Address: viper.GetString("server"),
-	}
+	cfg := clientConfig(viper.GetString("server"))
 
 	wait, _ := cmd.Flags().GetBool("wait")
 	timeout, _ := cmd.Flags().GetDuration("timeout")

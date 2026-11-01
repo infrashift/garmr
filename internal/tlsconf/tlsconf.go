@@ -71,6 +71,10 @@ type fileStamp struct {
 	size    int64
 }
 
+// missingStamp marks a file that could not be stat'ed; no real file has a
+// negative size.
+var missingStamp = fileStamp{size: -1}
+
 // snapshot is one loaded, internally consistent set of TLS material.
 type snapshot struct {
 	config *tls.Config
@@ -135,8 +139,8 @@ func (r *Reloader) TLSConfig() *tls.Config {
 	}
 }
 
-// Leaf returns the currently served leaf certificate.
-func (r *Reloader) Leaf() *x509.Certificate {
+// leaf returns the currently served leaf certificate.
+func (r *Reloader) leaf() *x509.Certificate {
 	return r.current.Load().leaf
 }
 
@@ -160,8 +164,11 @@ func (r *Reloader) Run(ctx context.Context) {
 // later check once both files are in place. It reports whether a new
 // snapshot was installed.
 func (r *Reloader) Reload() bool {
-	stamps, err := r.stat()
-	if err == nil && (stampsEqual(stamps, r.current.Load().stamps) || stampsEqual(stamps, r.lastFailed)) {
+	// A failed stat still yields stamps (a missing file has a sentinel), so
+	// an unchanged broken state, a file deleted for a while included, is
+	// reported once rather than on every tick.
+	stamps, _ := r.stat()
+	if stampsEqual(stamps, r.current.Load().stamps) || stampsEqual(stamps, r.lastFailed) {
 		return false
 	}
 
@@ -185,17 +192,25 @@ func (r *Reloader) files() []string {
 	return files
 }
 
+// stat stamps every file. A file that cannot be stat'ed gets the missingStamp
+// sentinel and the first such error is returned, so callers can tell a
+// broken state they have already seen from a new one.
 func (r *Reloader) stat() ([]fileStamp, error) {
 	files := r.files()
 	stamps := make([]fileStamp, len(files))
+	var firstErr error
 	for i, f := range files {
 		fi, err := os.Stat(f)
 		if err != nil {
-			return nil, err
+			stamps[i] = missingStamp
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		stamps[i] = fileStamp{modTime: fi.ModTime(), size: fi.Size()}
 	}
-	return stamps, nil
+	return stamps, firstErr
 }
 
 // load reads every file and builds a snapshot. Stamps are taken before the

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
@@ -145,5 +146,32 @@ func TestReloadInstance_MutualTLS(t *testing.T) {
 	out := reloadInstance(env.URL, "")
 	if out.Error != "" {
 		t.Fatalf("reload over mTLS: %s", out.Error)
+	}
+}
+
+// A certificate failure cannot be fixed by waiting, so --wait must report it
+// at once instead of retrying silently until the timeout.
+func TestWaitForHealth_TLSFailureIsImmediate(t *testing.T) {
+	env := newMTLSTestServer(t, server.Config{})
+	cases := []struct {
+		name string
+		cfg  clientCfg
+	}{
+		{"untrusted server certificate", clientCfg{Address: env.URL, ClientCertFile: env.certFile, ClientKeyFile: env.keyFile}},
+		{"client certificate rejected", clientCfg{Address: env.URL, CACertFile: env.caFile}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			start := time.Now()
+			err := waitForHealth(ctx, mustClient(t, tc.cfg))
+			if err == nil || !strings.Contains(err.Error(), "health check failed") {
+				t.Fatalf("err = %v, want an immediate TLS failure", err)
+			}
+			if elapsed := time.Since(start); elapsed > 10*time.Second {
+				t.Errorf("took %v; a TLS failure should not wait for the timeout", elapsed)
+			}
+		})
 	}
 }

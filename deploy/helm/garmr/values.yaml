@@ -144,7 +144,8 @@ mesh:
 
 # Built-in TLS, for clusters WITHOUT a service mesh. Inside Consul Connect
 # (mesh.consulConnect.enabled) leave this off: the sidecar owns mTLS and
-# forwards plaintext to Garmr, so the chart refuses to render both.
+# forwards plaintext to Garmr, so the chart refuses to render both. Setting
+# secretName or clientCASecretName without enabled=true is also refused.
 tls:
   enabled: false
   # Secret holding tls.crt and tls.key (type kubernetes.io/tls), e.g. issued

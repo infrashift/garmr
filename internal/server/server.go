@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -256,8 +257,7 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 		// The "identity" identifier reads the same source the audit
 		// principal comes from: the mesh header, or — when Garmr terminates
 		// TLS — the verified client certificate.
-		rlConfig.IdentityHeader = cfg.IdentityHeader
-		rlConfig.PeerCertIdentity = s.tls != nil
+		rlConfig.Identity = s.principalOf
 		if rlConfig.ClientIdentifier == "identity" && s.tls != nil && !s.tls.MutualTLS() {
 			// TLS without a client CA has no trusted identity at all: the
 			// header is ignored and there are no verified certificates.
@@ -275,7 +275,7 @@ func NewServer(cfg Config, eng *engine.Engine, logger *zap.Logger) (*Server, err
 			// the local proxy — one shared bucket for every caller, looking
 			// exactly like a working per-client limit.
 			logger.Info("rate limiting keyed on mesh identity",
-				zap.String("header", rlConfig.IdentityHeader),
+				zap.String("header", s.identityHeader()),
 				zap.String("requires",
 					"a sidecar that sets the identity header; on Consul this needs "+
 						"service-defaults protocol=http, or the header is never injected "+
@@ -714,14 +714,26 @@ func (s *Server) newHTTPServer() *http.Server {
 	return srv
 }
 
-// httpErrorLog adapts the zap logger for http.Server.ErrorLog, at warn.
+// httpErrorLog adapts the zap logger for http.Server.ErrorLog.
 func (s *Server) httpErrorLog() *log.Logger {
-	l, err := zap.NewStdLogAt(s.logger.Named("http"), zap.WarnLevel)
-	if err != nil {
-		// Only fails for an invalid level, which WarnLevel is not.
-		return nil
+	return log.New(httpErrorWriter{s.logger.Named("http")}, "", 0)
+}
+
+// httpErrorWriter logs net/http's connection errors at warn, except a TLS
+// handshake cut short by the peer. That is what every L4/TCP health check
+// (an NLB, a Consul TCP check) does to a TLS listener: connect, then close.
+// At warn those lines would arrive every few seconds and drown real errors.
+type httpErrorWriter struct{ logger *zap.Logger }
+
+func (w httpErrorWriter) Write(p []byte) (int, error) {
+	msg := strings.TrimSpace(string(p))
+	if strings.HasPrefix(msg, "http: TLS handshake error") &&
+		(strings.HasSuffix(msg, ": EOF") || strings.HasSuffix(msg, "connection reset by peer")) {
+		w.logger.Debug(msg)
+	} else {
+		w.logger.Warn(msg)
 	}
-	return l
+	return len(p), nil
 }
 
 // durationOr returns d, or def when d is unset.
@@ -1560,17 +1572,7 @@ func corsMiddleware(h http.Handler, allowedOrigins []string, allowHeaders string
 // authExempt reports whether path skips authentication: the probe endpoints
 // always, plus any configured AuthExemptPaths.
 func (s *Server) authExempt(path string) bool {
-	for _, p := range probePaths {
-		if path == p {
-			return true
-		}
-	}
-	for _, p := range s.config.AuthExemptPaths {
-		if path == p {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(probePaths, path) || slices.Contains(s.config.AuthExemptPaths, path)
 }
 
 // probePaths are the liveness/readiness endpoints an orchestrator polls.

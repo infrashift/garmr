@@ -317,15 +317,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		cancel()
 	}()
 
-	// Start server
-	scheme := "http"
-	if cfg.TLSEnabled {
-		scheme = "https"
-	}
-	logger.Info("server listening",
-		zap.String(scheme, cfg.HTTPAddr),
-	)
-
+	// Start logs the listen address and scheme itself.
 	if err := srv.Start(ctx); err != nil {
 		return fmt.Errorf("server error: %w", err)
 	}

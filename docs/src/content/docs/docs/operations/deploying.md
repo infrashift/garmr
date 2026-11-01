@@ -219,7 +219,9 @@ points that matter for deployment:
 - **Pick one TLS owner.** Inside Consul Connect the sidecar owns mTLS and
   Garmr must stay on plain HTTP. Enabling both breaks the Connect path, and the
   Helm chart refuses to render `tls.enabled` together with
-  `mesh.consulConnect.enabled`.
+  `mesh.consulConnect.enabled`. It also refuses `tls.secretName` or
+  `tls.clientCASecretName` without `tls.enabled`, which would otherwise
+  render a plaintext pod that looks configured for mTLS.
 - **mTLS replaces the mesh's identity.** With `tls.client_ca_file` set, API
   calls must present a certificate from that CA. Its `spiffe://` URI SAN is
   recorded as the audit `principal` and keys `rate_limit.client_identifier:

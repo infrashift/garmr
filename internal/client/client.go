@@ -125,8 +125,11 @@ func NewClient(cfg Config) (*Client, error) {
 	}, nil
 }
 
-// Close closes the client (no-op for HTTP client).
+// Close releases the client's idle keep-alive connections. A client built
+// with TLS options owns a dedicated transport, whose connections would
+// otherwise linger until IdleConnTimeout.
 func (c *Client) Close() error {
+	c.httpClient.CloseIdleConnections()
 	return nil
 }
 

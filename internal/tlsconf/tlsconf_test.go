@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
+
 	"github.com/infrashift/garmr/internal/tlsconf/tlstest"
 )
 
@@ -71,8 +74,8 @@ func TestNew_ServerOnly(t *testing.T) {
 	if got := strings.Join(cfg.NextProtos, ","); got != "h2,http/1.1" {
 		t.Errorf("NextProtos = %q", got)
 	}
-	if r.Leaf().Subject.CommonName != "garmr-1" {
-		t.Errorf("Leaf CN = %q", r.Leaf().Subject.CommonName)
+	if r.leaf().Subject.CommonName != "garmr-1" {
+		t.Errorf("Leaf CN = %q", r.leaf().Subject.CommonName)
 	}
 	if r.opts.ReloadInterval != DefaultReloadInterval {
 		t.Errorf("ReloadInterval = %v, want default", r.opts.ReloadInterval)
@@ -118,8 +121,8 @@ func TestNew_CombinedPEM(t *testing.T) {
 	if n := len(cfg.Certificates[0].Certificate); n != 2 {
 		t.Errorf("chain length = %d, want leaf + CA", n)
 	}
-	if r.Leaf().Subject.CommonName != "combined" {
-		t.Errorf("leaf CN = %q", r.Leaf().Subject.CommonName)
+	if r.leaf().Subject.CommonName != "combined" {
+		t.Errorf("leaf CN = %q", r.leaf().Subject.CommonName)
 	}
 }
 
@@ -210,19 +213,44 @@ func TestReload_HalfWrittenRotationKeepsOldCert(t *testing.T) {
 
 func TestReload_MissingFileKeepsOldCert(t *testing.T) {
 	m := newMaterial(t)
-	r, err := New(Options{CertFile: m.cert, KeyFile: m.key}, nil)
+	core, logs := observer.New(zap.WarnLevel)
+	r, err := New(Options{CertFile: m.cert, KeyFile: m.key}, zap.New(core))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(m.key); err != nil {
 		t.Fatal(err)
 	}
-	if r.Reload() {
-		t.Fatal("Reload() swapped with the key missing")
+	for range 3 {
+		if r.Reload() {
+			t.Fatal("Reload() swapped with the key missing")
+		}
 	}
 	if handshakeLeaf(t, r) == nil {
 		t.Fatal("no certificate served after a failed reload")
 	}
+	// A file that stays missing is one broken state, reported once.
+	if n := logs.FilterMessage("TLS reload failed; still serving the previous certificate").Len(); n != 1 {
+		t.Errorf("logged the missing file %d times, want 1", n)
+	}
+
+	// Restoring the file recovers.
+	m2 := newMaterial(t)
+	tlstest.WriteFile(t, m.cert, mustRead(t, m2.cert))
+	tlstest.WriteFile(t, m.key, mustRead(t, m2.key))
+	bumpMtime(t, m.cert, time.Second)
+	if !r.Reload() {
+		t.Fatal("Reload() did not recover once the key was restored")
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func TestReload_RotatesClientCA(t *testing.T) {
@@ -259,7 +287,7 @@ func TestRun_PollsUntilCancelled(t *testing.T) {
 	bumpMtime(t, m.key, time.Second)
 
 	deadline := time.Now().Add(5 * time.Second)
-	for r.Leaf().Subject.CommonName != "garmr-2" {
+	for r.leaf().Subject.CommonName != "garmr-2" {
 		if time.Now().After(deadline) {
 			t.Fatal("Run never picked up the rotated certificate")
 		}

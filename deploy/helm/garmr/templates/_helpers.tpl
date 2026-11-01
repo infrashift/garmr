@@ -63,6 +63,9 @@ Fail fast on TLS settings that cannot work.
 {{- if .Values.mesh.consulConnect.enabled -}}
 {{- fail "tls.enabled and mesh.consulConnect.enabled are mutually exclusive: the Connect sidecar terminates mTLS and forwards plain HTTP to Garmr" -}}
 {{- end -}}
+{{- else if or .Values.tls.secretName .Values.tls.clientCASecretName -}}
+{{- /* Certificates without tls.enabled would render a plaintext pod that looks configured for (m)TLS: refuse rather than serve the API in the clear. */ -}}
+{{- fail "tls.secretName / tls.clientCASecretName are set but tls.enabled is false: set tls.enabled=true, or remove them to serve plain HTTP" -}}
 {{- end -}}
 {{- end -}}
 

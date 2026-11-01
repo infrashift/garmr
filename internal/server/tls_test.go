@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/infrashift/garmr/internal/engine"
 	"github.com/infrashift/garmr/internal/tlsconf"
@@ -324,5 +327,67 @@ func TestIdentityMiddleware_TLSIgnoresHeader(t *testing.T) {
 
 	if captured != "" {
 		t.Errorf("principal = %q, want empty: XFCC must be ignored under TLS", captured)
+	}
+}
+
+// Under TLS the rate limiter's "identity" key comes from the verified client
+// certificate, the same source as the audit principal: caller A exhausts
+// its bucket and cannot escape it with a forged XFCC header, while caller B
+// on the same address keeps its own bucket.
+func TestRateLimit_KeyedByClientCertUnderTLS(t *testing.T) {
+	m := newTLSMaterial(t, true)
+	perClient := true
+	base, _ := startTLSServer(t, m, func(c *Config) {
+		c.RateLimitEnabled = true
+		c.RateLimitPerSecond = 10000
+		c.RateLimitBurst = 10000
+		c.RateLimitPerClient = &perClient
+		c.RateLimitClientIdentifier = "identity"
+		c.RateLimitClientRPS = 0.5
+		c.RateLimitClientBurst = 2
+	})
+	certA := m.clientCA.Client(t, "a", "spiffe://dc1/svc/a").TLSCertificate(t)
+	certB := m.clientCA.Client(t, "b", "spiffe://dc1/svc/b").TLSCertificate(t)
+	callerA, callerB := httpsClient(m, &certA), httpsClient(m, &certB)
+
+	status := func(c *http.Client, header http.Header) int {
+		t.Helper()
+		res, err := evaluate(t, c, base, header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.StatusCode
+	}
+	for i := range 2 {
+		if got := status(callerA, nil); got != http.StatusOK {
+			t.Fatalf("caller A request %d: status %d, want 200", i, got)
+		}
+	}
+	forged := http.Header{"X-Forwarded-Client-Cert": {"URI=spiffe://dc1/svc/fresh"}}
+	if got := status(callerA, forged); got != http.StatusTooManyRequests {
+		t.Fatalf("caller A past its burst with a forged XFCC: status %d, want 429", got)
+	}
+	if got := status(callerB, nil); got != http.StatusOK {
+		t.Fatalf("caller B: status %d, want 200 (own bucket)", got)
+	}
+}
+
+func TestHTTPErrorWriter_HandshakeEOFIsDebug(t *testing.T) {
+	core, logs := observer.New(zap.DebugLevel)
+	l := log.New(httpErrorWriter{zap.New(core)}, "", 0)
+	l.Print("http: TLS handshake error from 10.0.0.1:5000: EOF")
+	l.Print("http: TLS handshake error from 10.0.0.1:5001: read tcp 10.0.0.2:8080->10.0.0.1:5001: read: connection reset by peer")
+	l.Print("http: TLS handshake error from 10.0.0.1:5002: tls: failed to verify certificate: x509: certificate signed by unknown authority")
+	l.Print("http: Accept error: too many open files")
+
+	entries := logs.AllUntimed()
+	want := []zapcore.Level{zap.DebugLevel, zap.DebugLevel, zap.WarnLevel, zap.WarnLevel}
+	if len(entries) != len(want) {
+		t.Fatalf("got %d entries, want %d", len(entries), len(want))
+	}
+	for i, e := range entries {
+		if e.Level != want[i] {
+			t.Errorf("%q logged at %v, want %v", e.Message, e.Level, want[i])
+		}
 	}
 }

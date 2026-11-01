@@ -3,8 +3,11 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"runtime"
 	"time"
 
@@ -88,8 +91,8 @@ func runHealth(cmd *cobra.Command, args []string) error {
 	// `garmr health --wait` against a down server exited immediately.
 	result, err := c.Health(ctx)
 	if err != nil {
-		if wait {
-			return waitForHealth(ctx, cfg)
+		if wait && !permanentTLSError(err) {
+			return waitForHealth(ctx, c)
 		}
 		fmt.Printf("✗ Health check failed: %v\n", err)
 		osExit(exitNegative)
@@ -114,29 +117,49 @@ func runHealth(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func waitForHealth(ctx context.Context, cfg client.Config) error {
+// waitForHealth polls c until the server reports healthy or ctx ends. The
+// client is reused across attempts, so its connections are pooled rather
+// than rebuilt (and its TLS files re-read) every second. A certificate
+// failure is returned at once: retrying cannot fix it, and timing out would
+// hide the reason.
+func waitForHealth(ctx context.Context, c *client.Client) error {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
+	lastErr := errors.New("server unreachable")
 	for {
 		select {
 		case <-ctx.Done():
-			return resultError{fmt.Errorf("timeout waiting for server")}
+			return resultError{fmt.Errorf("timeout waiting for server: %w", lastErr)}
 		case <-ticker.C:
-			c, err := client.NewClient(cfg)
-			if err != nil {
-				continue
-			}
-
 			result, err := c.Health(ctx)
-			c.Close()
-
-			if err == nil && result.Healthy {
+			switch {
+			case err == nil && result.Healthy:
 				fmt.Printf("✓ Server healthy (version %s)\n", result.Version)
 				return nil
+			case err == nil:
+				lastErr = errors.New("server unhealthy")
+			case permanentTLSError(err):
+				return resultError{fmt.Errorf("health check failed: %w", err)}
+			case ctx.Err() == nil:
+				lastErr = err
 			}
 		}
 	}
+}
+
+// permanentTLSError reports whether err is a TLS failure that waiting cannot
+// fix: the server's certificate failed verification, or the server rejected
+// the handshake (for example, an untrusted client certificate).
+func permanentTLSError(err error) bool {
+	var verifyErr *tls.CertificateVerificationError
+	if errors.As(err, &verifyErr) {
+		return true
+	}
+	// crypto/tls reports an alert from the peer as a *net.OpError with Op
+	// "remote error"; the alert type itself is unexported.
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "remote error"
 }
 
 // versionCmd prints version information

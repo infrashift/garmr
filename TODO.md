@@ -9,6 +9,24 @@ Three rounds are recorded: `feature/refactor` (2026-07-08/09),
 hardening pass (2026-07-28, Phases A–G) targeting the Nomad + Consul
 Connect deployment.
 
+## Toolchain and dependency vulnerabilities (2026-11-01)
+
+Open. `govulncheck ./...` on `feat/optional-tls` (after go.mod moved to
+go 1.25.14 to fix GO-2026-4337, the crypto/tls session-resumption bug
+that affects client-CA rotation) still reports 21 reachable
+vulnerabilities, all also present on `main`:
+
+- **Standard library:** crypto/x509, crypto/tls, net/http, net/textproto
+  and html/template, fixed only in go1.26.9 / go1.26.10. Go 1.25 no
+  longer receives these fixes, so the module has to move to Go 1.26.
+- **Modules:** golang.org/x/net (fixed in v0.60.0), x/text (v0.39.0),
+  google.golang.org/grpc (v1.83.1), and go.opentelemetry.io/otel, sdk and
+  the OTLP exporters (v1.45.0).
+
+Do this as its own PR: a Go 1.26 bump plus `go get -u` of those modules,
+then the full suite, lint and container smoke test. See the wiki concept
+`security/govulncheck-baseline-2026-11-01--01a198ab88a4.md`.
+
 ## CUE-free evaluator and schema tightening (2026-10-03)
 
 Done on `feature/review-fix-refactor`, after an OPA-parity review. Both

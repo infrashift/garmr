@@ -9,4 +9,5 @@ okf_version: "0.2"
 ## Subdirectories
 
 * [decisions/](decisions/)
+* [security/](security/)
 

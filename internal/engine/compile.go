@@ -257,9 +257,11 @@ func (e *Engine) compilePolicy(val cue.Value, name, namespace string) (*Compiled
 	}
 	cp.Rules = sortRules(cp.Rules, cp.Evaluation.Order)
 	if schema != nil {
-		if cp.inputSchema, err = inputSchemaSource(schema.schema); err != nil {
-			return nil, fmt.Errorf("spec.inputSchema: %w", err)
+		src, serr := inputSchemaSource(schema.schema)
+		if serr != nil {
+			return nil, fmt.Errorf("spec.inputSchema: %w", serr)
 		}
+		cp.inputSchema = src
 	}
 	return cp, nil
 }

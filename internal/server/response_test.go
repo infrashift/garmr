@@ -125,7 +125,7 @@ spec: {
 	}]
 	enforcement: action: "deny"
 }`
-	if err := eng.LoadPolicy(context.Background(), "findings", "default", policy); err != nil {
+	if err = eng.LoadPolicy(context.Background(), "findings", "default", policy); err != nil {
 		t.Fatal(err)
 	}
 	srv, err := NewServer(Config{}, eng, zap.NewNop())

@@ -78,7 +78,7 @@ func startDirServer(t *testing.T, dir string) {
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
-	if err := eng.LoadPoliciesFromDir(context.Background(), dir); err != nil {
+	if err = eng.LoadPoliciesFromDir(context.Background(), dir); err != nil {
 		t.Fatalf("LoadPoliciesFromDir: %v", err)
 	}
 	srv, err := server.NewServer(server.Config{}, eng, zap.NewNop())
@@ -371,17 +371,17 @@ func TestRunEval_LocalChecksInputSchema(t *testing.T) {
 
 	cmd := localEvalFlagSet(t)
 	cmd.Flags().Set("policy-dir", dir)
-	cmd.Flags().Set("data", `{"env":"production","enviroment":"prod"}`)
+	cmd.Flags().Set("data", `{"env":"production","region":"eu-west-1"}`)
 	stubExit(t)
 	var err error
 	captureOutput(t, func() { err = runEval(cmd, nil) })
-	if err == nil || !strings.Contains(err.Error(), "enviroment: field not allowed") {
+	if err == nil || !strings.Contains(err.Error(), "region: field not allowed") {
 		t.Errorf("err = %v, want the schema violation reported", err)
 	}
 
 	startDirServer(t, dir)
 	remote := localEvalFlagSet(t)
-	remote.Flags().Set("data", `{"env":"production","enviroment":"prod"}`)
+	remote.Flags().Set("data", `{"env":"production","region":"eu-west-1"}`)
 	if got := runEvalJSON(t, remote); got.body["decision"] != "allow" {
 		t.Errorf("server decision = %v, want allow (the server does not check inputSchema)", got.body["decision"])
 	}

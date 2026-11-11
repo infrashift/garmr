@@ -203,7 +203,7 @@ func TestRunner_InputSchemaChecked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.LoadPolicyFile(path); err != nil {
+	if err = r.LoadPolicyFile(path); err != nil {
 		t.Fatalf("LoadPolicyFile: %v", err)
 	}
 
@@ -243,7 +243,7 @@ func TestExampleSuites(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := r.LoadPolicyFile(strings.TrimSuffix(suitePath, "_test.cue") + ".cue"); err != nil {
+			if err = r.LoadPolicyFile(strings.TrimSuffix(suitePath, "_test.cue") + ".cue"); err != nil {
 				t.Fatalf("LoadPolicyFile: %v", err)
 			}
 			src, err := os.ReadFile(suitePath)

@@ -4,9 +4,11 @@
 # Works with both `docker build` and `docker buildx build --platform=...`.
 
 # Pinned to go.mod's floor: official images set GOTOOLCHAIN=local, so an
-# older floating golang:1.25 tag would fail the build (or, before go.mod
-# was raised, silently ship without the GO-2026-4337 crypto/tls fix).
-FROM --platform=$BUILDPLATFORM golang:1.25.14-alpine AS builder
+# older floating golang:1.26 tag would fail the build (or, before go.mod
+# was raised, silently ship without the standard-library security fixes
+# it pins: GO-2026-4337 and the go1.26.9–1.26.11 net/http, crypto/tls,
+# crypto/x509, html/template and net/textproto fixes).
+FROM --platform=$BUILDPLATFORM golang:1.26.11-alpine AS builder
 
 RUN apk add --no-cache git
 

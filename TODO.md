@@ -46,21 +46,13 @@ fingerprint itself is Vizzini's to compute.
 
 ## Toolchain and dependency vulnerabilities (2026-11-01)
 
-Open. `govulncheck ./...` on `feat/optional-tls` (after go.mod moved to
-go 1.25.14 to fix GO-2026-4337, the crypto/tls session-resumption bug
-that affects client-CA rotation) still reports 21 reachable
-vulnerabilities, all also present on `main`:
-
-- **Standard library:** crypto/x509, crypto/tls, net/http, net/textproto
-  and html/template, fixed only in go1.26.9 / go1.26.10. Go 1.25 no
-  longer receives these fixes, so the module has to move to Go 1.26.
-- **Modules:** golang.org/x/net (fixed in v0.60.0), x/text (v0.39.0),
-  google.golang.org/grpc (v1.83.1), and go.opentelemetry.io/otel, sdk and
-  the OTLP exporters (v1.45.0).
-
-Do this as its own PR: a Go 1.26 bump plus `go get -u` of those modules,
-then the full suite, lint and container smoke test. See the wiki concept
-`security/govulncheck-baseline-2026-11-01--01a198ab88a4.md`.
+Done 2026-11-11 on `feature/improvements-for-vizzini`. go.mod now targets
+go 1.26.11, the Containerfile pins `golang:1.26.11-alpine`, and otel
+(v1.45.0), otelhttp (v0.70.0), grpc (v1.83.2), x/net (v0.62.0) and x/text
+(v0.43.0) were upgraded. `govulncheck ./...` went from 22 reachable
+vulnerabilities to none. A net/http fix in go1.26.11 appeared after the
+2026-11-01 baseline. See the wiki concept
+`security/govulncheck-clean-after-go-1-26-11-bump-2026-11-11--01a1ca400faa.md`.
 
 ## CUE-free evaluator and schema tightening (2026-10-03)
 

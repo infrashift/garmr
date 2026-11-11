@@ -6,6 +6,18 @@ sidebar:
   label: "Overview"
 ---
 
+import { Image } from 'astro:assets';
+import illustration from '../../../assets/garmr-policy-agent.jpeg';
+
+<Image
+	src={illustration}
+	alt="Garmr, a great black wolf in a spiked collar, stands in the snow beside the Go gopher dressed as a Viking, with stones carved with CUE and policy scrolls at their feet."
+	width={1600}
+	widths={[640, 1024, 1600]}
+	sizes="(max-width: 50rem) 100vw, 50rem"
+	format="webp"
+/>
+
 A CUE-based policy evaluation engine for enforcing governance, security, and compliance policies across your infrastructure and CI/CD pipelines.
 
 ## Overview

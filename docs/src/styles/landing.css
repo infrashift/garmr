@@ -201,6 +201,28 @@ a:hover {
 	color: var(--text);
 }
 
+/* Illustration */
+.illustration {
+	max-width: 64rem;
+	margin: 0 auto;
+	padding: 0 clamp(1rem, 4vw, 2rem);
+}
+
+.illustration img {
+	display: block;
+	width: 100%;
+	height: auto;
+	border-radius: 0.75rem;
+	border: 1px solid var(--border);
+}
+
+.illustration figcaption {
+	margin-top: 0.75rem;
+	text-align: center;
+	font-size: 0.9rem;
+	color: var(--text-muted);
+}
+
 /* Features */
 .features {
 	max-width: 72rem;

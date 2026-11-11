@@ -386,3 +386,37 @@ func TestRunEval_LocalChecksInputSchema(t *testing.T) {
 		t.Errorf("server decision = %v, want allow (the server does not check inputSchema)", got.body["decision"])
 	}
 }
+
+func TestRunEval_WaivedRendering(t *testing.T) {
+	policy := strings.Replace(testFindingsPolicy, `enforcement: action: "deny"`, `enforcement: {
+		action: "deny"
+		exceptions: [{name: "accepted", reason: "tracked", rules: ["VZ-001"],
+			findings: {as: "f", where: match: {path: "f.fingerprint", equals: "fp-b"}}}]
+	}`, 1)
+	dir := writePolicyDir(t, policy)
+	input := `{"findings":[{"file":"b.go","start_line":12,"severity":"major","fingerprint":"fp-b"}]}`
+
+	for format, want := range map[string][]string{
+		"table": {"ALLOW", "PASS", "○ waived by accepted: findings[0] file=b.go line=12"},
+		"yaml":  {"waived:", "- path: findings[0]", "exception: accepted"},
+		"json":  {`"waived"`, `"exception": "accepted"`},
+	} {
+		t.Run(format, func(t *testing.T) {
+			viper.Reset()
+			viperSetOutput(t, format)
+			cmd := localEvalFlagSet(t)
+			cmd.Flags().Set("policy-dir", dir)
+			cmd.Flags().Set("data", input)
+			rec := stubExit(t)
+			stdout, _ := captureOutput(t, func() { _ = runEval(cmd, nil) })
+			if rec.Called {
+				t.Errorf("exit %d, want 0: the only major finding is waived", rec.Code)
+			}
+			for _, w := range want {
+				if !strings.Contains(stdout, w) {
+					t.Errorf("output missing %q:\n%s", w, stdout)
+				}
+			}
+		})
+	}
+}

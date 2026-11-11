@@ -465,13 +465,33 @@ import "time"
 
 #EnforcementAction: "deny" | "warn" | "audit"
 
-// Exception skips the whole policy for inputs its selector matches. The
-// selector must narrow something: an exception matching everything would
-// disable the policy.
+// Exception waives a policy, some of its rules, or some of their findings,
+// for the inputs `match` selects:
+//
+//   - no `rules`: the whole policy is skipped. `match` is required and must
+//     narrow something: an exception matching everything would disable the
+//     policy.
+//   - `rules`: only those rules are skipped. `match` is optional.
+//   - `rules` and `findings`: in those rules, the elements of the forEach
+//     whose alias is `findings.as` that satisfy `findings.where` are waived:
+//     skipped like elements `where` excludes, and reported as waived.
+//       rules: ["REV-002"]
+//       findings: {as: "f", where: match: {path: "f.fingerprint", in: ["9f2c41e0"]}}
+//     A `where` that cannot be evaluated waives nothing.
 #Exception: {
 	name:   string
 	reason: string
-	match:  #ResourceSelector
+	match?: #ResourceSelector
+
+	// Rule ids this exception applies to. Each must exist in the policy.
+	rules?: [string, ...string]
+
+	// Waive individual forEach elements of the listed rules. Every listed
+	// rule must have a forEach with alias `as`.
+	findings?: {
+		as:    string & =~"^[A-Za-z][A-Za-z0-9_]*$"
+		where: #Expression
+	}
 
 	// Expiration (RFC3339). After this instant the exception no longer applies.
 	expiry?: time.Time

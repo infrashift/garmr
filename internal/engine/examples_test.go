@@ -127,6 +127,8 @@ func TestExampleFixtures(t *testing.T) {
 		{"condition-operators/set-advanced-pass.json", "condition-operators", "set-advanced", DecisionAllow, ""},
 		{"condition-operators/set-advanced-fail.json", "condition-operators", "set-advanced", DecisionDeny, "SET-101,SET-102,SET-103,SET-104,SET-105"},
 		{"advanced-operators/compare-fail.yaml", "advanced-operators", "compare-cross-field", DecisionDeny, "CMP-101,CMP-102"},
+		{"real-world/review-pass.json", "review", "", DecisionAllow, ""},
+		{"real-world/review-fail.json", "review", "", DecisionDeny, "REV-001,REV-002,REV-003,REV-004"},
 		{"advanced-operators/foreach-optional-omitted.json", "advanced-operators", "foreach-optional", DecisionAllow, ""},
 		{"advanced-operators/foreach-optional-fail.json", "advanced-operators", "foreach-optional", DecisionDeny, "FE-005,FE-006"},
 	}

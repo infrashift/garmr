@@ -137,3 +137,14 @@ func TestNewEvaluateBody_Findings(t *testing.T) {
 		t.Error("findings_truncated present on a rule that reported none")
 	}
 }
+
+func TestNewEvaluateBody_Waived(t *testing.T) {
+	result := &engine.EvaluateResponse{Results: []engine.RuleResult{
+		{RuleID: "r", Passed: true, Waived: []engine.Finding{{Path: "xs[0]", Exception: "accepted"}}},
+	}}
+	body := wireBody(t, NewEvaluateBody(result, "req-4"))
+	waived, _ := body["results"].([]any)[0].(map[string]any)["waived"].([]any)
+	if len(waived) != 1 || waived[0].(map[string]any)["exception"] != "accepted" {
+		t.Errorf("waived = %v, want one entry naming the exception", waived)
+	}
+}

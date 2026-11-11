@@ -63,7 +63,10 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 	// instead of from rules failing on fields that are not there.
 	if req.Options.CheckInputSchema {
 		for _, p := range policies {
-			if p.inputSchema == "" || (len(p.Enforcement.Exceptions) > 0 && e.matchesException(p.Enforcement.Exceptions, res)) {
+			if p.inputSchema == "" {
+				continue
+			}
+			if excepted, _ := e.activeExceptions(p, res); excepted {
 				continue
 			}
 			if err := checkInputSchema(p, input); err != nil {
@@ -182,7 +185,9 @@ func (a *evalAccumulator) fold(e *Engine, policy *CompiledPolicy, outcome policy
 			}
 		}
 
-		if !result.Passed || req.Options.IncludePassed {
+		// A passing rule is reported when asked for, and always when an
+		// exception waived some of its elements: a waiver is never silent.
+		if !result.Passed || req.Options.IncludePassed || len(result.Waived) > 0 {
 			a.resp.Results = append(a.resp.Results, result)
 		}
 	}
@@ -286,12 +291,13 @@ func (e *Engine) findApplicablePolicies(set *policySet, req *EvaluateRequest, re
 // evaluated for this request: rules surviving category/tag filters, zero when
 // an exception matches, capped by the policy's maxRules setting.
 func (e *Engine) countRulesInScope(policy *CompiledPolicy, res resource) int {
-	if len(policy.Enforcement.Exceptions) > 0 && e.matchesException(policy.Enforcement.Exceptions, res) {
+	excepted, active := e.activeExceptions(policy, res)
+	if excepted {
 		return 0
 	}
 	n := 0
 	for _, rule := range policy.Rules {
-		if shouldEvaluateRule(rule, policy.Evaluation) {
+		if shouldEvaluateRule(rule, policy.Evaluation) && (active == nil || !ruleSkipped(rule, active)) {
 			n++
 		}
 	}
@@ -397,15 +403,17 @@ type policyOutcome struct {
 func (e *Engine) evaluatePolicy(ctx context.Context, policy *CompiledPolicy, input map[string]any, res resource) policyOutcome {
 	var out policyOutcome
 
-	// Check if any exception matches the input, skip evaluation if so
-	if len(policy.Enforcement.Exceptions) > 0 && e.matchesException(policy.Enforcement.Exceptions, res) {
+	// An exception may skip the whole policy, some rules, or some forEach
+	// elements of some rules.
+	excepted, active := e.activeExceptions(policy, res)
+	if excepted {
 		return out
 	}
 	out.results = make([]RuleResult, 0, len(policy.Rules))
 
-	ec := &evalCtx{ctx: ctx, done: ctx.Done(), root: input}
+	ec := &evalCtx{ctx: ctx, done: ctx.Done(), root: input, activeExc: active}
 	for _, rule := range policy.Rules {
-		if !shouldEvaluateRule(rule, policy.Evaluation) {
+		if !shouldEvaluateRule(rule, policy.Evaluation) || (active != nil && ruleSkipped(rule, active)) {
 			continue
 		}
 
@@ -481,8 +489,9 @@ func (e *Engine) evaluateRule(ec *evalCtx, policy *CompiledPolicy, rule Compiled
 		Tags:            rule.Tags,
 	}
 
-	ec.wantBinds, ec.wantFrames = rule.msg.hasBinds, rule.msg.hasFrames || len(rule.details) > 0
-	ec.binds, ec.failures = ec.binds[:0], ec.failures[:0]
+	ec.wantBinds = rule.msg.hasBinds
+	ec.wantFrames = rule.msg.hasFrames || len(rule.details) > 0 || rule.waivesElements
+	ec.binds, ec.failures, ec.waived = ec.binds[:0], ec.failures[:0], ec.waived[:0]
 	r := rule.expr.eval(ec)
 
 	// Anything but a pass fails the rule. An error is reported, never
@@ -497,6 +506,9 @@ func (e *Engine) evaluateRule(ec *evalCtx, policy *CompiledPolicy, rule Compiled
 
 	if r.out == fail && len(rule.details) > 0 && len(ec.failures) > 0 {
 		result.Findings, result.FindingsTruncated = findings(rule.details, ec.root, ec.failures)
+	}
+	if len(ec.waived) > 0 {
+		result.Waived = waivedFindings(rule.details, ec.root, ec.waived)
 	}
 
 	if !result.Passed {
@@ -542,14 +554,38 @@ func shouldEvaluateRule(rule CompiledRule, cfg EvaluationConfig) bool {
 	return true
 }
 
-// matchesException checks if any non-expired exception matches the input.
-func (e *Engine) matchesException(exceptions []ExceptionSpec, res resource) bool {
+// activeExceptions reports which of a policy's exceptions apply to this
+// input: unexpired, and selected by their match (every input when it has
+// none). excepted is set when an active exception skips the whole policy.
+// active is nil when no exception applies.
+func (e *Engine) activeExceptions(policy *CompiledPolicy, res resource) (excepted bool, active []bool) {
+	excs := policy.Enforcement.Exceptions
+	if len(excs) == 0 {
+		return false, nil
+	}
 	now := time.Now()
-	for _, exc := range exceptions {
+	for i, exc := range excs {
 		if exc.Expiry != nil && now.After(*exc.Expiry) {
 			continue
 		}
-		if e.selectorMatchesInput(exc.Match, res) {
+		if exc.Match != nil && !e.selectorMatchesInput(*exc.Match, res) {
+			continue
+		}
+		if exc.policyWide() {
+			return true, nil
+		}
+		if active == nil {
+			active = make([]bool, len(excs))
+		}
+		active[i] = true
+	}
+	return false, active
+}
+
+// ruleSkipped reports whether an active exception skips the whole rule.
+func ruleSkipped(rule CompiledRule, active []bool) bool {
+	for _, i := range rule.skippedBy {
+		if active[i] {
 			return true
 		}
 	}

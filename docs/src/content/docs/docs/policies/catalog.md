@@ -146,6 +146,24 @@ Source: `example-policies/real-world/`
 | `release-gate` | 4 | Denies promotion on any critical release violation; reports all critical failures |
 
 
+## `review`
+
+A merge gate over an automated code-review report. It is the worked example
+for `spec.inputSchema`, `forEach` `allowMissing`, structured findings
+(`details`) and a fingerprint waiver, and it has a `garmr test` suite.
+
+Source: `example-policies/real-world/`
+
+| Policy | Rules | Description |
+|--------|-------|-------------|
+| `review-gate` | 4 | Blocks a merge on critical or major findings, a high risk score or a high-risk file; skipped checks must say why |
+
+```bash
+garmr eval --policy-dir example-policies -n review -i testdata/real-world/review-fail.json
+garmr test example-policies/real-world/review-gate.cue
+```
+
+
 ## `security`
 
 Container security baselines and certificate management.

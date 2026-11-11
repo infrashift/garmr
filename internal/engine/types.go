@@ -124,6 +124,12 @@ type CompiledRule struct {
 	// details are the rule's `details` paths, in name order. A rule with
 	// details records its failing forEach elements as findings.
 	details []detailPath
+
+	// skippedBy lists the exceptions (indexes into the policy's
+	// Enforcement.Exceptions) that skip this whole rule; waivesElements is
+	// set when an exception waives some of its forEach elements.
+	skippedBy      []int
+	waivesElements bool
 }
 
 // EvaluationConfig controls rule evaluation behavior.
@@ -199,14 +205,27 @@ type EnforcementSpec struct {
 	Exceptions []ExceptionSpec `json:"exceptions"`
 }
 
-// ExceptionSpec exempts inputs its selector matches from a policy, until
-// Expiry if set.
+// ExceptionSpec waives a policy, some of its rules, or some of their
+// forEach elements, for the inputs Match selects (every input when nil),
+// until Expiry if set.
 type ExceptionSpec struct {
-	Name   string           `json:"name"`
-	Reason string           `json:"reason"`
-	Match  ResourceSelector `json:"match"`
-	Expiry *time.Time       `json:"expiry"`
+	Name     string                 `json:"name"`
+	Reason   string                 `json:"reason"`
+	Match    *ResourceSelector      `json:"match"`
+	Expiry   *time.Time             `json:"expiry"`
+	Rules    []string               `json:"rules"`
+	Findings *ExceptionFindingsSpec `json:"findings"`
 }
+
+// ExceptionFindingsSpec selects the forEach elements an exception waives:
+// those of the forEach with alias As for which Where holds.
+type ExceptionFindingsSpec struct {
+	As    string `json:"as"`
+	Where any    `json:"where"`
+}
+
+// policyWide reports whether the exception skips the whole policy.
+func (x ExceptionSpec) policyWide() bool { return len(x.Rules) == 0 }
 
 // EvaluateRequest contains the input for policy evaluation.
 type EvaluateRequest struct {
@@ -287,6 +306,11 @@ type RuleResult struct {
 	Findings          []Finding
 	FindingsTruncated bool
 
+	// Waived lists the forEach elements an exception waived, each naming
+	// the exception. Reported even when the rule passed, so a waiver is
+	// never silent. At most MaxFindings.
+	Waived []Finding
+
 	// Evaluation metadata
 	Priority *int
 	Category string
@@ -311,6 +335,8 @@ type Finding struct {
 	// Details maps each `details` name to the value its path resolved to.
 	// Names whose path did not resolve are left out.
 	Details map[string]any
+	// Exception names the exception that waived the element (Waived only).
+	Exception string
 }
 
 // Metrics contains performance metrics.

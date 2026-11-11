@@ -953,6 +953,13 @@
           "findings_truncated": {
             "type": "boolean",
             "description": "More elements failed than `findings` lists"
+          },
+          "waived": {
+            "type": "array",
+            "description": "forEach elements an exception waived, each naming the exception (at most 100). A rule with waived elements is reported even when it passed.",
+            "items": {
+              "$ref": "#/components/schemas/Finding"
+            }
           }
         },
         "required": [
@@ -979,6 +986,10 @@
             "type": "object",
             "additionalProperties": true,
             "description": "The values the rule's `details` paths selected; names whose path did not resolve are omitted"
+          },
+          "exception": {
+            "type": "string",
+            "description": "The exception that waived the element (entries of `waived` only)"
           }
         },
         "required": [

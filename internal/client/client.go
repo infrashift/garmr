@@ -196,14 +196,19 @@ type RuleResult struct {
 	// `details`; FindingsTruncated reports that more failed.
 	Findings          []Finding `json:"findings,omitempty"`
 	FindingsTruncated bool      `json:"findings_truncated,omitempty"`
+
+	// Waived are the forEach elements an exception waived.
+	Waived []Finding `json:"waived,omitempty"`
 }
 
-// Finding is one failing forEach element: its input path, its index, and
-// the values the rule's `details` selected from it.
+// Finding is one forEach element: its input path, its index, and the
+// values the rule's `details` selected from it. Exception names the
+// exception that waived it, for entries of Waived.
 type Finding struct {
-	Path    string         `json:"path"`
-	Index   int            `json:"index"`
-	Details map[string]any `json:"details,omitempty"`
+	Path      string         `json:"path"`
+	Index     int            `json:"index"`
+	Details   map[string]any `json:"details,omitempty"`
+	Exception string         `json:"exception,omitempty"`
 }
 
 // Metrics contains evaluation metrics.

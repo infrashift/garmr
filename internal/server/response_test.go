@@ -91,13 +91,13 @@ func TestOpenAPISpec_MatchesResponseShape(t *testing.T) {
 	}
 
 	rule := spec.Components.Schemas["RuleResult"].Properties
-	for _, key := range []string{"findings", "findings_truncated"} {
+	for _, key := range []string{"findings", "findings_truncated", "waived"} {
 		if _, present := rule[key]; !present {
 			t.Errorf("RuleResult does not document %q", key)
 		}
 	}
 	finding := spec.Components.Schemas["Finding"].Properties
-	for _, key := range []string{"path", "index", "details"} {
+	for _, key := range []string{"path", "index", "details", "exception"} {
 		if _, present := finding[key]; !present {
 			t.Errorf("Finding does not document %q", key)
 		}

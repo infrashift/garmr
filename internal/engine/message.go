@@ -161,33 +161,50 @@ func parseDetails(details map[string]string, aliases map[string]bool) ([]detailP
 }
 
 // findings builds one Finding per recorded failure, capped at MaxFindings.
-// Each failure's innermost frame is the failing element.
 func findings(details []detailPath, root map[string]any, failures [][]frame) ([]Finding, bool) {
 	n := min(len(failures), MaxFindings)
 	out := make([]Finding, 0, n)
 	for _, frames := range failures[:n] {
-		if len(frames) == 0 {
-			continue
+		if len(frames) > 0 {
+			out = append(out, findingOf(details, root, frames))
 		}
-		inner := frames[len(frames)-1]
-		f := Finding{Path: inner.list + "[" + strconv.Itoa(inner.index) + "]", Index: inner.index}
-		for _, d := range details {
-			var v any
-			var ok bool
-			if d.alias {
-				v, ok = resolveInFrames(d.path, frames)
-			} else {
-				v, ok = d.path.walk(root, d.path.segs)
-			}
-			if !ok {
-				continue
-			}
-			if f.Details == nil {
-				f.Details = make(map[string]any, len(details))
-			}
-			f.Details[d.name] = v
-		}
-		out = append(out, f)
 	}
 	return out, len(failures) > MaxFindings
+}
+
+// waivedFindings builds one Finding per waived element, naming the
+// exception, capped at MaxFindings.
+func waivedFindings(details []detailPath, root map[string]any, waived []waivedElem) []Finding {
+	n := min(len(waived), MaxFindings)
+	out := make([]Finding, 0, n)
+	for _, w := range waived[:n] {
+		f := findingOf(details, root, w.frames)
+		f.Exception = w.exception
+		out = append(out, f)
+	}
+	return out
+}
+
+// findingOf describes one forEach element. frames are its forEach frames,
+// outermost first; the innermost is the element itself.
+func findingOf(details []detailPath, root map[string]any, frames []frame) Finding {
+	inner := frames[len(frames)-1]
+	f := Finding{Path: inner.list + "[" + strconv.Itoa(inner.index) + "]", Index: inner.index}
+	for _, d := range details {
+		var v any
+		var ok bool
+		if d.alias {
+			v, ok = resolveInFrames(d.path, frames)
+		} else {
+			v, ok = d.path.walk(root, d.path.segs)
+		}
+		if !ok {
+			continue
+		}
+		if f.Details == nil {
+			f.Details = make(map[string]any, len(details))
+		}
+		f.Details[d.name] = v
+	}
+	return f
 }

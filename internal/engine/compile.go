@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -106,25 +107,28 @@ func (e *Engine) compilePolicySource(cctx *cue.Context, schema cue.Value, name, 
 	return compiled, nil
 }
 
+// ruleDoc is one rule as decoded from the schema-unified JSON form.
+type ruleDoc struct {
+	ID          string            `json:"id"`
+	Description string            `json:"description"`
+	Severity    Severity          `json:"severity"`
+	Priority    *int              `json:"priority"`
+	Message     string            `json:"message"`
+	Remediation string            `json:"remediation"`
+	Category    string            `json:"category"`
+	Tags        []string          `json:"tags"`
+	When        any               `json:"when"`
+	Expr        any               `json:"expr"`
+	Details     map[string]string `json:"details"`
+}
+
 // specDoc is a policy's spec as decoded from its schema-unified JSON form.
 // The schema has already validated every field, including defaults.
 type specDoc struct {
 	Target struct {
 		Resources []ResourceSelector `json:"resources"`
 	} `json:"target"`
-	Rules []struct {
-		ID          string            `json:"id"`
-		Description string            `json:"description"`
-		Severity    Severity          `json:"severity"`
-		Priority    *int              `json:"priority"`
-		Message     string            `json:"message"`
-		Remediation string            `json:"remediation"`
-		Category    string            `json:"category"`
-		Tags        []string          `json:"tags"`
-		When        any               `json:"when"`
-		Expr        any               `json:"expr"`
-		Details     map[string]string `json:"details"`
-	} `json:"rules"`
+	Rules       []ruleDoc       `json:"rules"`
 	Enforcement EnforcementSpec `json:"enforcement"`
 	Evaluation  struct {
 		Order             EvaluationOrder `json:"order"`
@@ -189,12 +193,8 @@ func (e *Engine) compilePolicy(val cue.Value, name, namespace string) (*Compiled
 		cp.Evaluation.Timeout = d
 	}
 
-	// Every selector field defaults to a wildcard, so an exception that
-	// narrows nothing exempts every input and silently disables the policy.
-	for _, exc := range cp.Enforcement.Exceptions {
-		if !exc.Match.narrows() {
-			return nil, fmt.Errorf("exception %q: match must narrow the selection (kind, apiGroup, names, namespaces, labels or annotations); an exception that matches everything disables the policy", exc.Name)
-		}
+	if err := checkExceptions(cp.Enforcement.Exceptions, spec.Rules); err != nil {
+		return nil, err
 	}
 
 	seen := make(map[string]bool, len(spec.Rules))
@@ -207,10 +207,16 @@ func (e *Engine) compilePolicy(val cue.Value, name, namespace string) (*Compiled
 		}
 		seen[r.ID] = true
 
-		c := exprCompiler{builtins: e.builtins, aliases: map[string]bool{}}
+		skippedBy, waivers := ruleExceptions(cp.Enforcement.Exceptions, r.ID)
+		c := exprCompiler{builtins: e.builtins, aliases: map[string]bool{}, waivers: waivers}
 		expr, err := c.expr(r.Expr, nil)
 		if err != nil {
 			return nil, fmt.Errorf("rule %s: expr: %w", r.ID, err)
+		}
+		for _, w := range c.waivers {
+			if !w.attached {
+				return nil, fmt.Errorf("rule %s: exception %q waives findings of a forEach with alias %q, and the rule has none", r.ID, w.name, w.as)
+			}
 		}
 		if r.When != nil {
 			guard, werr := c.expr(r.When, nil)
@@ -245,6 +251,8 @@ func (e *Engine) compilePolicy(val cue.Value, name, namespace string) (*Compiled
 			expr:            expr,
 			msg:             msg,
 			details:         details,
+			skippedBy:       skippedBy,
+			waivesElements:  len(waivers) > 0,
 		})
 	}
 	cp.Rules = sortRules(cp.Rules, cp.Evaluation.Order)
@@ -254,6 +262,51 @@ func (e *Engine) compilePolicy(val cue.Value, name, namespace string) (*Compiled
 		}
 	}
 	return cp, nil
+}
+
+// checkExceptions rejects exceptions that would waive more, or less, than
+// they say. A policy-wide exception must narrow the inputs it applies to:
+// every selector field defaults to a wildcard, so one that narrows nothing
+// exempts every input and silently disables the policy. A rule-scoped
+// exception must name rules that exist: a typo would waive nothing.
+func checkExceptions(excs []ExceptionSpec, rules []ruleDoc) error {
+	ids := make(map[string]bool, len(rules))
+	for _, r := range rules {
+		ids[r.ID] = true
+	}
+	for _, exc := range excs {
+		switch {
+		case exc.policyWide() && exc.Findings != nil:
+			return fmt.Errorf("exception %q: findings requires rules: name the rules whose elements it waives", exc.Name)
+		case exc.policyWide() && (exc.Match == nil || !exc.Match.narrows()):
+			return fmt.Errorf("exception %q: match must narrow the selection (kind, apiGroup, names, namespaces, labels or annotations); an exception that matches everything disables the policy. To waive specific rules, list them in rules", exc.Name)
+		}
+		for _, id := range exc.Rules {
+			if !ids[id] {
+				return fmt.Errorf("exception %q: rule %q does not exist in this policy", exc.Name, id)
+			}
+		}
+		if exc.Findings != nil && !identRe.MatchString(exc.Findings.As) {
+			return fmt.Errorf("exception %q: findings.as must be an identifier, got %q", exc.Name, exc.Findings.As)
+		}
+	}
+	return nil
+}
+
+// ruleExceptions returns the exceptions that skip rule id outright, and the
+// element waivers its forEach nodes must attach.
+func ruleExceptions(excs []ExceptionSpec, id string) (skippedBy []int, waivers []*pendingWaiver) {
+	for i, exc := range excs {
+		if !slices.Contains(exc.Rules, id) {
+			continue
+		}
+		if exc.Findings == nil {
+			skippedBy = append(skippedBy, i)
+			continue
+		}
+		waivers = append(waivers, &pendingWaiver{exc: i, name: exc.Name, as: exc.Findings.As, where: exc.Findings.Where})
+	}
+	return skippedBy, waivers
 }
 
 // marshalSpec renders spec to JSON for decoding, leaving out inputSchema:

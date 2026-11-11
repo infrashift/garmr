@@ -42,13 +42,20 @@ type RuleResultBody struct {
 	// `details`. FindingsTruncated is set when more failed than were listed.
 	Findings          []FindingBody `json:"findings,omitempty"`
 	FindingsTruncated bool          `json:"findings_truncated,omitempty"`
+
+	// Waived are the forEach elements an exception waived, each naming the
+	// exception. A rule with waived elements is reported even when it
+	// passed.
+	Waived []FindingBody `json:"waived,omitempty"`
 }
 
-// FindingBody is one failing forEach element.
+// FindingBody is one forEach element: a failing one, or one an exception
+// waived (Exception set).
 type FindingBody struct {
-	Path    string         `json:"path"`
-	Index   int            `json:"index"`
-	Details map[string]any `json:"details,omitempty"`
+	Path      string         `json:"path"`
+	Index     int            `json:"index"`
+	Details   map[string]any `json:"details,omitempty"`
+	Exception string         `json:"exception,omitempty"`
 }
 
 // SummaryBody counts rule outcomes.
@@ -109,6 +116,7 @@ func NewEvaluateBody(result *engine.EvaluateResponse, requestID string) Evaluate
 			Remediation:       r.Remediation,
 			Findings:          findingBodies(r.Findings),
 			FindingsTruncated: r.FindingsTruncated,
+			Waived:            findingBodies(r.Waived),
 		}
 	}
 	if tr := result.TerminationRule; tr != nil {

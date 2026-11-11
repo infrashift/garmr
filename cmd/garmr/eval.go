@@ -380,6 +380,13 @@ func outputYAML(result *client.EvaluateResult) error {
 					fmt.Println("    findings_truncated: true")
 				}
 			}
+			if len(r.Waived) > 0 {
+				fmt.Println("    waived:")
+				for _, f := range r.Waived {
+					fmt.Printf("      - path: %s\n", f.Path)
+					fmt.Printf("        exception: %s\n", f.Exception)
+				}
+			}
 		}
 	}
 	return nil
@@ -441,6 +448,9 @@ func outputTable(result *client.EvaluateResult, quiet, suppressDetails bool) err
 			}
 			if r.FindingsTruncated {
 				fmt.Printf("%-12s %-30s %-10s %-8s  • … more failing elements not listed\n", "", "", "", "")
+			}
+			for _, f := range r.Waived {
+				fmt.Printf("%-12s %-30s %-10s %-8s  ○ waived by %s: %s\n", "", "", "", "", f.Exception, formatFinding(f))
 			}
 		}
 	}

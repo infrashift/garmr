@@ -1113,8 +1113,10 @@ report it):
 - A `forEach` has no `condition`, an `as` that is not an identifier, or
   `count` together with `mode` or `allowEmpty`.
 - Two rules in the policy share an `id`.
-- An exception `match` selects everything (it would disable the policy), or
-  its `expiry` is not an RFC3339 timestamp.
+- A policy-wide exception has no `match`, or one that selects everything (it
+  would disable the policy); an exception names a rule the policy does not
+  have, uses `findings` without `rules`, or a `findings.as` alias no listed
+  rule binds; or its `expiry` is not an RFC3339 timestamp.
 - `evaluation.timeout` is not a positive Go duration (`"250ms"`, `"30s"`).
 - Two policy documents declare the same `namespace/name`.
 - A policy uses the reserved namespace `__system__`.
@@ -1243,17 +1245,60 @@ not evaluated and does not appear in the results.
 |-------|---------|-------------|
 | `action` | — | `deny`, `warn` or `audit` ([Enforcement Actions](#enforcement-actions)) |
 | `dryRun` | `false` | Report violations but lower this policy's `deny` to `warn` |
-| `exceptions` | none | Inputs the whole policy skips (below) |
+| `exceptions` | none | Waivers for the whole policy, some rules, or some findings (below) |
 
-An exception skips the **whole policy** for inputs its `match` selector
-matches; the selector has the same fields as a target selector and must
-narrow something.
+An exception applies to the inputs its `match` selector selects, until its
+`expiry`. What it waives depends on `rules` and `findings`:
+
+| Form | Waives | `match` |
+|------|--------|---------|
+| no `rules` | The **whole policy** is skipped | Required, and must narrow something: one matching everything would disable the policy |
+| `rules: [...]` | Those **rules** are skipped (out of scope, like a category filter) | Optional; omitted means every input |
+| `rules` + `findings` | In those rules, the **forEach elements** that `findings.where` selects | Optional |
+
+```cue
+enforcement: {
+    action: "deny"
+    exceptions: [{
+        name:   "accepted-legacy-crypto"
+        reason: "MD5 for cache keys, not security; replacement tracked"
+        ticket: "SEC-1042"
+        rules:  ["REV-001"]
+        findings: {
+            as:    "f"
+            where: match: {path: "f.fingerprint", in: ["9f2c41e0b7d3"]}
+        }
+    }]
+}
+```
+
+**Per-finding waivers.** `findings` attaches to every `forEach` in the
+listed rules whose alias is `findings.as`. Each element that `where` selects
+is skipped, in the same way as an element the forEach's own `where` leaves
+out: it is not checked and not counted. It is reported under `waived`, with
+its path, its `details` and the exception's name. A rule with waived
+elements is always reported, even when it passes, so a waiver is never
+silent.
+
+Match on a **stable identifier** for the finding, not on its message or
+line number. A good identifier is a fingerprint the producer computes from
+the file, the rule, the title and the normalized line content, so the
+waiver survives unrelated edits. A `where` that cannot be evaluated waives
+nothing, and the element is checked as usual. When the policy has an
+[`inputSchema`](#input-schema-specinputschema), the `where` paths are
+checked against it like rule paths.
+
+At load, an exception is rejected if it names a rule the policy does not
+have, uses `findings` without `rules`, or uses a `findings.as` alias for
+which a listed rule has no `forEach`.
 
 | Exception field | Required | Description |
 |-----------------|----------|-------------|
-| `name` | yes | Identifier |
+| `name` | yes | Identifier, reported on waived findings |
 | `reason` | yes | Why the exception exists |
-| `match` | yes | Resource selector: `kind`, `apiGroup`, `names`, `namespaces`, `labels`, `annotations` |
+| `match` | without `rules` | Resource selector: `kind`, `apiGroup`, `names`, `namespaces`, `labels`, `annotations` |
+| `rules` | no | Rule ids the exception applies to (non-empty; each must exist) |
+| `findings` | no | `{as, where}`: waive the elements of the listed rules' `forEach` with alias `as` for which `where` holds |
 | `expiry` | no | RFC3339 timestamp; after it the exception no longer applies |
 | `approvedBy` | no | List of approvers, for the record |
 | `ticket` | no | Issue tracker reference, for the record |

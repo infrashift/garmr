@@ -301,6 +301,11 @@ there is nothing to report. See
 ]
 ```
 
+Elements that an exception waived are listed under `waived`, in the same
+shape plus `exception`, the name of the exception that waived them. A rule
+with waived elements is reported even when it passed, and even without
+`include_passed`.
+
 A partial evaluation is not the same as a clean one: check
 `evaluation_mode.rules_skipped` and `terminated_early` before treating an
 `allow` as full coverage.

@@ -228,3 +228,36 @@ tests: [
 		}
 	}
 }
+
+// TestExampleSuites runs every *_test.cue suite under example-policies
+// against its sibling policy file, so the shipped examples and their tests
+// cannot drift apart unnoticed.
+func TestExampleSuites(t *testing.T) {
+	suites, err := filepath.Glob("../../example-policies/*/*_test.cue")
+	if err != nil || len(suites) == 0 {
+		t.Fatalf("no example suites found (err %v)", err)
+	}
+	for _, suitePath := range suites {
+		t.Run(filepath.Base(suitePath), func(t *testing.T) {
+			r, err := NewRunner(false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := r.LoadPolicyFile(strings.TrimSuffix(suitePath, "_test.cue") + ".cue"); err != nil {
+				t.Fatalf("LoadPolicyFile: %v", err)
+			}
+			src, err := os.ReadFile(suitePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			suite, err := r.LoadTestSuite(string(src))
+			if err != nil {
+				t.Fatalf("LoadTestSuite: %v", err)
+			}
+			result := r.RunSuite(context.Background(), suite)
+			if result.Failed != 0 || result.Passed == 0 {
+				t.Errorf("passed %d, failed %d: %+v", result.Passed, result.Failed, result.Results)
+			}
+		})
+	}
+}

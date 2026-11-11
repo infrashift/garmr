@@ -30,6 +30,19 @@ type exprCompiler struct {
 	paths      []recordedPath
 	aliasElem  map[string][]pathSeg
 	aliasElems map[string][][]pathSeg
+
+	// waivers are the exceptions waiving elements of this rule's forEach
+	// nodes; each attaches to every forEach whose alias it names.
+	waivers []*pendingWaiver
+}
+
+// pendingWaiver is an exception's findings selector, before it is compiled
+// into the forEach nodes it applies to.
+type pendingWaiver struct {
+	exc      int // index into the policy's exceptions
+	name, as string
+	where    any
+	attached bool
 }
 
 // rootSegs resolves a compiled path to segments from the input root. A path
@@ -373,6 +386,17 @@ func (c *exprCompiler) forEach(v any, scope []string) (node, error) {
 		if n.where, err = c.expr(where, inner); err != nil {
 			return nil, fmt.Errorf("where: %w", err)
 		}
+	}
+	for _, w := range c.waivers {
+		if w.as != alias {
+			continue
+		}
+		cond, err := c.expr(w.where, inner)
+		if err != nil {
+			return nil, fmt.Errorf("exception %q: findings.where: %w", w.name, err)
+		}
+		n.waivers = append(n.waivers, elemWaiver{exc: w.exc, name: w.name, where: cond})
+		w.attached = true
 	}
 	return n, nil
 }

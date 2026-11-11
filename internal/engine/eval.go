@@ -374,6 +374,11 @@ type forEachNode struct {
 	anyMode    bool
 	allowEmpty bool
 
+	// allowMissing treats an absent path, or a null value, as an empty
+	// list. Off by default: a missing list fails, so a typo or a producer
+	// that stopped emitting the field cannot pass a check silently.
+	allowMissing bool
+
 	// where, when set, selects the elements the condition applies to;
 	// the others are skipped entirely (not checked, not counted).
 	where node
@@ -385,6 +390,9 @@ type forEachNode struct {
 
 func (n forEachNode) eval(ec *evalCtx) result {
 	v, found, _ := n.src.resolve(ec)
+	if n.allowMissing && (!found || v == nil) {
+		v, found = []any{}, true
+	}
 	if !found {
 		return failf("path '%s' not found", n.src.p)
 	}

@@ -1,0 +1,10 @@
+{
+  "verdict": "approve",
+  "risk_files": [
+    {"path": "internal/auth/token.go", "score": 9},
+    {"path": "README.md", "score": 1}
+  ],
+  "skipped": [
+    {"name": "fuzz"}
+  ]
+}

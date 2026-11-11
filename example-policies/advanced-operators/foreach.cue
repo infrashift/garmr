@@ -122,3 +122,48 @@ forEachNestedPolicy: {
 		enforcement: action: "deny"
 	}
 }
+
+// ForEach over an optional list — the producer omits it (or sends null)
+// when there is nothing to report
+forEachOptionalPolicy: {
+	apiVersion: "policy.garmr.io/v1"
+	kind:       "Policy"
+	metadata: {
+		name:      "foreach-optional"
+		namespace: "advanced-operators"
+	}
+	spec: {
+		description: "Per-element checks over lists the input may omit"
+		target: resources: [{kind: "*"}]
+		rules: [
+			{
+				id:          "FE-005"
+				description: "Every flagged file must stay below the risk threshold"
+				severity:    "high"
+				expr: forEach: {
+					path:         "risk_files"
+					as:           "r"
+					allowMissing: true
+					condition: match: {path: "r.score", lessThan: 8}
+				}
+				message:     "{{r.path}} has risk score {{r.score}} (limit 8)"
+				remediation: "Split the change or add tests that cover the risky file"
+				category:    "review"
+			},
+			{
+				id:          "FE-006"
+				description: "Skipped checks must each give a reason"
+				severity:    "medium"
+				expr: forEach: {
+					path:         "skipped"
+					as:           "s"
+					allowMissing: true
+					condition: match: {path: "s.reason", exists: true}
+				}
+				message:  "skipped check {{s.name}} gives no reason"
+				category: "review"
+			},
+		]
+		enforcement: action: "deny"
+	}
+}

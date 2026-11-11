@@ -146,7 +146,10 @@ import "time"
 	//   {{path}}   an input field, or a forEach alias path ({{c.name}});
 	//              {{_index}} is the element's position
 	// A message that refers to a forEach alias is rendered once per failing
-	// element. A placeholder that does not resolve is left as written.
+	// element. If the rule fails with no failing element to name (the list
+	// is missing or empty, or a check outside the forEach failed), the
+	// engine's own reason is reported instead. Any other placeholder that
+	// does not resolve is left as written.
 	message?: string
 
 	// Documentation URL
@@ -414,6 +417,13 @@ import "time"
 
 	// Whether an empty list passes (true, the default) or fails (false)
 	allowEmpty?: bool
+
+	// Whether an absent path, or a null value, counts as an empty list
+	// (then allowEmpty, where and count decide). Off by default: a missing
+	// list fails the check, so a misspelled path or a producer that stopped
+	// sending the field cannot pass silently. Set it for lists the input
+	// omits when they are empty.
+	allowMissing?: bool
 
 	// Count the elements that pass the condition and check the count, e.g.
 	// `count: {lessThanOrEqual: 1}` for "at most one". Replaces mode and

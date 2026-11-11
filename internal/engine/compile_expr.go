@@ -282,6 +282,11 @@ func (c *exprCompiler) forEach(v any, scope []string) (node, error) {
 				return nil, fmt.Errorf("allowEmpty must be a boolean")
 			}
 			hasAllowEmpty = true
+		case "allowMissing":
+			var ok bool
+			if n.allowMissing, ok = f.v.(bool); !ok {
+				return nil, fmt.Errorf("allowMissing must be a boolean")
+			}
 		case "count":
 			if n.count, err = intChecks(f.v, "count", "'%s': %d elements matched, expected %s %d", n.src.p.raw); err != nil {
 				return nil, err

@@ -487,6 +487,13 @@ func (e *Engine) evaluateRule(ec *evalCtx, policy *CompiledPolicy, rule Compiled
 			// The rule could not be evaluated as written; the author's
 			// message would misdescribe that, so say what went wrong.
 			result.Message = fmt.Sprintf("Rule %s could not be evaluated: %s", rule.ID, r.msg)
+		case rule.Message != "" && rule.msg.hasFrames && len(ec.failures) == 0 && r.msg != "":
+			// The template names forEach elements, but the rule failed
+			// without a failing element to name (the list was missing or
+			// empty, nothing matched in "any" mode, a count was off, or a
+			// check outside the forEach failed). Rendering it would leave
+			// the {{alias.x}} placeholders as written, so say what failed.
+			result.Message = r.msg
 		case rule.Message != "":
 			result.Message = rule.msg.message(ec.root, result.Bindings, ec.failures)
 		case r.msg != "":

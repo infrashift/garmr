@@ -490,8 +490,9 @@ whose fields are missing from the input fail closed.
 
 Iterates over arrays and validates each element.
 
-**Policies:** `foreach-all`, `foreach-any` (`action: warn`) and
-`foreach-nested` in `example-policies/advanced-operators/foreach.cue`
+**Policies:** `foreach-all`, `foreach-any` (`action: warn`),
+`foreach-nested` and `foreach-optional` in
+`example-policies/advanced-operators/foreach.cue`
 
 ```cue
 {id: "FE-001", expr: forEach: {
@@ -522,6 +523,7 @@ Iterates over arrays and validates each element.
 | `condition` | expression | Expression evaluated per element (required) |
 | `mode` | string | `all` (default): every element must pass; `any`: at least one |
 | `allowEmpty` | bool | Whether an empty list passes (default `true`) |
+| `allowMissing` | bool | Whether an absent path, or `null`, counts as an empty list (default `false`: a missing list fails) |
 | `where` | expression | Only elements for which this holds are checked (and counted) |
 | `count` | length operators | Check how many elements pass instead of `mode`/`allowEmpty` (see below) |
 
@@ -532,6 +534,29 @@ field of that name, anywhere inside a `forEach`. `forEach` nests, and an
 inner condition can refer to both aliases. A missing list fails; a non-list
 value is an evaluation error. The evaluation deadline is checked on every
 element.
+
+**Optional lists.** Many producers omit a list when it is empty, or emit
+`null` for it. Set `allowMissing: true` on such a list and an absent or null
+value is treated as `[]`, after which `allowEmpty`, `where` and `count` decide
+as usual. It is off by default, so a misspelled path or a producer that
+stopped sending the field fails the check instead of passing it silently.
+
+```cue
+// risk_files is omitted when the review found none.
+expr: forEach: {
+    path:         "risk_files"
+    as:           "r"
+    allowMissing: true
+    condition: match: {path: "r.score", lessThan: 8}
+}
+message: "{{r.path}} has risk score {{r.score}}"
+```
+
+A message that names elements (`{{r.path}}`) is rendered once per failing
+element. If the rule fails with no element to name (the list is missing or
+empty, nothing matched in `mode: "any"`, or a check outside the `forEach`
+failed), the engine's own reason, such as `path 'risk_files' not found`,
+is reported instead of the unrendered template.
 
 **Filtering.** `where` selects the elements the condition applies to; the
 others are skipped entirely. `allowEmpty`, `mode: "any"` and `count` apply

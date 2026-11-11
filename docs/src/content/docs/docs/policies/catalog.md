@@ -49,6 +49,7 @@ Source: `example-policies/advanced-operators/`
 | `foreach-all` | 2 | Iterates over containers — every container must pass all checks |
 | `foreach-any` | 1 | Iterates over a collection — at least one element must match |
 | `foreach-nested` | 1 | Complex per-element checks combining forEach with logical operators |
+| `foreach-optional` | 2 | Per-element checks over lists the input may omit (`allowMissing`) |
 | `length-constraints` | 5 | Validates array and string lengths using various length operators |
 | `semver-constraints` | 3 | Validates semantic versioning constraints on application versions |
 | `service-selectors` | 1 | Joins Services to Deployments by name (`where`) and checks each selector with `compare` `subsetOf` |

@@ -38,9 +38,9 @@ gRPC would make sense only if garmr grows into high-throughput admission control
 
 1. `garmr eval --local --policy-dir <dir|file>` evaluates in-process. Its output is identical to the server's because both go through the shared `internal/api` converter. It runs with no server in CI or in offline microVMs.
 2. [`forEach.allowMissing` is opt-in](./foreach-allowmissing-is-opt-in--01a1ca253796.md). Absent and null lists otherwise still fail. Alias message templates no longer come back unrendered.
-3. Request-id correlation convention.
-4. Structured findings: author-declared `details` per failing element.
-5. `spec.inputSchema`, enforced at load time and by the CLI only.
-6. Per-rule and per-finding exceptions (finding fingerprints come from Vizzini).
+3. Request-id correlation convention: `--request-id "<repo>#<pr>@<sha>"`, shared by the producer and garmr (docs: CI/CD guide, "Correlating decisions").
+4. Structured findings: the rule declares `details: {file: "f.file", …}`, and each failing forEach element becomes `{path, index, details}` (capped at 100). Only the values the policy names are echoed back.
+5. [`spec.inputSchema`, enforced at load time and by the CLI only](./inputschema-is-enforced-at-load-and-in-the-cli-not-per-request--01a1ca30fa83.md).
+6. [Per-rule and per-finding exceptions](./exceptions-can-waive-rules-and-individual-findings--01a1ca3734c7.md) (finding fingerprints come from Vizzini).
 
 Related: [Optional TLS reinstated](./optional-tls-reinstated--01a1984e4679.md) (same deployment model, non-mesh callers).

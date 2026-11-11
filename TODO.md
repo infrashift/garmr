@@ -9,6 +9,41 @@ Three rounds are recorded: `feature/refactor` (2026-07-08/09),
 hardening pass (2026-07-28, Phases A–G) targeting the Nomad + Consul
 Connect deployment.
 
+## Vizzini integration (2026-11-11, `feature/improvements-for-vizzini`)
+
+Done. Vizzini (an LLM PR reviewer) hands garmr a JSON review report under a
+data contract; CI runs the reviewer, then `garmr eval`. The transport stays
+HTTP/JSON (wiki: `decisions/vizzini-integration-stays-http-json`). Six
+changes:
+
+- **`garmr eval --policy-dir` (`--local`)** evaluates in-process through the
+  server's loader. The /v1/evaluate wire types moved to `internal/api` so
+  the local path renders exactly what the server would; a parity test pins
+  identical JSON and exit codes.
+- **`forEach.allowMissing`** (opt-in) treats an absent or null list as
+  empty. Folding "missing" into `allowEmpty` (default true) was rejected as
+  fail-open. Alias message templates that cannot render now report the
+  engine's reason instead of `{{r.path}}`.
+- **Request-id convention** `<repo>#<pr>@<sha>`, documented in the CI/CD
+  guide.
+- **Structured findings**: `details: {name: path}` on a rule reports each
+  failing forEach element as `{path, index, details}` (max 100,
+  `findings_truncated`).
+- **`spec.inputSchema`**: rule paths (expr, when, where, operands, message,
+  details, waivers) are checked against the schema at every load; `garmr
+  eval --local` and `garmr test` validate the input (`ErrInvalidInput`,
+  exit 2). The server does not.
+- **Per-rule and per-finding exceptions**: `rules` skips named rules;
+  `rules` + `findings: {as, where}` waives forEach elements (e.g. by a
+  producer fingerprint), reported under `waived`.
+
+Worked example: `example-policies/real-world/review-gate.cue` with a
+`garmr test` suite; `TestExampleSuites` now runs every example suite.
+
+Follow-ups, not done: a `garmr validate --input` that checks a document
+against a policy's schema without evaluating; per-rule `action`; the
+fingerprint itself is Vizzini's to compute.
+
 ## Toolchain and dependency vulnerabilities (2026-11-01)
 
 Open. `govulncheck ./...` on `feat/optional-tls` (after go.mod moved to
@@ -92,13 +127,13 @@ Worked example: `example-policies/advanced-operators/aggregate.cue`.
 
 Recorded, deliberately not done in the engine pass:
 
-1. **Per-rule exceptions and actions.** `#Exception.rules?: [...string]` to
-   exempt specific rules; `#Rule.action?` to override `enforcement.action`
-   per rule (one policy cannot mix deny and warn today).
-2. **`spec.inputSchema`.** A CUE definition the input must satisfy, surfaced
-   as a distinct `invalid-input` verdict — CUE's real advantage over Rego's
-   untyped input. The evaluator is CUE-free, so validate at the API edge
-   (once per request, before evaluation) rather than inside rules.
+1. **Per-rule actions.** `#Rule.action?` to override `enforcement.action`
+   per rule (one policy cannot mix deny and warn today). Per-rule exceptions
+   (`#Exception.rules`) and per-finding waivers are done (2026-11-11, see
+   "Vizzini integration").
+2. ~~**`spec.inputSchema`**~~ — done 2026-11-11 in a load-time + CLI form
+   (see "Vizzini integration"). Server-side per-request validation was
+   deliberately not done: it would put CUE back on the evaluation path.
 3. **Builtins.** The use cases need `x509` parsing (the certificate example),
    `jwt.decode`, `sha256`, `glob.match`, `replace`, and JSON/YAML parse; OPA
    has ~200.

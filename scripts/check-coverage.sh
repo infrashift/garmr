@@ -3,6 +3,7 @@
 #
 # Measures statement coverage across the CLI↔server integration surface:
 #   - cmd/garmr (CLI)
+#   - internal/api (evaluate wire format, shared by server and --local)
 #   - internal/client (REST client)
 #   - internal/server (HTTP server)
 #
@@ -26,6 +27,7 @@ FILTERED="$WORK_DIR/coverage.filtered.out"
 echo "==> Running tests with coverage on CLI↔server surface..."
 go test -short -coverprofile="$PROFILE" -covermode=atomic \
   ./cmd/garmr/... \
+  ./internal/api/... \
   ./internal/client/... \
   ./internal/server/...
 

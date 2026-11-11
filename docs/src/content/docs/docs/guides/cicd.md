@@ -10,10 +10,12 @@ This guide describes how to integrate Garmr into your CI/CD pipelines for automa
 
 ## Overview
 
-Garmr can be integrated into your pipelines in two ways:
+Garmr can be integrated into your pipelines in three ways:
 
 1. **CLI (`garmr eval`)** - Recommended for most use cases
-2. **REST API** - For advanced integrations or non-shell environments
+2. **CLI, local (`garmr eval --policy-dir`)** - No server: the job evaluates
+   in-process against the policies checked out with it
+3. **REST API** - For advanced integrations or non-shell environments
 
 Both methods support request ID correlation for audit trail tracking.
 
@@ -46,6 +48,23 @@ Capture the code with `rc=0; garmr eval ... || rc=$?`. That form works under
 `set -e` (GitHub Actions runs `bash -e`), and avoid piping `garmr eval`
 into `tee` or another command: a pipeline's status is the last command's
 unless `set -o pipefail` is on, so the exit code would be lost.
+
+### Without a Server
+
+When the policies live in the repository (or a checkout the job can reach),
+the job does not need a running `garmr-server`:
+
+```bash
+rc=0
+garmr eval --policy-dir policies/ --input review.json -n review \
+  --request-id "${CI_JOB_ID}" -o json > decision.json || rc=$?
+```
+
+The policies are loaded with the server's loader and evaluated by the same
+engine, so the decision, the output and the exit codes are the ones a server
+would return. A policy that fails to load exits `2`. Run
+`garmr validate policies/` in the same job if you want the load error
+reported on its own.
 
 ### Request ID for Audit Correlation
 

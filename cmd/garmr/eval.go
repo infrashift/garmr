@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,10 +11,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"go.uber.org/zap"
 
+	"github.com/infrashift/garmr/internal/api"
 	"github.com/infrashift/garmr/internal/client"
+	"github.com/infrashift/garmr/internal/engine"
 	"github.com/infrashift/garmr/internal/input"
 )
 
@@ -24,6 +29,14 @@ var evalCmd = &cobra.Command{
 
 The eval command sends input to the Garmr server for policy evaluation
 and returns the decision with any violations.
+
+LOCAL EVALUATION:
+  --policy-dir evaluates in-process instead, with no server: the policies
+  are loaded through the server's own loader (a directory, walked
+  recursively, or a single .cue file) and evaluated by the same engine.
+  The output, decision and exit codes are identical to a server
+  evaluation. Use it in CI and in offline environments. No audit record
+  is written; the request ID still appears in the output.
 
 NAMESPACE FILTERING:
   Policies are organized into namespaces for logical grouping.
@@ -59,7 +72,10 @@ Examples:
   cat resource.json | garmr eval --input -
 
   # Output as JSON for CI/CD integration
-  garmr eval --input resource.json -o json`,
+  garmr eval --input resource.json -o json
+
+  # Evaluate locally, without a server
+  garmr eval --local --policy-dir policies/ --input review.json -n review`,
 	RunE: runEval,
 }
 
@@ -75,14 +91,19 @@ func init() {
 
 	// Request tracking
 	evalCmd.Flags().String("request-id", "", "request ID for audit correlation (e.g., CI job ID)")
+
+	// Local evaluation
+	evalCmd.Flags().Bool("local", false, "evaluate in-process, without a server (requires --policy-dir)")
+	evalCmd.Flags().String("policy-dir", "", "policy directory or .cue file to evaluate against locally (implies --local)")
+	evalCmd.Flags().Duration("timeout", api.DefaultEvaluationTimeout, "evaluation timeout for --local")
 }
 
 func runEval(cmd *cobra.Command, args []string) error {
-	c, ctx, cleanup, err := newServerClient()
-	if err != nil {
-		return err
+	local, _ := cmd.Flags().GetBool("local")
+	policyDir, _ := cmd.Flags().GetString("policy-dir")
+	if local && policyDir == "" {
+		return errors.New("--local requires --policy-dir")
 	}
-	defer cleanup()
 
 	// Read input
 	input, err := readInput(cmd)
@@ -109,9 +130,15 @@ func runEval(cmd *cobra.Command, args []string) error {
 	}
 
 	// Evaluate
-	result, err := c.Evaluate(ctx, input, opts)
+	var result *client.EvaluateResult
+	if policyDir != "" {
+		timeout, _ := cmd.Flags().GetDuration("timeout")
+		result, err = evaluateLocal(policyDir, input, opts, timeout)
+	} else {
+		result, err = evaluateRemote(input, opts)
+	}
 	if err != nil {
-		return fmt.Errorf("evaluation failed: %w", err)
+		return err
 	}
 
 	// Output result
@@ -128,6 +155,106 @@ func runEval(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// evaluateRemote sends the evaluation to the configured server.
+func evaluateRemote(input map[string]interface{}, opts client.EvaluateOptions) (*client.EvaluateResult, error) {
+	c, ctx, cleanup, err := newServerClient()
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	result, err := c.Evaluate(ctx, input, opts)
+	if err != nil {
+		return nil, fmt.Errorf("evaluation failed: %w", err)
+	}
+	return result, nil
+}
+
+// evaluateLocal evaluates in-process against the policies at policyDir.
+//
+// Every step mirrors the server path so the result is the one a server
+// loaded from the same directory would return: the server's loader, a JSON
+// round trip of the input (numbers reach the engine as float64, as they do
+// over the wire), the server's response converter, and the same decode into
+// the client's result type.
+func evaluateLocal(policyDir string, input map[string]interface{}, opts client.EvaluateOptions, timeout time.Duration) (*client.EvaluateResult, error) {
+	eng, err := loadLocalEngine(policyDir)
+	if err != nil {
+		return nil, err
+	}
+
+	wireInput, err := jsonRoundTrip(input)
+	if err != nil {
+		return nil, fmt.Errorf("encoding input: %w", err)
+	}
+
+	requestID := opts.RequestID
+	if requestID == "" {
+		requestID = uuid.New().String()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	resp, err := eng.Evaluate(ctx, &engine.EvaluateRequest{
+		Input:     wireInput,
+		Namespace: opts.Namespace,
+		Policies:  opts.Policies,
+		Options:   engine.EvaluateOptions{IncludePassed: opts.IncludePassed},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("evaluation failed: %w", err)
+	}
+
+	body, err := json.Marshal(api.NewEvaluateBody(resp, requestID))
+	if err != nil {
+		return nil, fmt.Errorf("encoding result: %w", err)
+	}
+	var result client.EvaluateResult
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("decoding result: %w", err)
+	}
+	return &result, nil
+}
+
+// loadLocalEngine builds an engine loaded from a policy directory or a
+// single .cue file, through the same loader the server and `garmr validate`
+// use. A load failure is fatal: evaluating a partial set would be the
+// fail-open the server's loader exists to prevent.
+func loadLocalEngine(policyDir string) (*engine.Engine, error) {
+	info, err := os.Stat(policyDir)
+	if err != nil {
+		return nil, fmt.Errorf("policy dir: %w", err)
+	}
+	eng, err := engine.NewEngine(zap.NewNop())
+	if err != nil {
+		return nil, fmt.Errorf("creating engine: %w", err)
+	}
+	if info.IsDir() {
+		err = eng.LoadPoliciesFromDir(context.Background(), policyDir)
+	} else {
+		_, err = eng.LoadPoliciesFromFile(context.Background(), policyDir)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("loading policies from %s: %w", policyDir, err)
+	}
+	return eng, nil
+}
+
+// jsonRoundTrip re-decodes v the way the server decodes a request body, so
+// YAML integers and other Go-typed values reach the engine as JSON values.
+func jsonRoundTrip(v map[string]interface{}) (map[string]interface{}, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func readInput(cmd *cobra.Command) (map[string]interface{}, error) {

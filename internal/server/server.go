@@ -29,6 +29,7 @@ import (
 
 	"gopkg.in/natefinch/lumberjack.v2"
 
+	"github.com/infrashift/garmr/internal/api"
 	"github.com/infrashift/garmr/internal/engine"
 	"github.com/infrashift/garmr/internal/health"
 	"github.com/infrashift/garmr/internal/input"
@@ -820,7 +821,8 @@ func evaluateErrorStatus(err error) (int, string) {
 }
 
 // DefaultEvaluationTimeout bounds a single evaluation when none is configured.
-const DefaultEvaluationTimeout = 10 * time.Second
+// It lives in internal/api so `garmr eval --local` shares it.
+const DefaultEvaluationTimeout = api.DefaultEvaluationTimeout
 
 // DefaultMaxValidateSize caps /v1/validate source when none is configured.
 const DefaultMaxValidateSize = 1 << 20
@@ -973,7 +975,7 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Request-Id", requestID)
-	_ = json.NewEncoder(w).Encode(evaluateResponseBody(result, requestID))
+	_ = json.NewEncoder(w).Encode(api.NewEvaluateBody(result, requestID))
 }
 
 // parseEvaluateRequest decodes an evaluate request body (JSON or YAML per
@@ -1074,105 +1076,6 @@ func auditAny(v any) any {
 		return auditField(s)
 	}
 	return v
-}
-
-// evaluateBody is the /v1/evaluate response. It carries the fields the
-// engine has always computed and `garmr eval --help` promises: summary,
-// evaluation_mode, terminated_early and termination_rule.
-type evaluateBody struct {
-	Decision        engine.Decision    `json:"decision"`
-	RequestID       string             `json:"request_id"`
-	Results         []ruleResultBody   `json:"results"`
-	Summary         summaryBody        `json:"summary"`
-	EvaluationMode  evaluationModeBody `json:"evaluation_mode"`
-	TerminatedEarly bool               `json:"terminated_early"`
-	TerminationRule *terminationBody   `json:"termination_rule,omitempty"`
-	Metrics         *metricsBody       `json:"metrics,omitempty"`
-}
-
-type ruleResultBody struct {
-	PolicyName      string          `json:"policy_name"`
-	PolicyNamespace string          `json:"policy_namespace"`
-	RuleID          string          `json:"rule_id"`
-	Description     string          `json:"description"`
-	Severity        engine.Severity `json:"severity"`
-	Passed          bool            `json:"passed"`
-	Message         string          `json:"message"`
-	Remediation     string          `json:"remediation"`
-}
-
-type summaryBody struct {
-	TotalRules int `json:"total_rules"`
-	Passed     int `json:"passed"`
-	Failed     int `json:"failed"`
-	Skipped    int `json:"skipped"`
-}
-
-// Field order mirrors engine.EvaluationMode so it converts directly.
-type evaluationModeBody struct {
-	FailFast          bool `json:"fail_fast"`
-	ShortCircuited    bool `json:"short_circuited"`
-	TotalRulesInScope int  `json:"total_rules_in_scope"`
-	RulesEvaluated    int  `json:"rules_evaluated"`
-	RulesSkipped      int  `json:"rules_skipped"`
-	DryRun            bool `json:"dry_run"`
-}
-
-type terminationBody struct {
-	PolicyName      string          `json:"policy_name"`
-	PolicyNamespace string          `json:"policy_namespace"`
-	RuleID          string          `json:"rule_id"`
-	Description     string          `json:"description"`
-	Severity        engine.Severity `json:"severity"`
-	Message         string          `json:"message"`
-}
-
-type metricsBody struct {
-	EvaluationTimeNs  int64 `json:"evaluation_time_ns"`
-	PoliciesEvaluated int   `json:"policies_evaluated"`
-	RulesEvaluated    int   `json:"rules_evaluated"`
-}
-
-// evaluateResponseBody converts an engine response into the JSON body.
-func evaluateResponseBody(result *engine.EvaluateResponse, requestID string) evaluateBody {
-	body := evaluateBody{
-		Decision:        result.Decision,
-		RequestID:       requestID,
-		Results:         make([]ruleResultBody, len(result.Results)),
-		Summary:         summaryBody(result.Summary),
-		EvaluationMode:  evaluationModeBody(result.EvaluationMode),
-		TerminatedEarly: result.TerminatedEarly,
-	}
-	for i, r := range result.Results {
-		body.Results[i] = ruleResultBody{
-			PolicyName:      r.PolicyName,
-			PolicyNamespace: r.PolicyNamespace,
-			RuleID:          r.RuleID,
-			Description:     r.RuleDescription,
-			Severity:        r.Severity,
-			Passed:          r.Passed,
-			Message:         r.Message,
-			Remediation:     r.Remediation,
-		}
-	}
-	if tr := result.TerminationRule; tr != nil {
-		body.TerminationRule = &terminationBody{
-			PolicyName:      tr.PolicyName,
-			PolicyNamespace: tr.PolicyNamespace,
-			RuleID:          tr.RuleID,
-			Description:     tr.RuleDescription,
-			Severity:        tr.Severity,
-			Message:         tr.Message,
-		}
-	}
-	if m := result.Metrics; m != nil {
-		body.Metrics = &metricsBody{
-			EvaluationTimeNs:  m.EvaluationTimeNs,
-			PoliciesEvaluated: m.PoliciesEvaluated,
-			RulesEvaluated:    m.RulesEvaluated,
-		}
-	}
-	return body
 }
 
 func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {

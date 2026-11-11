@@ -104,3 +104,36 @@ func TestEvaluateResponseBody_OmitsTerminationRuleWhenAbsent(t *testing.T) {
 		t.Error("metrics present when the engine returned none")
 	}
 }
+
+func TestNewEvaluateBody_Findings(t *testing.T) {
+	result := &engine.EvaluateResponse{
+		Decision: engine.DecisionDeny,
+		Results: []engine.RuleResult{
+			{RuleID: "with", Findings: []engine.Finding{{Path: "xs[2]", Index: 2, Details: map[string]any{"file": "a.go"}}}, FindingsTruncated: true},
+			{RuleID: "without"},
+		},
+	}
+	body := wireBody(t, NewEvaluateBody(result, "req-3"))
+	results := body["results"].([]any)
+
+	with := results[0].(map[string]any)
+	findings, ok := with["findings"].([]any)
+	if !ok || len(findings) != 1 {
+		t.Fatalf("findings = %v, want one", with["findings"])
+	}
+	f := findings[0].(map[string]any)
+	if f["path"] != "xs[2]" || f["index"] != 2.0 || f["details"].(map[string]any)["file"] != "a.go" {
+		t.Errorf("finding = %v", f)
+	}
+	if with["findings_truncated"] != true {
+		t.Error("findings_truncated missing")
+	}
+
+	without := results[1].(map[string]any)
+	if _, present := without["findings"]; present {
+		t.Error("findings present on a rule that reported none")
+	}
+	if _, present := without["findings_truncated"]; present {
+		t.Error("findings_truncated present on a rule that reported none")
+	}
+}

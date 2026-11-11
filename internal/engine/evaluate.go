@@ -467,7 +467,7 @@ func (e *Engine) evaluateRule(ec *evalCtx, policy *CompiledPolicy, rule Compiled
 		Tags:            rule.Tags,
 	}
 
-	ec.wantBinds, ec.wantFrames = rule.msg.hasBinds, rule.msg.hasFrames
+	ec.wantBinds, ec.wantFrames = rule.msg.hasBinds, rule.msg.hasFrames || len(rule.details) > 0
 	ec.binds, ec.failures = ec.binds[:0], ec.failures[:0]
 	r := rule.expr.eval(ec)
 
@@ -479,6 +479,10 @@ func (e *Engine) evaluateRule(ec *evalCtx, policy *CompiledPolicy, rule Compiled
 		for _, b := range ec.binds {
 			result.Bindings[b.name] = b.value
 		}
+	}
+
+	if r.out == fail && len(rule.details) > 0 && len(ec.failures) > 0 {
+		result.Findings, result.FindingsTruncated = findings(rule.details, ec.root, ec.failures)
 	}
 
 	if !result.Passed {

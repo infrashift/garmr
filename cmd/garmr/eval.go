@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -357,6 +358,22 @@ func outputYAML(result *client.EvaluateResult) error {
 			if r.Remediation != "" {
 				fmt.Printf("    remediation: %s\n", r.Remediation)
 			}
+			if len(r.Findings) > 0 {
+				fmt.Println("    findings:")
+				for _, f := range r.Findings {
+					fmt.Printf("      - path: %s\n", f.Path)
+					fmt.Printf("        index: %d\n", f.Index)
+					if len(f.Details) > 0 {
+						fmt.Println("        details:")
+						for _, k := range sortedKeys(f.Details) {
+							fmt.Printf("          %s: %v\n", k, f.Details[k])
+						}
+					}
+				}
+				if r.FindingsTruncated {
+					fmt.Println("    findings_truncated: true")
+				}
+			}
 		}
 	}
 	return nil
@@ -413,6 +430,12 @@ func outputTable(result *client.EvaluateResult, quiet, suppressDetails bool) err
 			if !r.Passed && r.Remediation != "" {
 				fmt.Printf("%-12s %-30s %-10s %-8s  ↳ %s\n", "", "", "", "", r.Remediation)
 			}
+			for _, f := range r.Findings {
+				fmt.Printf("%-12s %-30s %-10s %-8s  • %s\n", "", "", "", "", formatFinding(f))
+			}
+			if r.FindingsTruncated {
+				fmt.Printf("%-12s %-30s %-10s %-8s  • … more failing elements not listed\n", "", "", "", "")
+			}
 		}
 	}
 
@@ -447,4 +470,24 @@ func outputTable(result *client.EvaluateResult, quiet, suppressDetails bool) err
 	}
 
 	return nil
+}
+
+// formatFinding renders a finding as its path followed by its details in
+// name order: "risk_files[3] file=a.go line=12".
+func formatFinding(f client.Finding) string {
+	var b strings.Builder
+	b.WriteString(f.Path)
+	for _, k := range sortedKeys(f.Details) {
+		fmt.Fprintf(&b, " %s=%v", k, f.Details[k])
+	}
+	return b.String()
+}
+
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

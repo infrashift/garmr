@@ -191,6 +191,19 @@ type RuleResult struct {
 	Passed          bool   `json:"passed"`
 	Message         string `json:"message,omitempty"`
 	Remediation     string `json:"remediation,omitempty"`
+
+	// Findings are the failing forEach elements, for rules that declare
+	// `details`; FindingsTruncated reports that more failed.
+	Findings          []Finding `json:"findings,omitempty"`
+	FindingsTruncated bool      `json:"findings_truncated,omitempty"`
+}
+
+// Finding is one failing forEach element: its input path, its index, and
+// the values the rule's `details` selected from it.
+type Finding struct {
+	Path    string         `json:"path"`
+	Index   int            `json:"index"`
+	Details map[string]any `json:"details,omitempty"`
 }
 
 // Metrics contains evaluation metrics.

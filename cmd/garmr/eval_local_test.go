@@ -14,9 +14,39 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/infrashift/garmr/internal/api"
+	"github.com/infrashift/garmr/internal/client"
 	"github.com/infrashift/garmr/internal/engine"
 	"github.com/infrashift/garmr/internal/server"
 )
+
+// testFindingsPolicy reports each major review finding as a structured
+// finding.
+const testFindingsPolicy = `
+apiVersion: "policy.garmr.io/v1"
+kind:       "Policy"
+metadata: {
+	name:      "review-findings"
+	namespace: "review"
+}
+spec: {
+	description: "No major findings"
+	target: resources: [{kind: "*"}]
+	rules: [{
+		id:          "VZ-001"
+		description: "no major findings"
+		severity:    "high"
+		expr: forEach: {
+			path:         "findings"
+			as:           "f"
+			allowMissing: true
+			condition: not: match: {path: "f.severity", equals: "major"}
+		}
+		message: "{{f.file}}:{{f.start_line}} is a major finding"
+		details: {file: "f.file", line: "f.start_line"}
+	}]
+	enforcement: action: "deny"
+}
+`
 
 // localEvalFlagSet registers every flag runEval reads, including the
 // local-evaluation flags.
@@ -97,7 +127,7 @@ func runEvalJSON(t *testing.T, cmd *cobraCmd) evalRun {
 // policies and input, the output and exit code are exactly what a server
 // loaded from the same directory returns.
 func TestRunEval_LocalMatchesServer(t *testing.T) {
-	dir := writePolicyDir(t, testPassPolicy, testDenyPolicy, testWarnPolicy, testSecurityPolicy)
+	dir := writePolicyDir(t, testPassPolicy, testDenyPolicy, testWarnPolicy, testSecurityPolicy, testFindingsPolicy)
 
 	cases := []struct {
 		name      string
@@ -114,6 +144,9 @@ func TestRunEval_LocalMatchesServer(t *testing.T) {
 		{name: "verbose includes passed", data: `{"status":"active","env":"production","x":1}`, verbose: "true"},
 		{name: "no match fails closed", data: `{"a":1}`, namespace: "nothing-here"},
 		{name: "yaml input", data: "status: active\nenv: production\nx: 1\n", format: "yaml"},
+		{name: "structured findings", namespace: "review",
+			data: `{"findings":[{"file":"a.go","start_line":3,"severity":"minor"},{"file":"b.go","start_line":12,"severity":"major"}]}`},
+		{name: "omitted list", namespace: "review", data: `{"verdict":"approve"}`},
 	}
 
 	for _, tc := range cases {
@@ -278,5 +311,52 @@ func TestJSONRoundTrip_NormalizesNumbers(t *testing.T) {
 	}
 	if _, err := jsonRoundTrip(map[string]interface{}{"c": make(chan int)}); err == nil {
 		t.Error("expected an encoding error for an unencodable value")
+	}
+}
+
+func TestRunEval_FindingsRendering(t *testing.T) {
+	dir := writePolicyDir(t, testFindingsPolicy)
+	input := `{"findings":[{"file":"b.go","start_line":12,"severity":"major"},{"file":"c.go","severity":"major"}]}`
+
+	for _, format := range []string{"table", "yaml", "json"} {
+		t.Run(format, func(t *testing.T) {
+			viper.Reset()
+			viperSetOutput(t, format)
+			cmd := localEvalFlagSet(t)
+			cmd.Flags().Set("policy-dir", dir)
+			cmd.Flags().Set("data", input)
+
+			stubExit(t)
+			stdout, _ := captureOutput(t, func() { _ = runEval(cmd, nil) })
+
+			var want []string
+			switch format {
+			case "table":
+				want = []string{"• findings[0] file=b.go line=12", "• findings[1] file=c.go"}
+			case "yaml":
+				want = []string{"findings:", "- path: findings[0]", "file: b.go", "line: 12", "- path: findings[1]"}
+			case "json":
+				want = []string{`"path": "findings[0]"`, `"file": "b.go"`, `"line": 12`}
+			}
+			for _, w := range want {
+				if !strings.Contains(stdout, w) {
+					t.Errorf("output missing %q:\n%s", w, stdout)
+				}
+			}
+		})
+	}
+}
+
+func TestOutputFindingsTruncated(t *testing.T) {
+	result := &client.EvaluateResult{Decision: "deny", Results: []client.RuleResult{{
+		RuleID: "r1", Severity: "high", Findings: []client.Finding{{Path: "xs[0]"}}, FindingsTruncated: true,
+	}}}
+	table, _ := captureOutput(t, func() { _ = outputTable(result, false, false) })
+	if !strings.Contains(table, "more failing elements not listed") {
+		t.Errorf("table output does not mark truncation:\n%s", table)
+	}
+	yaml, _ := captureOutput(t, func() { _ = outputYAML(result) })
+	if !strings.Contains(yaml, "findings_truncated: true") {
+		t.Errorf("yaml output does not mark truncation:\n%s", yaml)
 	}
 }

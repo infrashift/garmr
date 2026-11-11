@@ -37,6 +37,18 @@ type RuleResultBody struct {
 	Passed          bool            `json:"passed"`
 	Message         string          `json:"message"`
 	Remediation     string          `json:"remediation"`
+
+	// Findings are the failing forEach elements, for rules that declare
+	// `details`. FindingsTruncated is set when more failed than were listed.
+	Findings          []FindingBody `json:"findings,omitempty"`
+	FindingsTruncated bool          `json:"findings_truncated,omitempty"`
+}
+
+// FindingBody is one failing forEach element.
+type FindingBody struct {
+	Path    string         `json:"path"`
+	Index   int            `json:"index"`
+	Details map[string]any `json:"details,omitempty"`
 }
 
 // SummaryBody counts rule outcomes.
@@ -87,14 +99,16 @@ func NewEvaluateBody(result *engine.EvaluateResponse, requestID string) Evaluate
 	}
 	for i, r := range result.Results {
 		body.Results[i] = RuleResultBody{
-			PolicyName:      r.PolicyName,
-			PolicyNamespace: r.PolicyNamespace,
-			RuleID:          r.RuleID,
-			Description:     r.RuleDescription,
-			Severity:        r.Severity,
-			Passed:          r.Passed,
-			Message:         r.Message,
-			Remediation:     r.Remediation,
+			PolicyName:        r.PolicyName,
+			PolicyNamespace:   r.PolicyNamespace,
+			RuleID:            r.RuleID,
+			Description:       r.RuleDescription,
+			Severity:          r.Severity,
+			Passed:            r.Passed,
+			Message:           r.Message,
+			Remediation:       r.Remediation,
+			Findings:          findingBodies(r.Findings),
+			FindingsTruncated: r.FindingsTruncated,
 		}
 	}
 	if tr := result.TerminationRule; tr != nil {
@@ -115,4 +129,17 @@ func NewEvaluateBody(result *engine.EvaluateResponse, requestID string) Evaluate
 		}
 	}
 	return body
+}
+
+// findingBodies converts engine findings, keeping nil for none so the field
+// is omitted.
+func findingBodies(fs []engine.Finding) []FindingBody {
+	if len(fs) == 0 {
+		return nil
+	}
+	out := make([]FindingBody, len(fs))
+	for i, f := range fs {
+		out[i] = FindingBody(f)
+	}
+	return out
 }

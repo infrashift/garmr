@@ -115,6 +115,10 @@ type CompiledRule struct {
 	// uses them.
 	expr node
 	msg  msgTemplate
+
+	// details are the rule's `details` paths, in name order. A rule with
+	// details records its failing forEach elements as findings.
+	details []detailPath
 }
 
 // EvaluationConfig controls rule evaluation behavior.
@@ -266,6 +270,12 @@ type RuleResult struct {
 	Remediation     string
 	Bindings        map[string]any
 
+	// Findings lists the failing forEach elements, for rules that declare
+	// `details`: one per element, at most MaxFindings.
+	// FindingsTruncated reports that more elements failed.
+	Findings          []Finding
+	FindingsTruncated bool
+
 	// Evaluation metadata
 	Priority *int
 	Category string
@@ -273,6 +283,23 @@ type RuleResult struct {
 
 	// If this rule caused fail-fast termination
 	CausedTermination bool
+}
+
+// MaxFindings caps the findings reported for one rule, so a forEach over a
+// large input cannot grow a response without bound.
+const MaxFindings = 100
+
+// Finding is one failing forEach element: where it is in the input, and the
+// values the rule's `details` selected from it.
+type Finding struct {
+	// Path is the element's input path, e.g. "risk_files[3]" or
+	// "spec.containers[1].ports[0]" for a nested forEach.
+	Path string
+	// Index is the element's position in its list.
+	Index int
+	// Details maps each `details` name to the value its path resolved to.
+	// Names whose path did not resolve are left out.
+	Details map[string]any
 }
 
 // Metrics contains performance metrics.

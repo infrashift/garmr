@@ -57,6 +57,12 @@ type evalCtx struct {
 	index []int
 	names []string
 
+	// lists holds each frame's list as a concrete input path
+	// ("spec.containers", "spec.containers[2].ports"), for findings. Kept
+	// only when wantFrames is set (constant for a rule's evaluation), so
+	// rules that record nothing never grow it.
+	lists []string
+
 	// Bindings feed message templates; collected only for rules whose
 	// message uses them.
 	wantBinds bool
@@ -70,11 +76,13 @@ type evalCtx struct {
 	failures   [][]frame
 }
 
-// frame is one forEach element, as recorded for message rendering.
+// frame is one forEach element, as recorded for message rendering and
+// findings.
 type frame struct {
 	name  string
 	item  any
 	index int
+	list  string // the element's list as an input path
 }
 
 // recordFailure snapshots the current frames, unless a deeper forEach
@@ -85,7 +93,7 @@ func (ec *evalCtx) recordFailure(mark int) {
 	}
 	snap := make([]frame, len(ec.items))
 	for i := range ec.items {
-		snap[i] = frame{ec.names[i], ec.items[i], ec.index[i]}
+		snap[i] = frame{name: ec.names[i], item: ec.items[i], index: ec.index[i], list: ec.lists[i]}
 	}
 	ec.failures = append(ec.failures, snap)
 }
@@ -388,6 +396,18 @@ type forEachNode struct {
 	count []func(any) result
 }
 
+// listPath is the list's concrete input path, for findings: the path as
+// written, or for a list inside an outer element, that element's path plus
+// the rest ("spec.containers[2].ports"). Called only when frames are
+// recorded.
+func (n forEachNode) listPath(ec *evalCtx) string {
+	if n.src.frame < 0 {
+		return n.src.p.raw
+	}
+	outer := n.src.frame
+	return ec.lists[outer] + "[" + strconv.Itoa(ec.index[outer]) + "]" + n.src.p.raw[len(n.src.p.segs[0].key):]
+}
+
 func (n forEachNode) eval(ec *evalCtx) result {
 	v, found, _ := n.src.resolve(ec)
 	if n.allowMissing && (!found || v == nil) {
@@ -411,11 +431,17 @@ func (n forEachNode) eval(ec *evalCtx) result {
 	ec.items = append(ec.items, nil)
 	ec.index = append(ec.index, 0)
 	ec.names = append(ec.names, n.alias)
+	if ec.wantFrames {
+		ec.lists = append(ec.lists, n.listPath(ec))
+	}
 	depth := len(ec.items) - 1
 	defer func() {
 		ec.items = ec.items[:depth]
 		ec.index = ec.index[:depth]
 		ec.names = ec.names[:depth]
+		if ec.wantFrames {
+			ec.lists = ec.lists[:depth]
+		}
 	}()
 
 	start := len(ec.failures)

@@ -288,6 +288,19 @@ Each entry in `results` carries `policy_name`, `policy_namespace`, `rule_id`,
 operator-facing hint for fixing the violation, which `garmr eval` renders
 beneath each failure.
 
+A rule that declares `details` also carries `findings`: one object per
+failing `forEach` element, with its input `path`, its `index`, and the
+`details` values the policy selected. At most 100 are listed, and
+`findings_truncated` is `true` when more failed. Both fields are omitted when
+there is nothing to report. See
+[Structured findings](/garmr/docs/reference/policy-schema/#structured-findings-details).
+
+```json
+"findings": [
+  {"path": "findings[3]", "index": 3, "details": {"file": "internal/auth/token.go", "line": 41}}
+]
+```
+
 A partial evaluation is not the same as a clean one: check
 `evaluation_mode.rules_skipped` and `terminated_early` before treating an
 `allow` as full coverage.

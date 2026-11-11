@@ -113,16 +113,17 @@ type specDoc struct {
 		Resources []ResourceSelector `json:"resources"`
 	} `json:"target"`
 	Rules []struct {
-		ID          string   `json:"id"`
-		Description string   `json:"description"`
-		Severity    Severity `json:"severity"`
-		Priority    *int     `json:"priority"`
-		Message     string   `json:"message"`
-		Remediation string   `json:"remediation"`
-		Category    string   `json:"category"`
-		Tags        []string `json:"tags"`
-		When        any      `json:"when"`
-		Expr        any      `json:"expr"`
+		ID          string            `json:"id"`
+		Description string            `json:"description"`
+		Severity    Severity          `json:"severity"`
+		Priority    *int              `json:"priority"`
+		Message     string            `json:"message"`
+		Remediation string            `json:"remediation"`
+		Category    string            `json:"category"`
+		Tags        []string          `json:"tags"`
+		When        any               `json:"when"`
+		Expr        any               `json:"expr"`
+		Details     map[string]string `json:"details"`
 	} `json:"rules"`
 	Enforcement EnforcementSpec `json:"enforcement"`
 	Evaluation  struct {
@@ -217,6 +218,10 @@ func (e *Engine) compilePolicy(val cue.Value, name, namespace string) (*Compiled
 		if err != nil {
 			return nil, fmt.Errorf("rule %s: %w", r.ID, err)
 		}
+		details, err := parseDetails(r.Details, c.aliases)
+		if err != nil {
+			return nil, fmt.Errorf("rule %s: %w", r.ID, err)
+		}
 		cp.Rules = append(cp.Rules, CompiledRule{
 			ID:              r.ID,
 			Description:     r.Description,
@@ -229,6 +234,7 @@ func (e *Engine) compilePolicy(val cue.Value, name, namespace string) (*Compiled
 			DefinitionOrder: i,
 			expr:            expr,
 			msg:             msg,
+			details:         details,
 		})
 	}
 	cp.Rules = sortRules(cp.Rules, cp.Evaluation.Order)

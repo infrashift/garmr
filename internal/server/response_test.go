@@ -1,10 +1,15 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"go.uber.org/zap"
+
+	"github.com/infrashift/garmr/internal/engine"
 )
 
 // TestHandleEvaluate_ResponseIncludesSummary is the end-to-end check that the
@@ -83,5 +88,67 @@ func TestOpenAPISpec_MatchesResponseShape(t *testing.T) {
 		if _, present := resp[key]; !present {
 			t.Errorf("EvaluateResponse does not document %q", key)
 		}
+	}
+
+	rule := spec.Components.Schemas["RuleResult"].Properties
+	for _, key := range []string{"findings", "findings_truncated"} {
+		if _, present := rule[key]; !present {
+			t.Errorf("RuleResult does not document %q", key)
+		}
+	}
+	finding := spec.Components.Schemas["Finding"].Properties
+	for _, key := range []string{"path", "index", "details"} {
+		if _, present := finding[key]; !present {
+			t.Errorf("Finding does not document %q", key)
+		}
+	}
+}
+
+// TestHandleEvaluate_ReturnsFindings is the end-to-end check that a rule's
+// structured findings reach an HTTP client.
+func TestHandleEvaluate_ReturnsFindings(t *testing.T) {
+	eng, err := engine.NewEngine(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := `
+apiVersion: "policy.garmr.io/v1"
+kind:       "Policy"
+metadata: {name: "findings", namespace: "default"}
+spec: {
+	description: "d"
+	target: resources: [{kind: "*"}]
+	rules: [{
+		id: "r1", description: "d", severity: "high"
+		expr: forEach: {path: "xs", as: "x", condition: match: {path: "x.ok", equals: true}}
+		details: {name: "x.name"}
+	}]
+	enforcement: action: "deny"
+}`
+	if err := eng.LoadPolicy(context.Background(), "findings", "default", policy); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(Config{}, eng, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.MarkReady()
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp := postJSON(t, ts.URL+"/v1/evaluate", map[string]any{
+		"input": map[string]any{"xs": []any{map[string]any{"name": "a", "ok": true}, map[string]any{"name": "b", "ok": false}}},
+	})
+	defer resp.Body.Close()
+	body := decodeJSON(t, resp)
+
+	results := body["results"].([]any)
+	findings, _ := results[0].(map[string]any)["findings"].([]any)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %v, want one", findings)
+	}
+	f := findings[0].(map[string]any)
+	if f["path"] != "xs[1]" || f["details"].(map[string]any)["name"] != "b" {
+		t.Errorf("finding = %v, want xs[1] with name b", f)
 	}
 }

@@ -942,6 +942,17 @@
           "remediation": {
             "type": "string",
             "description": "Operator-facing hint for fixing the violation"
+          },
+          "findings": {
+            "type": "array",
+            "description": "The failing forEach elements, for rules that declare `details` (at most 100)",
+            "items": {
+              "$ref": "#/components/schemas/Finding"
+            }
+          },
+          "findings_truncated": {
+            "type": "boolean",
+            "description": "More elements failed than `findings` lists"
           }
         },
         "required": [
@@ -950,6 +961,29 @@
           "rule_id",
           "severity",
           "passed"
+        ]
+      },
+      "Finding": {
+        "type": "object",
+        "description": "One failing forEach element",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The element's input path, e.g. risk_files[3]"
+          },
+          "index": {
+            "type": "integer",
+            "description": "The element's position in its list"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "The values the rule's `details` paths selected; names whose path did not resolve are omitted"
+          }
+        },
+        "required": [
+          "path",
+          "index"
         ]
       },
       "EvaluationMetrics": {

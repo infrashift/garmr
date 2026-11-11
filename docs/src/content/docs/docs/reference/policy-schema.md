@@ -983,8 +983,58 @@ message: "container {{c.name}} exposes undeclared port {{p.containerPort}}"
 reports `container app exposes undeclared port 9229; container debug
 exposes undeclared port 6060`. Identical renderings are reported once.
 Elements visited inside a branch that ultimately passed (an `any` or `not`)
-are not reported. A placeholder that does not resolve is left as written. A
-malformed placeholder is a load error.
+are not reported. If the rule fails with no element to name (a missing or
+empty list, `mode: "any"`, `count`, or a check outside the `forEach`), the
+engine's reason is reported instead of the template. Any other placeholder
+that does not resolve is left as written. A malformed placeholder is a load
+error.
+
+### Structured findings (`details`)
+
+A message is text for people. A machine that consumes the result (a CI step
+annotating a pull-request line, a tool linking a violation back to its own
+record) needs the failing element's data. Declare which values to report in
+`details`, and each failing element becomes a **finding** next to the
+message:
+
+```cue
+{
+    id: "REV-002"
+    description: "No major findings"
+    severity: "high"
+    expr: forEach: {
+        path: "findings", as: "f", allowMissing: true
+        condition: not: match: {path: "f.severity", equals: "major"}
+    }
+    message: "{{f.file}}:{{f.start_line}} is a major finding"
+    details: {file: "f.file", line: "f.start_line", severity: "f.severity"}
+}
+```
+
+```json
+"findings": [
+  {"path": "findings[3]", "index": 3,
+   "details": {"file": "internal/auth/token.go", "line": 41, "severity": "major"}}
+]
+```
+
+- `details` maps a name to a path, with the same rules as message
+  placeholders: an alias path reads the failing element, `_index` its
+  position, any other path the input. Values are reported as they appear in
+  the input (numbers stay numbers). A path that does not resolve for an
+  element is left out of that finding.
+- `path` is the element's location in the input; for nested `forEach` it is
+  the full path (`spec.containers[1].ports[0]`). `index` is its position in
+  its own list.
+- Findings are reported for the elements that failed a `forEach` in its
+  default mode, the same ones a message names. `mode: "any"`, `count`, and
+  checks outside the `forEach` have no failing element, so they report none.
+- The policy decides what is echoed back: a finding carries only the values
+  `details` names, never the whole element.
+- At most 100 findings per rule; `findings_truncated` is set when more
+  failed. A rule without `details` reports no findings and costs nothing
+  extra.
+- `details` requires a `forEach` in the rule (a load error otherwise).
 
 Bindings render the value the check used: `{{.datetime}}` is the parsed
 time normalized to RFC3339 (not the input as written), `{{.version}}` the
@@ -1109,6 +1159,7 @@ other fields you want to carry along.
 | `priority` | no | 0–9999; lower is evaluated first under the `priority` orders |
 | `message` | no | Violation message template ([Messages](#messages)) |
 | `remediation` | no | How to fix a violation; returned with the result |
+| `details` | no | Values to report per failing `forEach` element ([Structured findings](#structured-findings-details)) |
 | `url` | no | Documentation link |
 | `category` | no | A grouping such as `security`; used by the category filters below |
 | `tags` | no | A list of strings; used by the tag filters below |

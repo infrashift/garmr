@@ -2,6 +2,8 @@ package engine
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -120,4 +122,72 @@ func (t msgTemplate) message(root map[string]any, binds map[string]any, failures
 		}
 	}
 	return strings.Join(out, "; ")
+}
+
+// detailPath is one entry of a rule's `details`: a name and the path whose
+// value a finding reports under it.
+type detailPath struct {
+	name  string
+	path  fieldPath
+	alias bool // starts with a forEach alias (or _index)
+}
+
+// parseDetails compiles a rule's `details` map. The paths follow the
+// message template's rules: a path starting with a forEach alias reads the
+// failing element, `_index` its position, anything else the input.
+func parseDetails(details map[string]string, aliases map[string]bool) ([]detailPath, error) {
+	if len(details) == 0 {
+		return nil, nil
+	}
+	if len(aliases) == 0 {
+		return nil, fmt.Errorf("details: the rule has no forEach, so there are no failing elements to report")
+	}
+	names := make([]string, 0, len(details))
+	for name := range details {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]detailPath, 0, len(names))
+	for _, name := range names {
+		p, err := parsePath(details[name])
+		if err != nil {
+			return nil, fmt.Errorf("details.%s: %w", name, err)
+		}
+		first := p.segs[0]
+		alias := !first.isIdx && !first.isAll && (aliases[first.key] || first.key == "_index")
+		out = append(out, detailPath{name: name, path: p, alias: alias})
+	}
+	return out, nil
+}
+
+// findings builds one Finding per recorded failure, capped at MaxFindings.
+// Each failure's innermost frame is the failing element.
+func findings(details []detailPath, root map[string]any, failures [][]frame) ([]Finding, bool) {
+	n := min(len(failures), MaxFindings)
+	out := make([]Finding, 0, n)
+	for _, frames := range failures[:n] {
+		if len(frames) == 0 {
+			continue
+		}
+		inner := frames[len(frames)-1]
+		f := Finding{Path: inner.list + "[" + strconv.Itoa(inner.index) + "]", Index: inner.index}
+		for _, d := range details {
+			var v any
+			var ok bool
+			if d.alias {
+				v, ok = resolveInFrames(d.path, frames)
+			} else {
+				v, ok = d.path.walk(root, d.path.segs)
+			}
+			if !ok {
+				continue
+			}
+			if f.Details == nil {
+				f.Details = make(map[string]any, len(details))
+			}
+			f.Details[d.name] = v
+		}
+		out = append(out, f)
+	}
+	return out, len(failures) > MaxFindings
 }

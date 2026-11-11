@@ -152,6 +152,15 @@ import "time"
 	// does not resolve is left as written.
 	message?: string
 
+	// Values to report for each failing forEach element, as structured
+	// findings next to the message: a name per value and the path to read
+	// it from. Paths follow the message rules: `f.file` reads the failing
+	// element (alias f), `_index` its position, anything else the input.
+	//   details: {file: "f.file", line: "f.start_line", severity: "f.severity"}
+	// Requires a forEach in the rule. Each finding also carries the
+	// element's input path ("findings[3]") and index.
+	details?: [string]: string
+
 	// Documentation URL
 	url?: string
 

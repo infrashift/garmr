@@ -83,7 +83,7 @@ garmr eval --input <file> [flags]
 | `--format` | `-f` | Input format (json, yaml, auto) | `auto` |
 | `--policy` | `-p` | Specific policies to evaluate (repeatable): `namespace/name`, or a bare `metadata.name` resolved inside `--namespace` (`default` when it is unset). A qualified name ignores `--namespace`. | |
 | `--namespace` | `-n` | Policy namespace to evaluate (single value) | |
-| `--request-id` | | Request ID for audit correlation | |
+| `--request-id` | | Request ID for audit correlation. Use the change's identity (`<repo>#<pr>@<sha>`), see [CI/CD: correlating decisions](/garmr/docs/guides/cicd/#correlating-decisions-with-the-change-they-gated) | generated UUID |
 | `--verbose` | `-v` | Show rule details. Default shows details on fail, hides on pass. `--verbose=false` always hides. | unset |
 | `--policy-dir` | | Evaluate in-process against this policy directory (walked recursively) or `.cue` file, without a server. Implies `--local`. | |
 | `--local` | | Evaluate in-process. Requires `--policy-dir`. | `false` |

@@ -796,7 +796,10 @@ Caller-controlled fields (`request_id`, `user_agent`, `principal`,
 bytes and marked `…[truncated]`, keeping each record small enough to be
 written atomically when `audit.path` is `stdout`.
 
-Query audit logs by request ID:
+Query audit logs by request ID. For CI callers, use the identity of the
+change being gated (`<repo>#<pr>@<sha>`) as `X-Request-Id`, so the record
+joins with the tool that produced the input; see
+[CI/CD: correlating decisions](/garmr/docs/guides/cicd/#correlating-decisions-with-the-change-they-gated).
 
 ```bash
 jq 'select(.request_id == "pipeline-12345")' /var/log/garmr/audit.log

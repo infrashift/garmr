@@ -1,8 +1,6 @@
 ---
 // Landing page — not managed by Starlight
 import '../styles/landing.css';
-import bannerDark from '../assets/garmr-banner-dark.png';
-import bannerLight from '../assets/garmr-banner-light.png';
 import { Image } from 'astro:assets';
 import illustration from '../assets/garmr-policy-agent.jpeg';
 
@@ -32,10 +30,19 @@ const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
 
 <!-- Hero -->
 <section class="hero">
-	<div class="hero-banner">
-		<img src={bannerDark.src} alt="Garmr" class="banner-dark" />
-		<img src={bannerLight.src} alt="Garmr" class="banner-light" />
-	</div>
+	<figure class="hero-banner">
+		<Image
+			src={illustration}
+			alt="Garmr, a great black wolf in a spiked collar, stands in the snow beside the Go gopher dressed as a Viking, with stones carved with CUE and policy scrolls at their feet."
+			width={1600}
+			widths={[640, 1024, 1600]}
+			sizes="(max-width: 48rem) 100vw, 48rem"
+			format="webp"
+			loading="eager"
+			fetchpriority="high"
+		/>
+		<figcaption>In Norse myth, Garmr guards the gate. Here it guards your deployments — with Go at its side and CUE set in stone.</figcaption>
+	</figure>
 	<h1>Policy as Code, Powered by CUE</h1>
 	<p class="tagline">
 		Define type-safe policies. Evaluate with three-outcome decisions.
@@ -46,22 +53,6 @@ const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
 		<a href={`${base}docs/`} class="btn btn-secondary">Read the Docs</a>
 		<a href="https://github.com/infrashift/garmr" class="btn btn-ghost">GitHub &rarr;</a>
 	</div>
-</section>
-
-<!-- Illustration -->
-<section class="illustration">
-	<figure>
-		<Image
-			src={illustration}
-			alt="Garmr, a great black wolf in a spiked collar, stands in the snow beside the Go gopher dressed as a Viking, with stones carved with CUE and policy scrolls at their feet."
-			width={1600}
-			widths={[640, 1024, 1600]}
-			sizes="(max-width: 72rem) 100vw, 64rem"
-			format="webp"
-			loading="lazy"
-		/>
-		<figcaption>In Norse myth, Garmr guards the gate. Here it guards your deployments — with Go at its side and CUE set in stone.</figcaption>
-	</figure>
 </section>
 
 <!-- Features -->
@@ -170,9 +161,6 @@ function setTheme(theme) {
 	html.setAttribute('data-theme', theme);
 	localStorage.setItem('garmr-theme', theme);
 	toggle.textContent = theme === 'dark' ? '\u263E' : '\u2600';
-	// Show/hide banner variants
-	document.querySelectorAll('.banner-dark').forEach(el => el.style.display = theme === 'dark' ? 'block' : 'none');
-	document.querySelectorAll('.banner-light').forEach(el => el.style.display = theme === 'light' ? 'block' : 'none');
 }
 
 toggle.addEventListener('click', () => {

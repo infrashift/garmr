@@ -29,11 +29,6 @@
 	--border: hsl(0, 0%, 85%);
 }
 
-/* Theme-aware image variants (dark shown by default) */
-.logo-light, .banner-light { display: none; }
-[data-theme='light'] .logo-dark, [data-theme='light'] .banner-dark { display: none; }
-[data-theme='light'] .logo-light, [data-theme='light'] .banner-light { display: block; }
-
 html {
 	scroll-behavior: smooth;
 }
@@ -124,13 +119,22 @@ a:hover {
 }
 
 .hero-banner {
-	max-width: 18rem;
-	margin: 0 auto 2rem;
+	max-width: 48rem;
+	margin: 0 auto 2.5rem;
 }
 
 .hero-banner img {
+	display: block;
 	width: 100%;
 	height: auto;
+	border-radius: 0.75rem;
+	border: 1px solid var(--border);
+}
+
+.hero-banner figcaption {
+	margin-top: 0.75rem;
+	font-size: 0.9rem;
+	color: var(--text-muted);
 }
 
 .hero h1 {
@@ -199,28 +203,6 @@ a:hover {
 
 .btn-ghost:hover {
 	color: var(--text);
-}
-
-/* Illustration */
-.illustration {
-	max-width: 64rem;
-	margin: 0 auto;
-	padding: 0 clamp(1rem, 4vw, 2rem);
-}
-
-.illustration img {
-	display: block;
-	width: 100%;
-	height: auto;
-	border-radius: 0.75rem;
-	border: 1px solid var(--border);
-}
-
-.illustration figcaption {
-	margin-top: 0.75rem;
-	text-align: center;
-	font-size: 0.9rem;
-	color: var(--text-muted);
 }
 
 /* Features */

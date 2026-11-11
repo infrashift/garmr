@@ -187,3 +187,44 @@ tests: [{
 		t.Errorf("expected 1 skipped, got %+v", result)
 	}
 }
+
+// A test input that does not satisfy the policy's spec.inputSchema is an
+// error: fixtures that drift from the producer's contract fail, unless the
+// test pins the error.
+func TestRunner_InputSchemaChecked(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.cue")
+	src := strings.Replace(testPolicyFile, `description: "replica cap"`, `description: "replica cap"
+		inputSchema: {kind: string, spec: replicas: int}`, 1)
+	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewRunner(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.LoadPolicyFile(path); err != nil {
+		t.Fatalf("LoadPolicyFile: %v", err)
+	}
+
+	suite, err := r.LoadTestSuite(`
+policy: "replica-cap"
+tests: [
+	{name: "conforms", input: {kind: "Deployment", spec: replicas: 2}, expect: decision: "allow"},
+	{name: "drifted", input: {kind: "Deployment", spec: replica: 2}, expect: decision: "allow"},
+	{name: "pinned", input: {kind: "Deployment", spec: replica: 2}, expect: error: true},
+]
+`)
+	if err != nil {
+		t.Fatalf("LoadTestSuite: %v", err)
+	}
+	result := r.RunSuite(context.Background(), suite)
+	if result.Passed != 2 || result.Failed != 1 {
+		t.Fatalf("passed %d, failed %d; want conforms and pinned to pass, drifted to fail: %+v", result.Passed, result.Failed, result.Results)
+	}
+	for _, res := range result.Results {
+		if res.Name == "drifted" && !strings.Contains(strings.Join(res.Failures, " "), "inputSchema") {
+			t.Errorf("drifted failure does not mention the schema: %v", res.Failures)
+		}
+	}
+}

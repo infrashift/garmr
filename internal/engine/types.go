@@ -93,6 +93,11 @@ type CompiledPolicy struct {
 	Enforcement EnforcementSpec
 	Evaluation  EvaluationConfig
 	LoadedAt    time.Time
+
+	// inputSchema is the policy's spec.inputSchema as self-contained CUE
+	// source, or "" when it declares none. Compiled only by callers that
+	// set EvaluateOptions.CheckInputSchema.
+	inputSchema string
 }
 
 func (p *CompiledPolicy) key() string { return policyKey(p.Namespace, p.Name) }
@@ -215,6 +220,12 @@ type EvaluateRequest struct {
 type EvaluateOptions struct {
 	// IncludePassed returns passing rule results as well as failures.
 	IncludePassed bool
+
+	// CheckInputSchema validates the input against the spec.inputSchema of
+	// each policy about to be evaluated, failing with ErrInvalidInput when
+	// it does not conform. It compiles CUE per request, so the server does
+	// not set it; `garmr eval --local` and `garmr test` do.
+	CheckInputSchema bool
 }
 
 // EvaluateResponse contains evaluation results.

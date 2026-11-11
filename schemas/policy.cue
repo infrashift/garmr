@@ -45,6 +45,17 @@ import "time"
 	// within a policy.
 	rules: [#Rule, ...#Rule]
 
+	// The input this policy is written for, as a CUE definition, usually
+	// imported from the producer's schema package:
+	//   import report "example.com/reviewer/report"
+	//   spec: inputSchema: report.#ReviewReport
+	// At load, every input path the rules read (expressions, when, message
+	// placeholders, details) is checked against it, so a field the schema
+	// does not allow is a load error. `garmr eval --local` and `garmr test`
+	// also validate the input against it before evaluating. The server does
+	// not validate requests against it.
+	inputSchema?: _
+
 	// How violations are handled
 	enforcement: #Enforcement
 

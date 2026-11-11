@@ -58,6 +58,20 @@ func (e *Engine) Evaluate(ctx context.Context, req *EvaluateRequest) (*EvaluateR
 		return resp, nil
 	}
 
+	// Input contract: a caller that opted in learns that the input is not
+	// the document the policies were written for before any rule runs,
+	// instead of from rules failing on fields that are not there.
+	if req.Options.CheckInputSchema {
+		for _, p := range policies {
+			if p.inputSchema == "" || (len(p.Enforcement.Exceptions) > 0 && e.matchesException(p.Enforcement.Exceptions, res)) {
+				continue
+			}
+			if err := checkInputSchema(p, input); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	// Timeout enforcement: the minimum timeout across all policies bounds
 	// the whole evaluation.
 	if minTimeout := minPolicyTimeout(policies); minTimeout > 0 {

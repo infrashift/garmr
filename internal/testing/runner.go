@@ -424,10 +424,14 @@ func (r *Runner) evaluate(ctx context.Context, namespace, name string, input map
 		Decision: "allow", // Default
 	}
 
+	// A test input that does not satisfy the policy's spec.inputSchema is
+	// an error, not a verdict: fixtures drift with the producer's contract
+	// and should say so. A test can pin that with `expect: error: true`.
 	resp, err := r.eng.Evaluate(ctx, &engine.EvaluateRequest{
 		Input:     input,
 		Policies:  []string{name},
 		Namespace: namespace,
+		Options:   engine.EvaluateOptions{CheckInputSchema: true},
 	})
 	if err != nil {
 		result.Error = err.Error()

@@ -146,9 +146,14 @@ func (e *Engine) compilePolicy(val cue.Value, name, namespace string) (*Compiled
 	if err != nil {
 		return nil, fmt.Errorf("hashing policy: %w", err)
 	}
-	raw, err := val.LookupPath(cue.ParsePath("spec")).MarshalJSON()
+	specVal := val.LookupPath(cue.ParsePath("spec"))
+	raw, err := marshalSpec(specVal)
 	if err != nil {
 		return nil, fmt.Errorf("decoding spec: %w", err)
+	}
+	var schema *schemaPathChecker
+	if s := specVal.LookupPath(cue.ParsePath("inputSchema")); s.Exists() {
+		schema = &schemaPathChecker{schema: s}
 	}
 	var spec specDoc
 	if err := json.Unmarshal(raw, &spec); err != nil {
@@ -222,6 +227,11 @@ func (e *Engine) compilePolicy(val cue.Value, name, namespace string) (*Compiled
 		if err != nil {
 			return nil, fmt.Errorf("rule %s: %w", r.ID, err)
 		}
+		if schema != nil {
+			if err := checkRulePaths(*schema, &c, msg, details); err != nil {
+				return nil, fmt.Errorf("rule %s: %w", r.ID, err)
+			}
+		}
 		cp.Rules = append(cp.Rules, CompiledRule{
 			ID:              r.ID,
 			Description:     r.Description,
@@ -238,7 +248,82 @@ func (e *Engine) compilePolicy(val cue.Value, name, namespace string) (*Compiled
 		})
 	}
 	cp.Rules = sortRules(cp.Rules, cp.Evaluation.Order)
+	if schema != nil {
+		if cp.inputSchema, err = inputSchemaSource(schema.schema); err != nil {
+			return nil, fmt.Errorf("spec.inputSchema: %w", err)
+		}
+	}
 	return cp, nil
+}
+
+// marshalSpec renders spec to JSON for decoding, leaving out inputSchema:
+// a schema is a type, not data, and cannot be rendered as JSON.
+func marshalSpec(spec cue.Value) ([]byte, error) {
+	iter, err := spec.Fields()
+	if err != nil {
+		return nil, err
+	}
+	fields := map[string]json.RawMessage{}
+	for iter.Next() {
+		name := iter.Selector().Unquoted()
+		if name == "inputSchema" {
+			continue
+		}
+		b, err := iter.Value().MarshalJSON()
+		if err != nil {
+			return nil, err
+		}
+		fields[name] = b
+	}
+	return json.Marshal(fields)
+}
+
+// checkRulePaths checks every input path a rule reads (its expression and
+// guard, message placeholders and details) against the inputSchema.
+func checkRulePaths(schema schemaPathChecker, c *exprCompiler, msg msgTemplate, details []detailPath) error {
+	for _, p := range c.paths {
+		if err := schema.check(p); err != nil {
+			return err
+		}
+	}
+	for _, part := range msg.parts {
+		if part.path == nil {
+			continue
+		}
+		if err := checkTemplatePath(schema, c, *part.path, part.alias); err != nil {
+			return fmt.Errorf("message: %w", err)
+		}
+	}
+	for _, d := range details {
+		if err := checkTemplatePath(schema, c, d.path, d.alias); err != nil {
+			return fmt.Errorf("details.%s: %w", d.name, err)
+		}
+	}
+	return nil
+}
+
+// checkTemplatePath checks a message or details path. An alias path is
+// valid if it is valid for any forEach that binds the alias.
+func checkTemplatePath(schema schemaPathChecker, c *exprCompiler, p fieldPath, alias bool) error {
+	if !alias {
+		return schema.check(recordedPath(p))
+	}
+	elems := c.aliasElems[p.segs[0].key]
+	if len(elems) == 0 { // _index, or an alias over no input
+		return nil
+	}
+	var first error
+	for _, elem := range elems {
+		segs := append(append([]pathSeg(nil), elem...), p.segs[1:]...)
+		err := schema.check(recordedPath{raw: p.raw, segs: segs})
+		if err == nil {
+			return nil
+		}
+		if first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 // comparePriority orders rules with a priority before rules without, then by

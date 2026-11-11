@@ -360,3 +360,29 @@ func TestOutputFindingsTruncated(t *testing.T) {
 		t.Errorf("yaml output does not mark truncation:\n%s", yaml)
 	}
 }
+
+// --local validates the input against spec.inputSchema; the server path
+// does not, so the same input evaluates there.
+func TestRunEval_LocalChecksInputSchema(t *testing.T) {
+	policy := strings.Replace(testDenyPolicy, `description: "Policy that denies"`,
+		`description: "Policy that denies"
+	inputSchema: close({env: "production" | "staging"})`, 1)
+	dir := writePolicyDir(t, policy)
+
+	cmd := localEvalFlagSet(t)
+	cmd.Flags().Set("policy-dir", dir)
+	cmd.Flags().Set("data", `{"env":"production","enviroment":"prod"}`)
+	stubExit(t)
+	var err error
+	captureOutput(t, func() { err = runEval(cmd, nil) })
+	if err == nil || !strings.Contains(err.Error(), "enviroment: field not allowed") {
+		t.Errorf("err = %v, want the schema violation reported", err)
+	}
+
+	startDirServer(t, dir)
+	remote := localEvalFlagSet(t)
+	remote.Flags().Set("data", `{"env":"production","enviroment":"prod"}`)
+	if got := runEvalJSON(t, remote); got.body["decision"] != "allow" {
+		t.Errorf("server decision = %v, want allow (the server does not check inputSchema)", got.body["decision"])
+	}
+}

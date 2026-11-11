@@ -936,6 +936,62 @@ evaluation error for the rule.
 
 ---
 
+## Input Schema (`spec.inputSchema`)
+
+A policy is written for a particular document: a Kubernetes manifest, a
+release record, a review report. When that document has a CUE definition,
+the policy can declare it:
+
+```cue
+import report "example.com/policies/schema/report"
+
+reviewGate: {
+    apiVersion: "policy.garmr.io/v1"
+    kind:       "Policy"
+    metadata: {name: "review-gate", namespace: "review"}
+    spec: {
+        inputSchema: report.#ReviewReport
+        ...
+    }
+}
+```
+
+**At load**, every input path the policy's rules read is checked against
+the schema. That covers expression paths, `when`, `forEach` `where`,
+`compare` and `func` operands, message placeholders, and `details`. A path
+the schema rules out is a load error naming the rule:
+
+```
+rule REV-001: path "risk_scor": spec.inputSchema does not allow field "risk_scor" in the input
+```
+
+Alias paths are checked against the list's element type
+(`f.severity_level` inside a `forEach` over `findings` is checked against
+`findings[*]`). Only what the schema definitely rules out is reported: a
+field a closed definition does not allow, or a path that steps into a scalar
+or indexes a non-list. Where the schema leaves the shape open (`_`, `{...}`,
+a `[string]: T` pattern), the rest of the path is accepted. Because the check
+runs in the loader, it applies at server startup and reload, in
+`garmr validate`, and in `/v1/validate`.
+
+**Before evaluating**, `garmr eval --policy-dir` and `garmr test` also
+validate the input itself against the schema of each policy about to run. A
+document that does not conform is an error (exit `2`) listing what is wrong,
+for example `risk_score: incomplete value int; risk_scor: field not allowed`,
+instead of a decision built from rules failing on fields that are not there.
+In `garmr test`, a case can pin that with `expect: error: true`.
+
+The server does **not** validate requests against the schema. Its
+evaluation path compiles no CUE, which is where its speed comes from. A
+caller that wants the input contract enforced runs `garmr eval
+--policy-dir` or validates the document on its own side.
+
+The schema is part of the policy's content, so changing it changes the
+policy's digest. It must be self-contained once its imports are resolved;
+see [Policy loading: importing schemas](/garmr/docs/reference/policy-loading/#importing-input-schemas).
+
+---
+
 ## Rule Applicability (`when`)
 
 A rule with `when` applies only to inputs for which the `when` expression
@@ -1062,6 +1118,9 @@ report it):
 - `evaluation.timeout` is not a positive Go duration (`"250ms"`, `"30s"`).
 - Two policy documents declare the same `namespace/name`.
 - A policy uses the reserved namespace `__system__`.
+- A rule reads an input path that `spec.inputSchema` does not allow
+  ([Input Schema](#input-schema-specinputschema)).
+- A rule declares `details` but has no `forEach`.
 
 ---
 

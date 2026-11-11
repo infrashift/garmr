@@ -39,6 +39,10 @@ LOCAL EVALUATION:
   evaluation. Use it in CI and in offline environments. No audit record
   is written; the request ID still appears in the output.
 
+  Locally, the input is also checked against each policy's
+  spec.inputSchema, when one is declared. Input that does not conform is
+  an error (exit 2) that lists what is wrong, rather than a decision.
+
 NAMESPACE FILTERING:
   Policies are organized into namespaces for logical grouping.
   Use -n/--namespace to filter by namespace.
@@ -203,7 +207,9 @@ func evaluateLocal(policyDir string, input map[string]interface{}, opts client.E
 		Input:     wireInput,
 		Namespace: opts.Namespace,
 		Policies:  opts.Policies,
-		Options:   engine.EvaluateOptions{IncludePassed: opts.IncludePassed},
+		// Validate the input against each policy's spec.inputSchema: the
+		// CLI can afford the CUE compile the server's hot path avoids.
+		Options: engine.EvaluateOptions{IncludePassed: opts.IncludePassed, CheckInputSchema: true},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("evaluation failed: %w", err)

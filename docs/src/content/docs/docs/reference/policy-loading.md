@@ -163,6 +163,32 @@ decided against (see `TODO.md`). The schema describing it has been removed.
 Use CUE packages, as above.
 :::
 
+### Importing input schemas
+
+A policy's [`spec.inputSchema`](/garmr/docs/reference/policy-schema/#input-schema-specinputschema)
+is usually a definition owned by whoever produces the input. Import it as a
+CUE package. Imports resolve against the `cue.mod` of the policy
+repository, so the loader needs no network access as long as the package is
+in the repository:
+
+```
+/policies/
+├── cue.mod/module.cue         # module: "example.com/policies"
+├── schema/report/report.cue   # package report: #ReviewReport, copied or
+│                              # synced from the producer at a pinned version
+└── review/gate.cue            # import "example.com/policies/schema/report"
+```
+
+The loader compiles every directory, so the schema package itself is loaded
+too. It declares no `kind: "Policy"` documents, so it contributes no
+policies. Pin the copy to the producer's release the same way you would pin
+a dependency, and update it in the same change that adapts the policies:
+the load-time path check reports any rule the new schema breaks.
+
+Fetching the schema from a CUE registry at load time is not recommended:
+a policy load would then depend on the network, and in offline environments
+it would fail.
+
 ## Container Deployment Example
 
 The repository's `Containerfile` builds the production image (`make

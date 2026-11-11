@@ -130,6 +130,11 @@ jobs and offline environments where no server is running. A local evaluation
 writes no audit record, but the request ID (from `--request-id`, or a
 generated UUID) still appears in the `-o json` output.
 
+Local evaluation also checks the input against each policy's
+[`spec.inputSchema`](/garmr/docs/reference/policy-schema/#input-schema-specinputschema),
+when one is declared. A document that does not conform exits `2` with the
+list of problems. The server does not perform this check.
+
 **Exit Codes:**
 
 | Code | Meaning |

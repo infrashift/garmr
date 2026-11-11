@@ -93,6 +93,11 @@ type CompiledPolicy struct {
 	Enforcement EnforcementSpec
 	Evaluation  EvaluationConfig
 	LoadedAt    time.Time
+
+	// inputSchema is the policy's spec.inputSchema as self-contained CUE
+	// source, or "" when it declares none. Compiled only by callers that
+	// set EvaluateOptions.CheckInputSchema.
+	inputSchema string
 }
 
 func (p *CompiledPolicy) key() string { return policyKey(p.Namespace, p.Name) }
@@ -115,6 +120,16 @@ type CompiledRule struct {
 	// uses them.
 	expr node
 	msg  msgTemplate
+
+	// details are the rule's `details` paths, in name order. A rule with
+	// details records its failing forEach elements as findings.
+	details []detailPath
+
+	// skippedBy lists the exceptions (indexes into the policy's
+	// Enforcement.Exceptions) that skip this whole rule; waivesElements is
+	// set when an exception waives some of its forEach elements.
+	skippedBy      []int
+	waivesElements bool
 }
 
 // EvaluationConfig controls rule evaluation behavior.
@@ -190,14 +205,27 @@ type EnforcementSpec struct {
 	Exceptions []ExceptionSpec `json:"exceptions"`
 }
 
-// ExceptionSpec exempts inputs its selector matches from a policy, until
-// Expiry if set.
+// ExceptionSpec waives a policy, some of its rules, or some of their
+// forEach elements, for the inputs Match selects (every input when nil),
+// until Expiry if set.
 type ExceptionSpec struct {
-	Name   string           `json:"name"`
-	Reason string           `json:"reason"`
-	Match  ResourceSelector `json:"match"`
-	Expiry *time.Time       `json:"expiry"`
+	Name     string                 `json:"name"`
+	Reason   string                 `json:"reason"`
+	Match    *ResourceSelector      `json:"match"`
+	Expiry   *time.Time             `json:"expiry"`
+	Rules    []string               `json:"rules"`
+	Findings *ExceptionFindingsSpec `json:"findings"`
 }
+
+// ExceptionFindingsSpec selects the forEach elements an exception waives:
+// those of the forEach with alias As for which Where holds.
+type ExceptionFindingsSpec struct {
+	As    string `json:"as"`
+	Where any    `json:"where"`
+}
+
+// policyWide reports whether the exception skips the whole policy.
+func (x ExceptionSpec) policyWide() bool { return len(x.Rules) == 0 }
 
 // EvaluateRequest contains the input for policy evaluation.
 type EvaluateRequest struct {
@@ -211,6 +239,12 @@ type EvaluateRequest struct {
 type EvaluateOptions struct {
 	// IncludePassed returns passing rule results as well as failures.
 	IncludePassed bool
+
+	// CheckInputSchema validates the input against the spec.inputSchema of
+	// each policy about to be evaluated, failing with ErrInvalidInput when
+	// it does not conform. It compiles CUE per request, so the server does
+	// not set it; `garmr eval --local` and `garmr test` do.
+	CheckInputSchema bool
 }
 
 // EvaluateResponse contains evaluation results.
@@ -266,6 +300,17 @@ type RuleResult struct {
 	Remediation     string
 	Bindings        map[string]any
 
+	// Findings lists the failing forEach elements, for rules that declare
+	// `details`: one per element, at most MaxFindings.
+	// FindingsTruncated reports that more elements failed.
+	Findings          []Finding
+	FindingsTruncated bool
+
+	// Waived lists the forEach elements an exception waived, each naming
+	// the exception. Reported even when the rule passed, so a waiver is
+	// never silent. At most MaxFindings.
+	Waived []Finding
+
 	// Evaluation metadata
 	Priority *int
 	Category string
@@ -273,6 +318,25 @@ type RuleResult struct {
 
 	// If this rule caused fail-fast termination
 	CausedTermination bool
+}
+
+// MaxFindings caps the findings reported for one rule, so a forEach over a
+// large input cannot grow a response without bound.
+const MaxFindings = 100
+
+// Finding is one failing forEach element: where it is in the input, and the
+// values the rule's `details` selected from it.
+type Finding struct {
+	// Path is the element's input path, e.g. "risk_files[3]" or
+	// "spec.containers[1].ports[0]" for a nested forEach.
+	Path string
+	// Index is the element's position in its list.
+	Index int
+	// Details maps each `details` name to the value its path resolved to.
+	// Names whose path did not resolve are left out.
+	Details map[string]any
+	// Exception names the exception that waived the element (Waived only).
+	Exception string
 }
 
 // Metrics contains performance metrics.

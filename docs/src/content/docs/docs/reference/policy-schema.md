@@ -490,8 +490,9 @@ whose fields are missing from the input fail closed.
 
 Iterates over arrays and validates each element.
 
-**Policies:** `foreach-all`, `foreach-any` (`action: warn`) and
-`foreach-nested` in `example-policies/advanced-operators/foreach.cue`
+**Policies:** `foreach-all`, `foreach-any` (`action: warn`),
+`foreach-nested` and `foreach-optional` in
+`example-policies/advanced-operators/foreach.cue`
 
 ```cue
 {id: "FE-001", expr: forEach: {
@@ -522,6 +523,7 @@ Iterates over arrays and validates each element.
 | `condition` | expression | Expression evaluated per element (required) |
 | `mode` | string | `all` (default): every element must pass; `any`: at least one |
 | `allowEmpty` | bool | Whether an empty list passes (default `true`) |
+| `allowMissing` | bool | Whether an absent path, or `null`, counts as an empty list (default `false`: a missing list fails) |
 | `where` | expression | Only elements for which this holds are checked (and counted) |
 | `count` | length operators | Check how many elements pass instead of `mode`/`allowEmpty` (see below) |
 
@@ -532,6 +534,29 @@ field of that name, anywhere inside a `forEach`. `forEach` nests, and an
 inner condition can refer to both aliases. A missing list fails; a non-list
 value is an evaluation error. The evaluation deadline is checked on every
 element.
+
+**Optional lists.** Many producers omit a list when it is empty, or emit
+`null` for it. Set `allowMissing: true` on such a list and an absent or null
+value is treated as `[]`, after which `allowEmpty`, `where` and `count` decide
+as usual. It is off by default, so a misspelled path or a producer that
+stopped sending the field fails the check instead of passing it silently.
+
+```cue
+// risk_files is omitted when the review found none.
+expr: forEach: {
+    path:         "risk_files"
+    as:           "r"
+    allowMissing: true
+    condition: match: {path: "r.score", lessThan: 8}
+}
+message: "{{r.path}} has risk score {{r.score}}"
+```
+
+A message that names elements (`{{r.path}}`) is rendered once per failing
+element. If the rule fails with no element to name (the list is missing or
+empty, nothing matched in `mode: "any"`, or a check outside the `forEach`
+failed), the engine's own reason, such as `path 'risk_files' not found`,
+is reported instead of the unrendered template.
 
 **Filtering.** `where` selects the elements the condition applies to; the
 others are skipped entirely. `allowEmpty`, `mode: "any"` and `count` apply
@@ -911,6 +936,62 @@ evaluation error for the rule.
 
 ---
 
+## Input Schema (`spec.inputSchema`)
+
+A policy is written for a particular document: a Kubernetes manifest, a
+release record, a review report. When that document has a CUE definition,
+the policy can declare it:
+
+```cue
+import report "example.com/policies/schema/report"
+
+reviewGate: {
+    apiVersion: "policy.garmr.io/v1"
+    kind:       "Policy"
+    metadata: {name: "review-gate", namespace: "review"}
+    spec: {
+        inputSchema: report.#ReviewReport
+        ...
+    }
+}
+```
+
+**At load**, every input path the policy's rules read is checked against
+the schema. That covers expression paths, `when`, `forEach` `where`,
+`compare` and `func` operands, message placeholders, and `details`. A path
+the schema rules out is a load error naming the rule:
+
+```
+rule REV-001: path "risk_scor": spec.inputSchema does not allow field "risk_scor" in the input
+```
+
+Alias paths are checked against the list's element type
+(`f.severity_level` inside a `forEach` over `findings` is checked against
+`findings[*]`). Only what the schema definitely rules out is reported: a
+field a closed definition does not allow, or a path that steps into a scalar
+or indexes a non-list. Where the schema leaves the shape open (`_`, `{...}`,
+a `[string]: T` pattern), the rest of the path is accepted. Because the check
+runs in the loader, it applies at server startup and reload, in
+`garmr validate`, and in `/v1/validate`.
+
+**Before evaluating**, `garmr eval --policy-dir` and `garmr test` also
+validate the input itself against the schema of each policy about to run. A
+document that does not conform is an error (exit `2`) listing what is wrong,
+for example `risk_score: incomplete value int; risk_scor: field not allowed`,
+instead of a decision built from rules failing on fields that are not there.
+In `garmr test`, a case can pin that with `expect: error: true`.
+
+The server does **not** validate requests against the schema. Its
+evaluation path compiles no CUE, which is where its speed comes from. A
+caller that wants the input contract enforced runs `garmr eval
+--policy-dir` or validates the document on its own side.
+
+The schema is part of the policy's content, so changing it changes the
+policy's digest. It must be self-contained once its imports are resolved;
+see [Policy loading: importing schemas](/garmr/docs/reference/policy-loading/#importing-input-schemas).
+
+---
+
 ## Rule Applicability (`when`)
 
 A rule with `when` applies only to inputs for which the `when` expression
@@ -958,8 +1039,58 @@ message: "container {{c.name}} exposes undeclared port {{p.containerPort}}"
 reports `container app exposes undeclared port 9229; container debug
 exposes undeclared port 6060`. Identical renderings are reported once.
 Elements visited inside a branch that ultimately passed (an `any` or `not`)
-are not reported. A placeholder that does not resolve is left as written. A
-malformed placeholder is a load error.
+are not reported. If the rule fails with no element to name (a missing or
+empty list, `mode: "any"`, `count`, or a check outside the `forEach`), the
+engine's reason is reported instead of the template. Any other placeholder
+that does not resolve is left as written. A malformed placeholder is a load
+error.
+
+### Structured findings (`details`)
+
+A message is text for people. A machine that consumes the result (a CI step
+annotating a pull-request line, a tool linking a violation back to its own
+record) needs the failing element's data. Declare which values to report in
+`details`, and each failing element becomes a **finding** next to the
+message:
+
+```cue
+{
+    id: "REV-002"
+    description: "No major findings"
+    severity: "high"
+    expr: forEach: {
+        path: "findings", as: "f", allowMissing: true
+        condition: not: match: {path: "f.severity", equals: "major"}
+    }
+    message: "{{f.file}}:{{f.start_line}} is a major finding"
+    details: {file: "f.file", line: "f.start_line", severity: "f.severity"}
+}
+```
+
+```json
+"findings": [
+  {"path": "findings[3]", "index": 3,
+   "details": {"file": "internal/auth/token.go", "line": 41, "severity": "major"}}
+]
+```
+
+- `details` maps a name to a path, with the same rules as message
+  placeholders: an alias path reads the failing element, `_index` its
+  position, any other path the input. Values are reported as they appear in
+  the input (numbers stay numbers). A path that does not resolve for an
+  element is left out of that finding.
+- `path` is the element's location in the input; for nested `forEach` it is
+  the full path (`spec.containers[1].ports[0]`). `index` is its position in
+  its own list.
+- Findings are reported for the elements that failed a `forEach` in its
+  default mode, the same ones a message names. `mode: "any"`, `count`, and
+  checks outside the `forEach` have no failing element, so they report none.
+- The policy decides what is echoed back: a finding carries only the values
+  `details` names, never the whole element.
+- At most 100 findings per rule; `findings_truncated` is set when more
+  failed. A rule without `details` reports no findings and costs nothing
+  extra.
+- `details` requires a `forEach` in the rule (a load error otherwise).
 
 Bindings render the value the check used: `{{.datetime}}` is the parsed
 time normalized to RFC3339 (not the input as written), `{{.version}}` the
@@ -982,11 +1113,16 @@ report it):
 - A `forEach` has no `condition`, an `as` that is not an identifier, or
   `count` together with `mode` or `allowEmpty`.
 - Two rules in the policy share an `id`.
-- An exception `match` selects everything (it would disable the policy), or
-  its `expiry` is not an RFC3339 timestamp.
+- A policy-wide exception has no `match`, or one that selects everything (it
+  would disable the policy); an exception names a rule the policy does not
+  have, uses `findings` without `rules`, or a `findings.as` alias no listed
+  rule binds; or its `expiry` is not an RFC3339 timestamp.
 - `evaluation.timeout` is not a positive Go duration (`"250ms"`, `"30s"`).
 - Two policy documents declare the same `namespace/name`.
 - A policy uses the reserved namespace `__system__`.
+- A rule reads an input path that `spec.inputSchema` does not allow
+  ([Input Schema](#input-schema-specinputschema)).
+- A rule declares `details` but has no `forEach`.
 
 ---
 
@@ -1084,6 +1220,7 @@ other fields you want to carry along.
 | `priority` | no | 0–9999; lower is evaluated first under the `priority` orders |
 | `message` | no | Violation message template ([Messages](#messages)) |
 | `remediation` | no | How to fix a violation; returned with the result |
+| `details` | no | Values to report per failing `forEach` element ([Structured findings](#structured-findings-details)) |
 | `url` | no | Documentation link |
 | `category` | no | A grouping such as `security`; used by the category filters below |
 | `tags` | no | A list of strings; used by the tag filters below |
@@ -1108,17 +1245,60 @@ not evaluated and does not appear in the results.
 |-------|---------|-------------|
 | `action` | — | `deny`, `warn` or `audit` ([Enforcement Actions](#enforcement-actions)) |
 | `dryRun` | `false` | Report violations but lower this policy's `deny` to `warn` |
-| `exceptions` | none | Inputs the whole policy skips (below) |
+| `exceptions` | none | Waivers for the whole policy, some rules, or some findings (below) |
 
-An exception skips the **whole policy** for inputs its `match` selector
-matches; the selector has the same fields as a target selector and must
-narrow something.
+An exception applies to the inputs its `match` selector selects, until its
+`expiry`. What it waives depends on `rules` and `findings`:
+
+| Form | Waives | `match` |
+|------|--------|---------|
+| no `rules` | The **whole policy** is skipped | Required, and must narrow something: one matching everything would disable the policy |
+| `rules: [...]` | Those **rules** are skipped (out of scope, like a category filter) | Optional; omitted means every input |
+| `rules` + `findings` | In those rules, the **forEach elements** that `findings.where` selects | Optional |
+
+```cue
+enforcement: {
+    action: "deny"
+    exceptions: [{
+        name:   "accepted-legacy-crypto"
+        reason: "MD5 for cache keys, not security; replacement tracked"
+        ticket: "SEC-1042"
+        rules:  ["REV-001"]
+        findings: {
+            as:    "f"
+            where: match: {path: "f.fingerprint", in: ["9f2c41e0b7d3"]}
+        }
+    }]
+}
+```
+
+**Per-finding waivers.** `findings` attaches to every `forEach` in the
+listed rules whose alias is `findings.as`. Each element that `where` selects
+is skipped, in the same way as an element the forEach's own `where` leaves
+out: it is not checked and not counted. It is reported under `waived`, with
+its path, its `details` and the exception's name. A rule with waived
+elements is always reported, even when it passes, so a waiver is never
+silent.
+
+Match on a **stable identifier** for the finding, not on its message or
+line number. A good identifier is a fingerprint the producer computes from
+the file, the rule, the title and the normalized line content, so the
+waiver survives unrelated edits. A `where` that cannot be evaluated waives
+nothing, and the element is checked as usual. When the policy has an
+[`inputSchema`](#input-schema-specinputschema), the `where` paths are
+checked against it like rule paths.
+
+At load, an exception is rejected if it names a rule the policy does not
+have, uses `findings` without `rules`, or uses a `findings.as` alias for
+which a listed rule has no `forEach`.
 
 | Exception field | Required | Description |
 |-----------------|----------|-------------|
-| `name` | yes | Identifier |
+| `name` | yes | Identifier, reported on waived findings |
 | `reason` | yes | Why the exception exists |
-| `match` | yes | Resource selector: `kind`, `apiGroup`, `names`, `namespaces`, `labels`, `annotations` |
+| `match` | without `rules` | Resource selector: `kind`, `apiGroup`, `names`, `namespaces`, `labels`, `annotations` |
+| `rules` | no | Rule ids the exception applies to (non-empty; each must exist) |
+| `findings` | no | `{as, where}`: waive the elements of the listed rules' `forEach` with alias `as` for which `where` holds |
 | `expiry` | no | RFC3339 timestamp; after it the exception no longer applies |
 | `approvedBy` | no | List of approvers, for the record |
 | `ticket` | no | Issue tracker reference, for the record |

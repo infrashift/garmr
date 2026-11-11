@@ -21,6 +21,45 @@ type exprCompiler struct {
 	// aliases collects every forEach alias in the rule, so the rule's
 	// message template can tell alias references from input paths.
 	aliases map[string]bool
+
+	// paths records every input path the rule reads, resolved to the input
+	// root, for checking against the policy's inputSchema. aliasElem maps
+	// each alias in scope to its element's root path (findings[*]);
+	// aliasElems keeps every binding of each alias, for message and details
+	// paths, which are resolved after compilation.
+	paths      []recordedPath
+	aliasElem  map[string][]pathSeg
+	aliasElems map[string][][]pathSeg
+
+	// waivers are the exceptions waiving elements of this rule's forEach
+	// nodes; each attaches to every forEach whose alias it names.
+	waivers []*pendingWaiver
+}
+
+// pendingWaiver is an exception's findings selector, before it is compiled
+// into the forEach nodes it applies to.
+type pendingWaiver struct {
+	exc      int // index into the policy's exceptions
+	name, as string
+	where    any
+	attached bool
+}
+
+// rootSegs resolves a compiled path to segments from the input root. A path
+// that reads no input (`_index`, or an element of a forEach over `_index`)
+// resolves to nil.
+func (c *exprCompiler) rootSegs(src pathSrc, scope []string) []pathSeg {
+	switch {
+	case src.isIndex:
+		return nil
+	case src.frame >= 0:
+		base := c.aliasElem[scope[src.frame]]
+		if base == nil {
+			return nil
+		}
+		return append(append([]pathSeg(nil), base...), src.p.segs[1:]...)
+	}
+	return src.p.segs
 }
 
 type field struct {
@@ -146,11 +185,21 @@ func (c *exprCompiler) path(s string, scope []string) (pathSrc, error) {
 		}
 		for i := len(scope) - 1; i >= 0; i-- {
 			if scope[i] == first.key {
-				return pathSrc{p: p, frame: i}, nil
+				src := pathSrc{p: p, frame: i}
+				c.record(src, scope)
+				return src, nil
 			}
 		}
 	}
-	return pathSrc{p: p, frame: -1}, nil
+	src := pathSrc{p: p, frame: -1}
+	c.record(src, scope)
+	return src, nil
+}
+
+func (c *exprCompiler) record(src pathSrc, scope []string) {
+	if segs := c.rootSegs(src, scope); segs != nil {
+		c.paths = append(c.paths, recordedPath{raw: src.p.raw, segs: segs})
+	}
 }
 
 func str(v any, what string) (string, error) {
@@ -282,6 +331,11 @@ func (c *exprCompiler) forEach(v any, scope []string) (node, error) {
 				return nil, fmt.Errorf("allowEmpty must be a boolean")
 			}
 			hasAllowEmpty = true
+		case "allowMissing":
+			var ok bool
+			if n.allowMissing, ok = f.v.(bool); !ok {
+				return nil, fmt.Errorf("allowMissing must be a boolean")
+			}
 		case "count":
 			if n.count, err = intChecks(f.v, "count", "'%s': %d elements matched, expected %s %d", n.src.p.raw); err != nil {
 				return nil, err
@@ -303,6 +357,27 @@ func (c *exprCompiler) forEach(v any, scope []string) (node, error) {
 	if c.aliases != nil {
 		c.aliases[alias] = true
 	}
+	// Bind the alias to its element's root path while the condition and
+	// where compile, restoring any outer binding of the same name after.
+	var elem []pathSeg
+	if list := c.rootSegs(n.src, scope); list != nil {
+		elem = append(append([]pathSeg(nil), list...), pathSeg{isAll: true})
+	}
+	if c.aliasElem == nil {
+		c.aliasElem, c.aliasElems = map[string][]pathSeg{}, map[string][][]pathSeg{}
+	}
+	prev, hadPrev := c.aliasElem[alias]
+	c.aliasElem[alias] = elem
+	if elem != nil {
+		c.aliasElems[alias] = append(c.aliasElems[alias], elem)
+	}
+	defer func() {
+		if hadPrev {
+			c.aliasElem[alias] = prev
+		} else {
+			delete(c.aliasElem, alias)
+		}
+	}()
 	inner := append(append([]string(nil), scope...), alias)
 	if n.cond, err = c.expr(cond, inner); err != nil {
 		return nil, fmt.Errorf("condition: %w", err)
@@ -311,6 +386,17 @@ func (c *exprCompiler) forEach(v any, scope []string) (node, error) {
 		if n.where, err = c.expr(where, inner); err != nil {
 			return nil, fmt.Errorf("where: %w", err)
 		}
+	}
+	for _, w := range c.waivers {
+		if w.as != alias {
+			continue
+		}
+		cond, err := c.expr(w.where, inner)
+		if err != nil {
+			return nil, fmt.Errorf("exception %q: findings.where: %w", w.name, err)
+		}
+		n.waivers = append(n.waivers, elemWaiver{exc: w.exc, name: w.name, where: cond})
+		w.attached = true
 	}
 	return n, nil
 }

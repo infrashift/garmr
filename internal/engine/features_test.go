@@ -69,6 +69,43 @@ func TestMessage_InputPathsAndUnresolved(t *testing.T) {
 	}
 }
 
+// A message naming forEach elements, on a rule that failed with no failing
+// element, reports the engine's reason instead of the unrendered template.
+func TestMessage_AliasTemplateWithoutFailingElement(t *testing.T) {
+	cases := []struct {
+		name, expr string
+		input      map[string]any
+		want       string
+	}{
+		{"missing list", `{forEach: {path: "risk_files", as: "r", condition: {match: {path: "r.score", lessThan: 5}}}}`,
+			map[string]any{}, "path 'risk_files' not found"},
+		{"empty list not allowed", `{forEach: {path: "risk_files", as: "r", allowEmpty: false, condition: {match: {path: "r.score", lessThan: 5}}}}`,
+			map[string]any{"risk_files": []any{}}, "path 'risk_files' is an empty array"},
+		{"any mode", `{forEach: {path: "risk_files", as: "r", mode: "any", condition: {match: {path: "r.score", lessThan: 5}}}}`,
+			map[string]any{"risk_files": []any{map[string]any{"path": "a.go", "score": 9.0}}}, "no items in 'risk_files' matched the condition"},
+		{"check outside the forEach", `{all: [{match: {path: "ok", equals: true}}, {forEach: {path: "risk_files", as: "r", condition: {match: {path: "r.score", lessThan: 5}}}}]}`,
+			map[string]any{"ok": false, "risk_files": []any{}}, "expected"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := msgOf(decideRule(t, tc.expr, "{{r.path}} is too risky", tc.input))
+			if strings.Contains(got, "{{") {
+				t.Errorf("message = %q, left placeholders unrendered", got)
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("message = %q, want it to contain %q", got, tc.want)
+			}
+		})
+	}
+
+	// With a failing element, the template still renders per element.
+	got := msgOf(decideRule(t, `{forEach: {path: "risk_files", as: "r", condition: {match: {path: "r.score", lessThan: 5}}}}`,
+		"{{r.path}} is too risky", map[string]any{"risk_files": []any{map[string]any{"path": "a.go", "score": 9.0}}}))
+	if got != "a.go is too risky" {
+		t.Errorf("message = %q, want %q", got, "a.go is too risky")
+	}
+}
+
 // Failures inside a branch that ended up passing (any, not) are not
 // reported, even when another check in the rule fails.
 func TestMessage_DropsFailuresFromPassingBranches(t *testing.T) {

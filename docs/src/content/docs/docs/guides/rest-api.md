@@ -288,6 +288,24 @@ Each entry in `results` carries `policy_name`, `policy_namespace`, `rule_id`,
 operator-facing hint for fixing the violation, which `garmr eval` renders
 beneath each failure.
 
+A rule that declares `details` also carries `findings`: one object per
+failing `forEach` element, with its input `path`, its `index`, and the
+`details` values the policy selected. At most 100 are listed, and
+`findings_truncated` is `true` when more failed. Both fields are omitted when
+there is nothing to report. See
+[Structured findings](/garmr/docs/reference/policy-schema/#structured-findings-details).
+
+```json
+"findings": [
+  {"path": "findings[3]", "index": 3, "details": {"file": "internal/auth/token.go", "line": 41}}
+]
+```
+
+Elements that an exception waived are listed under `waived`, in the same
+shape plus `exception`, the name of the exception that waived them. A rule
+with waived elements is reported even when it passed, and even without
+`include_passed`.
+
 A partial evaluation is not the same as a clean one: check
 `evaluation_mode.rules_skipped` and `terminated_early` before treating an
 `allow` as full coverage.
@@ -796,7 +814,10 @@ Caller-controlled fields (`request_id`, `user_agent`, `principal`,
 bytes and marked `…[truncated]`, keeping each record small enough to be
 written atomically when `audit.path` is `stdout`.
 
-Query audit logs by request ID:
+Query audit logs by request ID. For CI callers, use the identity of the
+change being gated (`<repo>#<pr>@<sha>`) as `X-Request-Id`, so the record
+joins with the tool that produced the input; see
+[CI/CD: correlating decisions](/garmr/docs/guides/cicd/#correlating-decisions-with-the-change-they-gated).
 
 ```bash
 jq 'select(.request_id == "pipeline-12345")' /var/log/garmr/audit.log

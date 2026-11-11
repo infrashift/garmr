@@ -7,10 +7,11 @@ tags:
   - "dependencies"
   - "go-toolchain"
 created: "2026-11-01T13:52:20-06:00"
-timestamp: "2026-11-01T13:52:26-06:00"
+timestamp: "2026-11-11T04:56:03-06:00"
 description: "govulncheck found 21 reachable vulnerabilities on Go 1.25.14 and the pinned otel/grpc/x/net/x/text versions; fixing them needs Go 1.26 and module upgrades."
 sources:
   - resource: "https://github.com/infrashift/garmr/pull/1"
+status: "deprecated"
 ---
 
 # govulncheck baseline 2026-11-01
@@ -46,3 +47,8 @@ All of them are also present on `main`:
 - Planned remedy: a dedicated PR that moves the module to Go 1.26 and
   upgrades the modules above. It is tracked in TODO.md under "Toolchain
   and dependency vulnerabilities (2026-11-01)".
+
+
+## Superseded (2026-11-11)
+
+Resolved by the Go 1.26.11 bump and module upgrades on `feature/improvements-for-vizzini`. govulncheck now reports no vulnerabilities. See [govulncheck clean after Go 1.26.11 bump 2026-11-11](./govulncheck-clean-after-go-1-26-11-bump-2026-11-11--01a1ca400faa.md).

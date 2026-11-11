@@ -132,15 +132,18 @@ This document describes what Garmr can do today and where it's headed.
 
 Reviewed 2026-10-03 and recorded in `TODO.md`; deliberately not done yet:
 
-- **Per-rule exceptions and actions** -- exempt specific rules from an
-  exception, and override `enforcement.action` per rule (one policy cannot
-  mix deny and warn today)
-- **`spec.inputSchema`** -- a CUE definition the input must satisfy,
-  reported as a distinct invalid-input verdict
+- **Per-rule actions** -- override `enforcement.action` per rule (one policy
+  cannot mix deny and warn today). Per-rule and per-finding *exceptions*
+  shipped on 2026-11-11.
 - **More builtins** -- x509 parsing, `jwt.decode`, `sha256`, `glob.match`,
   `replace`, JSON/YAML parse
 - **Tooling** -- rule coverage in `garmr test`, a `garmr bench` wrapper
 - **Embedding** -- a small public `pkg/garmr` (`Compile`, `Evaluate`)
+
+Done on 2026-11-11: `spec.inputSchema` (rule paths checked at load; input
+validated by `garmr eval --policy-dir` and `garmr test`, not by the server),
+per-rule and per-finding exceptions, structured findings (`details`),
+`forEach` `allowMissing`, and server-less `garmr eval --policy-dir`.
 
 Not pursued: runtime external data (`http.send`), bundle signing, partial
 evaluation, WASM, Envoy ext_authz.

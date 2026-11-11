@@ -1,0 +1,12 @@
+{
+  "kind": "CodeReviewReport",
+  "repository": "acme/api",
+  "pr": 482,
+  "head_sha": "3f9c2e1d8a7b",
+  "verdict": "approve",
+  "risk_score": 3.5,
+  "findings": [
+    {"file": "internal/cache/key.go", "start_line": 41, "severity": "major", "title": "MD5 used for hashing", "fingerprint": "9f2c41e0b7d3"},
+    {"file": "README.md", "start_line": 3, "severity": "nit", "title": "Typo"}
+  ]
+}

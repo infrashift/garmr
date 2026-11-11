@@ -1,0 +1,18 @@
+{
+  "kind": "CodeReviewReport",
+  "repository": "acme/api",
+  "pr": 483,
+  "head_sha": "77ab01c4e2f9",
+  "verdict": "request_changes",
+  "risk_score": 8,
+  "findings": [
+    {"file": "internal/auth/token.go", "start_line": 88, "severity": "critical", "title": "Token compared with ==", "fingerprint": "c1d2e3f4a5b6"},
+    {"file": "internal/cache/key.go", "start_line": 41, "severity": "major", "title": "MD5 used for hashing", "fingerprint": "9f2c41e0b7d3"}
+  ],
+  "risk_files": [
+    {"path": "internal/auth/token.go", "score": 9}
+  ],
+  "skipped": [
+    {"name": "fuzz"}
+  ]
+}

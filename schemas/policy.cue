@@ -45,6 +45,17 @@ import "time"
 	// within a policy.
 	rules: [#Rule, ...#Rule]
 
+	// The input this policy is written for, as a CUE definition, usually
+	// imported from the producer's schema package:
+	//   import report "example.com/reviewer/report"
+	//   spec: inputSchema: report.#ReviewReport
+	// At load, every input path the rules read (expressions, when, message
+	// placeholders, details) is checked against it, so a field the schema
+	// does not allow is a load error. `garmr eval --local` and `garmr test`
+	// also validate the input against it before evaluating. The server does
+	// not validate requests against it.
+	inputSchema?: _
+
 	// How violations are handled
 	enforcement: #Enforcement
 
@@ -146,8 +157,20 @@ import "time"
 	//   {{path}}   an input field, or a forEach alias path ({{c.name}});
 	//              {{_index}} is the element's position
 	// A message that refers to a forEach alias is rendered once per failing
-	// element. A placeholder that does not resolve is left as written.
+	// element. If the rule fails with no failing element to name (the list
+	// is missing or empty, or a check outside the forEach failed), the
+	// engine's own reason is reported instead. Any other placeholder that
+	// does not resolve is left as written.
 	message?: string
+
+	// Values to report for each failing forEach element, as structured
+	// findings next to the message: a name per value and the path to read
+	// it from. Paths follow the message rules: `f.file` reads the failing
+	// element (alias f), `_index` its position, anything else the input.
+	//   details: {file: "f.file", line: "f.start_line", severity: "f.severity"}
+	// Requires a forEach in the rule. Each finding also carries the
+	// element's input path ("findings[3]") and index.
+	details?: [string]: string
 
 	// Documentation URL
 	url?: string
@@ -415,6 +438,13 @@ import "time"
 	// Whether an empty list passes (true, the default) or fails (false)
 	allowEmpty?: bool
 
+	// Whether an absent path, or a null value, counts as an empty list
+	// (then allowEmpty, where and count decide). Off by default: a missing
+	// list fails the check, so a misspelled path or a producer that stopped
+	// sending the field cannot pass silently. Set it for lists the input
+	// omits when they are empty.
+	allowMissing?: bool
+
 	// Count the elements that pass the condition and check the count, e.g.
 	// `count: {lessThanOrEqual: 1}` for "at most one". Replaces mode and
 	// allowEmpty; an empty list counts 0.
@@ -435,13 +465,33 @@ import "time"
 
 #EnforcementAction: "deny" | "warn" | "audit"
 
-// Exception skips the whole policy for inputs its selector matches. The
-// selector must narrow something: an exception matching everything would
-// disable the policy.
+// Exception waives a policy, some of its rules, or some of their findings,
+// for the inputs `match` selects:
+//
+//   - no `rules`: the whole policy is skipped. `match` is required and must
+//     narrow something: an exception matching everything would disable the
+//     policy.
+//   - `rules`: only those rules are skipped. `match` is optional.
+//   - `rules` and `findings`: in those rules, the elements of the forEach
+//     whose alias is `findings.as` that satisfy `findings.where` are waived:
+//     skipped like elements `where` excludes, and reported as waived.
+//       rules: ["REV-002"]
+//       findings: {as: "f", where: match: {path: "f.fingerprint", in: ["9f2c41e0"]}}
+//     A `where` that cannot be evaluated waives nothing.
 #Exception: {
 	name:   string
 	reason: string
-	match:  #ResourceSelector
+	match?: #ResourceSelector
+
+	// Rule ids this exception applies to. Each must exist in the policy.
+	rules?: [string, ...string]
+
+	// Waive individual forEach elements of the listed rules. Every listed
+	// rule must have a forEach with alias `as`.
+	findings?: {
+		as:    string & =~"^[A-Za-z][A-Za-z0-9_]*$"
+		where: #Expression
+	}
 
 	// Expiration (RFC3339). After this instant the exception no longer applies.
 	expiry?: time.Time

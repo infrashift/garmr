@@ -83,8 +83,11 @@ garmr eval --input <file> [flags]
 | `--format` | `-f` | Input format (json, yaml, auto) | `auto` |
 | `--policy` | `-p` | Specific policies to evaluate (repeatable): `namespace/name`, or a bare `metadata.name` resolved inside `--namespace` (`default` when it is unset). A qualified name ignores `--namespace`. | |
 | `--namespace` | `-n` | Policy namespace to evaluate (single value) | |
-| `--request-id` | | Request ID for audit correlation | |
+| `--request-id` | | Request ID for audit correlation. Use the change's identity (`<repo>#<pr>@<sha>`), see [CI/CD: correlating decisions](/garmr/docs/guides/cicd/#correlating-decisions-with-the-change-they-gated) | generated UUID |
 | `--verbose` | `-v` | Show rule details. Default shows details on fail, hides on pass. `--verbose=false` always hides. | unset |
+| `--policy-dir` | | Evaluate in-process against this policy directory (walked recursively) or `.cue` file, without a server. Implies `--local`. | |
+| `--local` | | Evaluate in-process. Requires `--policy-dir`. | `false` |
+| `--timeout` | | Evaluation timeout for local evaluation | `10s` |
 
 **Examples:**
 
@@ -113,7 +116,24 @@ garmr eval --input deployment.json --verbose
 
 # Suppress rule details even on failure (show only the decision)
 garmr eval --input deployment.json --verbose=false
+
+# Evaluate locally, with no server
+garmr eval --local --policy-dir policies/ --input review.json -n review
 ```
+
+**Local evaluation.** `--policy-dir` loads the policies with the server's own
+loader and evaluates them with the same engine, in-process. A load error is
+fatal (exit `2`), as it is for the server: a partial policy set is never
+evaluated. The output, decision and exit codes match what a server loaded
+from the same directory returns. That makes local evaluation suitable for CI
+jobs and offline environments where no server is running. A local evaluation
+writes no audit record, but the request ID (from `--request-id`, or a
+generated UUID) still appears in the `-o json` output.
+
+Local evaluation also checks the input against each policy's
+[`spec.inputSchema`](/garmr/docs/reference/policy-schema/#input-schema-specinputschema),
+when one is declared. A document that does not conform exits `2` with the
+list of problems. The server does not perform this check.
 
 **Exit Codes:**
 
@@ -121,7 +141,7 @@ garmr eval --input deployment.json --verbose=false
 |------|---------|
 | 0 | ALLOW or WARN - Nothing blocked the evaluation |
 | 1 | DENY - A deny-enforced policy failed |
-| 2 | The evaluation did not run: server unreachable, a `4xx`/`5xx` from the server, unreadable input, bad flags |
+| 2 | The evaluation did not run: server unreachable, a `4xx`/`5xx` from the server, a local policy load error, unreadable input, bad flags |
 
 A deny and an outage have different exit codes, so a CI step can fail the
 build on `1` and retry or alert on `2` without parsing the output.

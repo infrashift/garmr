@@ -10,10 +10,12 @@ This guide describes how to integrate Garmr into your CI/CD pipelines for automa
 
 ## Overview
 
-Garmr can be integrated into your pipelines in two ways:
+Garmr can be integrated into your pipelines in three ways:
 
 1. **CLI (`garmr eval`)** - Recommended for most use cases
-2. **REST API** - For advanced integrations or non-shell environments
+2. **CLI, local (`garmr eval --policy-dir`)** - No server: the job evaluates
+   in-process against the policies checked out with it
+3. **REST API** - For advanced integrations or non-shell environments
 
 Both methods support request ID correlation for audit trail tracking.
 
@@ -47,6 +49,23 @@ Capture the code with `rc=0; garmr eval ... || rc=$?`. That form works under
 into `tee` or another command: a pipeline's status is the last command's
 unless `set -o pipefail` is on, so the exit code would be lost.
 
+### Without a Server
+
+When the policies live in the repository (or a checkout the job can reach),
+the job does not need a running `garmr-server`:
+
+```bash
+rc=0
+garmr eval --policy-dir policies/ --input review.json -n review \
+  --request-id "${CI_JOB_ID}" -o json > decision.json || rc=$?
+```
+
+The policies are loaded with the server's loader and evaluated by the same
+engine, so the decision, the output and the exit codes are the ones a server
+would return. A policy that fails to load exits `2`. Run
+`garmr validate policies/` in the same job if you want the load error
+reported on its own.
+
 ### Request ID for Audit Correlation
 
 Always pass a request ID to correlate pipeline runs with audit logs:
@@ -54,6 +73,38 @@ Always pass a request ID to correlate pipeline runs with audit logs:
 ```bash
 # Use your CI system's job/run ID
 garmr eval --input deployment.json --request-id "${CI_JOB_ID}"
+```
+
+#### Correlating decisions with the change they gated
+
+When another tool produces the input (a code reviewer writing a report, a
+scanner, a release builder), give that tool and `garmr eval` **the same
+identifier for the change**, so the producer's record and garmr's decision
+can be joined later. Use the change itself, not the job:
+
+```
+<repo>#<pr>@<sha>       pull requests:  acme/api#482@3f9c2e1d
+<repo>@<sha>            pushes/releases: acme/api@3f9c2e1d
+```
+
+- Prefer the pull-request number plus the head commit. A re-run on the same
+  commit reuses the id, and a new push gets a new one.
+- Keep it short and printable: the audit log cuts caller-controlled fields at
+  256 bytes.
+- The id appears in `-o json` output as `request_id`, in the server's
+  `X-Request-Id` response header, and on every server audit record.
+  `garmr eval --policy-dir` writes no audit record, so keep its JSON output
+  (for example as a CI artifact) if you need the decision later.
+
+```bash
+ID="${GITHUB_REPOSITORY}#${PR_NUMBER}@${GITHUB_SHA::12}"
+reviewer --request-id "$ID" > review.json          # the producer records it
+rc=0
+garmr eval --policy-dir policies/ --input review.json \
+  --request-id "$ID" -o json > decision.json || rc=$?
+
+# Later: find the server-side decision for that change
+jq --arg id "$ID" 'select(.request_id == $id)' /var/log/garmr/audit.log
 ```
 
 ### JSON Output for Parsing

@@ -57,6 +57,12 @@ type evalCtx struct {
 	index []int
 	names []string
 
+	// lists holds each frame's list as a concrete input path
+	// ("spec.containers", "spec.containers[2].ports"), for findings. Kept
+	// only when wantFrames is set (constant for a rule's evaluation), so
+	// rules that record nothing never grow it.
+	lists []string
+
 	// Bindings feed message templates; collected only for rules whose
 	// message uses them.
 	wantBinds bool
@@ -68,13 +74,62 @@ type evalCtx struct {
 	// recorded.
 	wantFrames bool
 	failures   [][]frame
+
+	// activeExc marks the policy's exceptions that apply to this input
+	// (unexpired, match selects it); waived records the elements they
+	// waived during the current rule.
+	activeExc []bool
+	waived    []waivedElem
 }
 
-// frame is one forEach element, as recorded for message rendering.
+// elemWaiver is an exception's findings selector, compiled in the scope of
+// the forEach it waives elements of.
+type elemWaiver struct {
+	exc   int
+	name  string
+	where node
+}
+
+// waivedBy returns the name of the first active exception that waives the
+// current element, or "". A selector that fails or cannot be evaluated
+// waives nothing: the element is checked as usual.
+func (n forEachNode) waivedBy(ec *evalCtx) string {
+	for _, w := range n.waivers {
+		if w.exc >= len(ec.activeExc) || !ec.activeExc[w.exc] {
+			continue
+		}
+		mark, bmark := len(ec.failures), len(ec.binds)
+		r := w.where.eval(ec)
+		ec.failures, ec.binds = ec.failures[:mark], ec.binds[:bmark]
+		if r.out == pass {
+			return w.name
+		}
+	}
+	return ""
+}
+
+// waivedElem is a forEach element an exception waived.
+type waivedElem struct {
+	exception string
+	frames    []frame
+}
+
+// frame is one forEach element, as recorded for message rendering and
+// findings.
 type frame struct {
 	name  string
 	item  any
 	index int
+	list  string // the element's list as an input path
+}
+
+// snapshot copies the current forEach frames, outermost first.
+func (ec *evalCtx) snapshot() []frame {
+	snap := make([]frame, len(ec.items))
+	for i := range ec.items {
+		snap[i] = frame{name: ec.names[i], item: ec.items[i], index: ec.index[i], list: ec.lists[i]}
+	}
+	return snap
 }
 
 // recordFailure snapshots the current frames, unless a deeper forEach
@@ -83,11 +138,7 @@ func (ec *evalCtx) recordFailure(mark int) {
 	if !ec.wantFrames || len(ec.failures) > mark {
 		return
 	}
-	snap := make([]frame, len(ec.items))
-	for i := range ec.items {
-		snap[i] = frame{ec.names[i], ec.items[i], ec.index[i]}
-	}
-	ec.failures = append(ec.failures, snap)
+	ec.failures = append(ec.failures, ec.snapshot())
 }
 
 func (ec *evalCtx) bind(name string, v any) {
@@ -374,6 +425,15 @@ type forEachNode struct {
 	anyMode    bool
 	allowEmpty bool
 
+	// waivers are exceptions that waive matching elements: a waived
+	// element is skipped like one `where` excludes, and recorded.
+	waivers []elemWaiver
+
+	// allowMissing treats an absent path, or a null value, as an empty
+	// list. Off by default: a missing list fails, so a typo or a producer
+	// that stopped emitting the field cannot pass a check silently.
+	allowMissing bool
+
 	// where, when set, selects the elements the condition applies to;
 	// the others are skipped entirely (not checked, not counted).
 	where node
@@ -383,8 +443,23 @@ type forEachNode struct {
 	count []func(any) result
 }
 
+// listPath is the list's concrete input path, for findings: the path as
+// written, or for a list inside an outer element, that element's path plus
+// the rest ("spec.containers[2].ports"). Called only when frames are
+// recorded.
+func (n forEachNode) listPath(ec *evalCtx) string {
+	if n.src.frame < 0 {
+		return n.src.p.raw
+	}
+	outer := n.src.frame
+	return ec.lists[outer] + "[" + strconv.Itoa(ec.index[outer]) + "]" + n.src.p.raw[len(n.src.p.segs[0].key):]
+}
+
 func (n forEachNode) eval(ec *evalCtx) result {
 	v, found, _ := n.src.resolve(ec)
+	if n.allowMissing && (!found || v == nil) {
+		v, found = []any{}, true
+	}
 	if !found {
 		return failf("path '%s' not found", n.src.p)
 	}
@@ -403,11 +478,17 @@ func (n forEachNode) eval(ec *evalCtx) result {
 	ec.items = append(ec.items, nil)
 	ec.index = append(ec.index, 0)
 	ec.names = append(ec.names, n.alias)
+	if ec.wantFrames {
+		ec.lists = append(ec.lists, n.listPath(ec))
+	}
 	depth := len(ec.items) - 1
 	defer func() {
 		ec.items = ec.items[:depth]
 		ec.index = ec.index[:depth]
 		ec.names = ec.names[:depth]
+		if ec.wantFrames {
+			ec.lists = ec.lists[:depth]
+		}
 	}()
 
 	start := len(ec.failures)
@@ -433,6 +514,12 @@ func (n forEachNode) eval(ec *evalCtx) result {
 			}
 			if w.out != pass {
 				ec.binds = ec.binds[:bmark]
+				continue
+			}
+		}
+		if len(n.waivers) > 0 {
+			if name := n.waivedBy(ec); name != "" {
+				ec.waived = append(ec.waived, waivedElem{name, ec.snapshot()})
 				continue
 			}
 		}

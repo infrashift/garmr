@@ -49,6 +49,7 @@ Source: `example-policies/advanced-operators/`
 | `foreach-all` | 2 | Iterates over containers — every container must pass all checks |
 | `foreach-any` | 1 | Iterates over a collection — at least one element must match |
 | `foreach-nested` | 1 | Complex per-element checks combining forEach with logical operators |
+| `foreach-optional` | 2 | Per-element checks over lists the input may omit (`allowMissing`) |
 | `length-constraints` | 5 | Validates array and string lengths using various length operators |
 | `semver-constraints` | 3 | Validates semantic versioning constraints on application versions |
 | `service-selectors` | 1 | Joins Services to Deployments by name (`where`) and checks each selector with `compare` `subsetOf` |
@@ -143,6 +144,24 @@ Source: `example-policies/real-world/`
 |--------|-------|-------------|
 | `release-advisory` | 3 | Warns on non-critical release-quality issues; reports all advisory failures |
 | `release-gate` | 4 | Denies promotion on any critical release violation; reports all critical failures |
+
+
+## `review`
+
+A merge gate over an automated code-review report. It is the worked example
+for `spec.inputSchema`, `forEach` `allowMissing`, structured findings
+(`details`) and a fingerprint waiver, and it has a `garmr test` suite.
+
+Source: `example-policies/real-world/`
+
+| Policy | Rules | Description |
+|--------|-------|-------------|
+| `review-gate` | 4 | Blocks a merge on critical or major findings, a high risk score or a high-risk file; skipped checks must say why |
+
+```bash
+garmr eval --policy-dir example-policies -n review -i testdata/real-world/review-fail.json
+garmr test example-policies/real-world/review-gate.cue
+```
 
 
 ## `security`

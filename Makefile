@@ -7,7 +7,7 @@ BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)"
 
 .PHONY: all build build-server build-cli test test-load lint fmt-check clean docker help bench-e2e \
-	test-storage doc-dev
+	test-storage doc-dev dist release
 
 all: build
 
@@ -141,18 +141,35 @@ install-cli: build-cli ## Install CLI only
 ## Clean
 
 clean: ## Clean build artifacts
-	rm -rf bin/
+	rm -rf bin/ dist/
 	rm -f coverage.out coverage.html
 	rm -f schemas/*.schema.json
 
 ## Release
 
-release: clean test lint build-linux ## Prepare release artifacts
-	mkdir -p dist
-	tar -czf dist/garmr-$(VERSION)-linux-amd64.tar.gz \
-		-C bin garmr-server-linux garmr-linux \
-		-C .. config.example.yaml README.md
-	sha256sum dist/*.tar.gz > dist/checksums.txt
+# Release archives: Linux and macOS on amd64 and arm64 (arm64 = AArch64,
+# including Apple silicon). Pure Go (CGO_ENABLED=0), so every target
+# cross-compiles. The tag workflow (.github/workflows/release.yml) runs
+# `make dist` once per platform; `make release` builds them all locally.
+PLATFORMS   ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
+RELVERSION  := $(VERSION:v%=%)
+REL_LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)
+
+dist: ## Build one release archive in dist/ for GOOS/GOARCH (default: the host)
+	@goos=$${GOOS:-$$(go env GOOS)}; goarch=$${GOARCH:-$$(go env GOARCH)}; \
+	name=garmr_$(RELVERSION)_$${goos}_$${goarch}; \
+	mkdir -p dist/stage/$$name && \
+	for cmd in garmr garmr-server; do \
+		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "$(REL_LDFLAGS)" \
+			-o dist/stage/$$name/$$cmd ./cmd/$$cmd || exit 1; \
+	done && \
+	cp README.md LICENSE config.example.yaml dist/stage/$$name/ && \
+	tar -C dist/stage --owner=0 --group=0 --numeric-owner -czf dist/$$name.tar.gz $$name && \
+	echo "dist/$$name.tar.gz"
+
+release: ## Build every platform archive and dist/SHA256SUMS for VERSION
+	@for p in $(PLATFORMS); do $(MAKE) --no-print-directory dist GOOS=$${p%/*} GOARCH=$${p#*/} || exit 1; done
+	cd dist && sha256sum garmr_$(RELVERSION)_*.tar.gz > SHA256SUMS && cat SHA256SUMS
 
 ## Help
 

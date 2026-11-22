@@ -1,5 +1,6 @@
 bin/
 out/
+dist/
 /garmr
 /garmr-server
 q-audit/

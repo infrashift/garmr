@@ -21,8 +21,25 @@ Garmr provides a flexible, type-safe policy engine that uses [CUE](https://cuela
 
 ### Installation
 
+Download a release archive for Linux or macOS (amd64 or arm64) from
+[GitHub Releases](https://github.com/infrashift/garmr/releases). Each archive
+holds `garmr`, `garmr-server`, `config.example.yaml`, the README and the license.
+
 ```bash
-# Build from source
+VERSION=0.1.0
+OS=linux        # or darwin
+ARCH=amd64      # or arm64
+curl -fsSLO "https://github.com/infrashift/garmr/releases/download/v${VERSION}/garmr_${VERSION}_${OS}_${ARCH}.tar.gz"
+curl -fsSLO "https://github.com/infrashift/garmr/releases/download/v${VERSION}/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS   # macOS: shasum -a 256 --check --ignore-missing SHA256SUMS
+gh attestation verify "garmr_${VERSION}_${OS}_${ARCH}.tar.gz" --repo infrashift/garmr   # optional: SLSA provenance
+tar -xzf "garmr_${VERSION}_${OS}_${ARCH}.tar.gz"
+sudo install "garmr_${VERSION}_${OS}_${ARCH}"/garmr "garmr_${VERSION}_${OS}_${ARCH}"/garmr-server /usr/local/bin/
+```
+
+Or build from source:
+
+```bash
 make build
 
 # Binaries are in ./bin/
@@ -269,3 +286,11 @@ Apache 2.0
 ## Contributing
 
 Contributions are welcome! Please read our contributing guidelines before submitting PRs.
+### Releasing
+
+Releases are tag-driven. Push an annotated `vX.Y.Z` tag on `main`;
+[`.github/workflows/release.yml`](.github/workflows/release.yml) runs `make dist` for
+linux/darwin on amd64/arm64, smoke-tests each archive on a native runner (server
+health, an ALLOW and a DENY evaluation), and publishes a GitHub release with
+`SHA256SUMS` and a SLSA build provenance attestation. `make release VERSION=vX.Y.Z`
+builds the same archives locally in `dist/`.

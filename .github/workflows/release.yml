@@ -1,0 +1,145 @@
+name: Release
+
+# Builds the release archives for a v* tag, smoke-tests each platform's
+# binaries on a native runner, and publishes a GitHub release with
+# SHA256SUMS and a SLSA build provenance attestation.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build the archive
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: make dist GOOS="$GOOS" GOARCH="$GOARCH" VERSION="$VERSION" COMMIT="$COMMIT"
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: garmr-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  smoke:
+    name: smoke ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64, runner: ubuntu-latest, exec: "" }
+          - { goos: linux, goarch: arm64, runner: ubuntu-24.04-arm, exec: "" }
+          - { goos: darwin, goarch: arm64, runner: macos-latest, exec: "" }
+          # Intel macOS binaries on Apple silicon through Rosetta 2.
+          - { goos: darwin, goarch: amd64, runner: macos-latest, exec: "arch -x86_64" }
+    steps:
+      # The example policies and test inputs come from the tagged source.
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Download the archive
+        uses: actions/download-artifact@v8
+        with:
+          name: garmr-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: archive
+
+      - name: Run the binaries
+        env:
+          TAG: ${{ github.ref_name }}
+          EXEC: ${{ matrix.exec }}
+        run: |
+          tar -C archive -xzf archive/garmr_*.tar.gz
+          dir=$(ls -d archive/garmr_*/)
+          $EXEC "${dir}garmr" version | tee version.txt
+          grep -q "Version: *${TAG}$" version.txt
+
+          $EXEC "${dir}garmr-server" --policy-dir ./example-policies \
+            --http-addr 127.0.0.1:8080 --audit-path stdout > server.log 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          server_url=http://127.0.0.1:8080
+          for i in $(seq 1 30); do
+            if $EXEC "${dir}garmr" health --server "$server_url" > health.txt 2>&1; then
+              cat health.txt
+              break
+            fi
+            if [ "$i" = 30 ]; then
+              echo "server never became healthy"; cat server.log; exit 1
+            fi
+            sleep 1
+          done
+          grep -q "version ${TAG})" health.txt
+
+          # Expect ALLOW (exit 0) for the passing pod and DENY (exit 1) for the failing one.
+          $EXEC "${dir}garmr" eval --server "$server_url" -n security \
+            --input testdata/real-world/k8s-pod-security-context-pass.json
+          set +e
+          $EXEC "${dir}garmr" eval --server "$server_url" -n security \
+            --input testdata/real-world/k8s-pod-security-context-fail.yml
+          code=$?
+          set -e
+          test "$code" -eq 1
+
+  release:
+    needs: smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download the archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: garmr-*
+          merge-multiple: true
+          path: dist
+
+      - name: Write SHA256SUMS
+        working-directory: dist
+        run: sha256sum garmr_*.tar.gz > SHA256SUMS && cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/garmr_*.tar.gz
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh release create "$TAG" dist/* --repo "$REPO" --verify-tag \
+            --title "garmr $TAG" --generate-notes

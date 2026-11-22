@@ -6,7 +6,28 @@ sidebar:
   label: "Getting Started"
 ---
 
-## Build
+## Install a release
+
+Download a release archive for Linux or macOS (amd64 or arm64) from
+[GitHub Releases](https://github.com/infrashift/garmr/releases). Each archive
+holds `garmr`, `garmr-server`, `config.example.yaml`, the README and the license.
+
+```bash
+VERSION=0.1.0
+OS=linux        # or darwin
+ARCH=amd64      # or arm64
+curl -fsSLO "https://github.com/infrashift/garmr/releases/download/v${VERSION}/garmr_${VERSION}_${OS}_${ARCH}.tar.gz"
+curl -fsSLO "https://github.com/infrashift/garmr/releases/download/v${VERSION}/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS   # macOS: shasum -a 256 --check --ignore-missing SHA256SUMS
+gh attestation verify "garmr_${VERSION}_${OS}_${ARCH}.tar.gz" --repo infrashift/garmr   # optional: SLSA provenance
+tar -xzf "garmr_${VERSION}_${OS}_${ARCH}.tar.gz"
+sudo install "garmr_${VERSION}_${OS}_${ARCH}"/garmr "garmr_${VERSION}_${OS}_${ARCH}"/garmr-server /usr/local/bin/
+```
+
+The examples below use `./bin/...` from a source build; with a release, call
+`garmr` and `garmr-server` from your `PATH` instead.
+
+## Build from source
 
 ```bash
 # Build both binaries

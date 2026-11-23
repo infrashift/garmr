@@ -1,5 +1,5 @@
 ---
-id: "01a1ca25-3787-7427-8b0d-1e6585f2e9fe"
+x-okfw-id: "01a1ca25-3787-7427-8b0d-1e6585f2e9fe"
 title: "Vizzini integration stays HTTP/JSON"
 type: "decision"
 tags:
@@ -7,8 +7,8 @@ tags:
   - "integration"
   - "api"
   - "grpc"
-created: "2026-11-11T04:26:39-06:00"
-timestamp: "2026-11-11T04:26:39-06:00"
+x-okfw-created: "2026-11-11T04:26:39-06:00"
+x-okfw-timestamp: "2026-11-11T04:26:39-06:00"
 description: "2026-11-11: garmr integrates with the Vizzini PR reviewer as a data contract over HTTP/JSON or in-process eval, not gRPC; six garmr changes on feature/improvements-for-vizzini support it."
 generated:
   by: "claude-code/opus-5.5"

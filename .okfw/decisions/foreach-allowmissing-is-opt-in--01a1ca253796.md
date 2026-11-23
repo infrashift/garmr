@@ -1,5 +1,5 @@
 ---
-id: "01a1ca25-3796-7998-ac24-4a0dae882117"
+x-okfw-id: "01a1ca25-3796-7998-ac24-4a0dae882117"
 title: "forEach allowMissing is opt-in"
 type: "decision"
 tags:
@@ -7,8 +7,8 @@ tags:
   - "forEach"
   - "fail-closed"
   - "schema"
-created: "2026-11-11T04:26:39-06:00"
-timestamp: "2026-11-11T04:26:39-06:00"
+x-okfw-created: "2026-11-11T04:26:39-06:00"
+x-okfw-timestamp: "2026-11-11T04:26:39-06:00"
 description: "2026-11-11: an absent or null forEach list still fails by default; allowMissing: true treats it as empty, chosen over folding missing into allowEmpty, which would have failed open."
 generated:
   by: "claude-code/opus-5.5"

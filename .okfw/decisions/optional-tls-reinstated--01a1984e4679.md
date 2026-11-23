@@ -1,5 +1,5 @@
 ---
-id: "01a1984e-4679-72f3-bf10-0a387e90e443"
+x-okfw-id: "01a1984e-4679-72f3-bf10-0a387e90e443"
 title: "Optional TLS reinstated"
 type: "note"
 tags:
@@ -7,8 +7,8 @@ tags:
   - "mtls"
   - "security"
   - "deployment"
-created: "2026-11-01T12:10:29-06:00"
-timestamp: "2026-11-01T12:10:44-06:00"
+x-okfw-created: "2026-11-01T12:10:29-06:00"
+x-okfw-timestamp: "2026-11-01T12:10:44-06:00"
 description: "2026-11-01: Garmr can terminate TLS and optional mTLS itself outside a mesh; off by default, XFCC ignored under TLS, certs hot-reloaded."
 sources:
   - resource: "plans/mighty-brewing-bunny.md (approved 2026-11-01)"

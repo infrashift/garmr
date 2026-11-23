@@ -1,5 +1,5 @@
 ---
-id: "01a1ca30-fa83-7d5a-826f-3f599b97e218"
+x-okfw-id: "01a1ca30-fa83-7d5a-826f-3f599b97e218"
 title: "inputSchema is enforced at load and in the CLI, not per request"
 type: "decision"
 tags:
@@ -8,8 +8,8 @@ tags:
   - "cue"
   - "performance"
   - "inputSchema"
-created: "2026-11-11T04:39:29-06:00"
-timestamp: "2026-11-11T04:39:29-06:00"
+x-okfw-created: "2026-11-11T04:39:29-06:00"
+x-okfw-timestamp: "2026-11-11T04:39:29-06:00"
 description: "2026-11-11: spec.inputSchema checks rule paths at every policy load and validates input only in garmr eval --local and garmr test; the server never compiles CUE per request."
 generated:
   by: "claude-code/opus-5.5"

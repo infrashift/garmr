@@ -1,13 +1,13 @@
 ---
-id: "01a1ca40-0faa-7a07-9788-15d1ea9c5107"
+x-okfw-id: "01a1ca40-0faa-7a07-9788-15d1ea9c5107"
 title: "govulncheck clean after Go 1.26.11 bump 2026-11-11"
 type: "Finding"
 tags:
   - "security"
   - "dependencies"
   - "go-toolchain"
-created: "2026-11-11T04:55:58-06:00"
-timestamp: "2026-11-11T04:55:58-06:00"
+x-okfw-created: "2026-11-11T04:55:58-06:00"
+x-okfw-timestamp: "2026-11-11T04:55:58-06:00"
 description: "2026-11-11: go.mod moved to go 1.26.11 and otel/grpc/x/net were upgraded; govulncheck went from 22 reachable vulnerabilities to none, and golangci-lint v1.64.8 still builds under it."
 generated:
   by: "claude-code/opus-5.5"

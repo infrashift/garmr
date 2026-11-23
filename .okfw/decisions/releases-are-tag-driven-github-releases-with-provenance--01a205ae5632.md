@@ -1,13 +1,13 @@
 ---
-id: "01a205ae-5632-7448-97d9-2247dcf05f95"
+x-okfw-id: "01a205ae-5632-7448-97d9-2247dcf05f95"
 title: "Releases are tag-driven GitHub releases with provenance"
 type: "decision"
 tags:
   - "release"
   - "ci"
   - "supply-chain"
-created: "2026-11-22T17:54:01-06:00"
-timestamp: "2026-11-22T17:54:01-06:00"
+x-okfw-created: "2026-11-22T17:54:01-06:00"
+x-okfw-timestamp: "2026-11-22T17:54:01-06:00"
 description: "2026-11-22: garmr ships as cross-compiled linux/darwin amd64/arm64 archives built by a v* tag workflow, smoke-tested natively, with SHA256SUMS and SLSA provenance; v0.1.0 is the first release."
 ---
 

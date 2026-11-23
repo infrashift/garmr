@@ -1,5 +1,5 @@
 ---
-id: "01a1984e-08c1-7abb-8307-f716ee49c2bb"
+x-okfw-id: "01a1984e-08c1-7abb-8307-f716ee49c2bb"
 title: "TLS listener removed in favor of mesh mTLS"
 type: "note"
 tags:
@@ -7,8 +7,8 @@ tags:
   - "security"
   - "deployment"
   - "superseded"
-created: "2026-11-01T12:10:13-06:00"
-timestamp: "2026-11-01T12:10:44-06:00"
+x-okfw-created: "2026-11-01T12:10:13-06:00"
+x-okfw-timestamp: "2026-11-01T12:10:44-06:00"
 description: "2026-07-28: Garmr's TLS listener was deleted because Consul Connect owns mTLS; superseded on 2026-11-01 by optional TLS."
 status: "deprecated"
 sources:

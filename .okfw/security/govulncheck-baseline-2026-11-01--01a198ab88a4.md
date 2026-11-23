@@ -1,13 +1,13 @@
 ---
-id: "01a198ab-88a4-7dbf-8d63-6951b78fc756"
+x-okfw-id: "01a198ab-88a4-7dbf-8d63-6951b78fc756"
 title: "govulncheck baseline 2026-11-01"
 type: "Finding"
 tags:
   - "security"
   - "dependencies"
   - "go-toolchain"
-created: "2026-11-01T13:52:20-06:00"
-timestamp: "2026-11-11T04:56:03-06:00"
+x-okfw-created: "2026-11-01T13:52:20-06:00"
+x-okfw-timestamp: "2026-11-11T04:56:03-06:00"
 description: "govulncheck found 21 reachable vulnerabilities on Go 1.25.14 and the pinned otel/grpc/x/net/x/text versions; fixing them needs Go 1.26 and module upgrades."
 sources:
   - resource: "https://github.com/infrashift/garmr/pull/1"
